@@ -93,3 +93,12 @@ class TestSettingsEnv:
         assert settings.parse is False
         assert settings.log_level == "WARNING"
 
+
+    def test_max_archive_size_via_env(self, tmp_path: Path, monkeypatch) -> None:
+        monkeypatch.setenv("CYBERFW_MAX_ARCHIVE_SIZE", "1024")
+        assert Settings(root_dir=tmp_path).max_archive_size == 1024
+
+    def test_zero_max_archive_size_rejected(self, tmp_path: Path) -> None:
+        """A zero limit would reject every archive — misconfiguration, not a valid choice."""
+        with pytest.raises(ValidationError):
+            Settings(root_dir=tmp_path, max_archive_size=0)

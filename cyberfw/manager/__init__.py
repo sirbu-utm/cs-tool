@@ -97,7 +97,12 @@ class ToolManager:
         spec = self.registry.require(name)
         state_path = self.settings.tools_dir / f".{name}.install.json"
         state_path.unlink(missing_ok=True)
-        installer = ToolInstaller(self.client, self.settings.tools_dir, self.mapping)
+        installer = ToolInstaller(
+            self.client,
+            self.settings.tools_dir,
+            self.mapping,
+            max_archive_size=self.settings.max_archive_size,
+        )
         result = installer.install(spec)
         state_path.write_text(
             json.dumps(

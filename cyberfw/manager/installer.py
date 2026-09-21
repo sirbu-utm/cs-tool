@@ -21,7 +21,11 @@ from cyberfw.manager.platform_map import Mapping, asset_patterns
 from cyberfw.manager.registry import ToolSpec
 from cyberfw.manager.verify import verify_checksum
 
-__all__ = ["InstallResult", "ToolInstaller"]
+__all__ = ["InstallResult", "ToolInstaller", "DEFAULT_MAX_ARCHIVE_SIZE"]
+
+#: Upper bound on what an archive may extract to; ``Settings.max_archive_size``
+#: overrides it (``CYBERFW_MAX_ARCHIVE_SIZE`` / ``config.local.yaml``).
+DEFAULT_MAX_ARCHIVE_SIZE = 512 * 1024 * 1024
 
 #: What the stdlib raises for a damaged or forged archive (bad CRC / size
 #: headers, truncated gzip stream, invalid DEFLATE data).
@@ -48,10 +52,18 @@ class InstallResult:
 class ToolInstaller:
     """Installs one tool into ``tools_dir`` from GitHub Releases."""
 
-    def __init__(self, client: GitHubClient, tools_dir: Path, mapping: Mapping) -> None:
+    def __init__(
+        self,
+        client: GitHubClient,
+        tools_dir: Path,
+        mapping: Mapping,
+        *,
+        max_archive_size: int = DEFAULT_MAX_ARCHIVE_SIZE,
+    ) -> None:
         self.client = client
         self.tools_dir = tools_dir
         self.mapping = mapping
+        self.max_archive_size = max_archive_size
 
     # -- public --------------------------------------------------------------
     def install(self, spec: ToolSpec) -> InstallResult:
@@ -170,7 +182,7 @@ class ToolInstaller:
         return target
 
     def _assert_extract_size(self, total: int, archive_path: Path) -> None:
-        limit = int(os.environ.get("CYBERFW_MAX_ARCHIVE", 512 * 1024 * 1024))
+        limit = self.max_archive_size
         if total > limit:
             raise DownloadError(
                 f"Archive {archive_path.name} would extract to {total} bytes (limit {limit})"

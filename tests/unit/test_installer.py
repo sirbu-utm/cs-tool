@@ -287,3 +287,33 @@ def test_missing_binary_message_mentions_blocked_file(tmp_path: Path, monkeypatc
 
     with pytest.raises(ToolNotFoundError, match="downloaded but its executable could not be read"):
         ensure_binary(tools_dir, "naabu", "naabu")
+
+
+class TestArchiveSizeLimit:
+    def test_limit_is_the_value_the_installer_was_given(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """``Settings.max_archive_size`` must reach the installer; it used to read a private
+        ``CYBERFW_MAX_ARCHIVE`` env var instead, so the documented setting was silently ignored."""
+        monkeypatch.delenv("CYBERFW_MAX_ARCHIVE", raising=False)
+        archive = _zip_bytes({"subfinder": b"#!/bin/sh\n" + b"x" * 100})
+        asset = ReleaseAsset("subfinder_1.0.0_linux_amd64.zip", "http://x", len(archive))
+        release = GitHubRelease(tag="v1.0.0", assets=[asset], checksums_url=None)
+        installer = ToolInstaller(
+            _FakeClient(release, archive), tmp_path / "tools_bin", Mapping("linux", "amd64"), max_archive_size=16
+        )
+
+        with pytest.raises(DownloadError, match="limit 16"):
+            installer.install(_spec())
+
+    def test_archive_within_limit_installs(self, tmp_path: Path) -> None:
+        payload = b"#!/bin/sh\necho ok\n"
+        archive = _zip_bytes({"subfinder": payload})
+        asset = ReleaseAsset("subfinder_1.0.0_linux_amd64.zip", "http://x", len(archive))
+        release = GitHubRelease(tag="v1.0.0", assets=[asset], checksums_url=None)
+        installer = ToolInstaller(
+            _FakeClient(release, archive),
+            tmp_path / "tools_bin",
+            Mapping("linux", "amd64"),
+            max_archive_size=len(payload),
+        )
+
+        assert installer.install(_spec()).binary.read_bytes() == payload

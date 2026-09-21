@@ -63,7 +63,11 @@ class Settings(BaseSettings):
     log_level: str = Field(default="INFO", description="Console/file log level (DEBUG/INFO/WARNING/ERROR).")
     log_to_file: bool = Field(default=True, description="Also write diagnostics to logs/cyberfw.log.")
     # Security.
-    max_archive_size: int = Field(default=512 * 1024 * 1024, description="Largest accepted archive in bytes.")
+    max_archive_size: int = Field(
+        default=512 * 1024 * 1024,
+        gt=0,
+        description="Largest size (bytes) a downloaded tool archive may extract to.",
+    )
 
     @field_validator("log_level", mode="before")
     @classmethod
