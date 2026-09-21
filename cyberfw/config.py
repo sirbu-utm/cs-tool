@@ -48,7 +48,10 @@ class Settings(BaseSettings):
     # Pipeline behaviour.
     concurrency: int = Field(default=4, ge=1, description="Max parallel jobs across pipeline stages.")
     request_timeout: float = Field(
-        default=60.0, gt=0, description="Per-request timeout (seconds) for GitHub API calls and asset downloads."
+        default=60.0,
+        gt=0,
+        description="Network timeout (seconds) for GitHub API calls and asset downloads. Applies to each "
+        "connect/read/write operation, not to the whole transfer, so a slow-but-alive download is not cut off.",
     )
     wordlist: str | None = Field(default=None, description="Custom fuzz wordlist path for Ffuf.")
     parse: bool = Field(

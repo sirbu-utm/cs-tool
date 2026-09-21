@@ -8,24 +8,63 @@ for a short TTL so repeated checks don't burn the rate limit.
 
 from __future__ import annotations
 
+import contextlib
 import fnmatch
 import json
 import shutil
 import time
 from pathlib import Path
+from typing import NoReturn
 
 import httpx
 from tenacity import (
     RetryError,
     retry,
-    retry_if_exception_type,
+    retry_if_exception,
     stop_after_attempt,
     wait_exponential,
 )
 
 from cyberfw.exceptions import DownloadError
 
-__all__ = ["GitHubRelease", "ReleaseAsset", "GitHubClient", "CacheEntry"]
+__all__ = ["GitHubRelease", "ReleaseAsset", "GitHubClient", "CacheEntry", "RETRY_ATTEMPTS"]
+
+#: Attempts made for one HTTP request (API call, asset download, checksum
+#: fetch) before giving up.
+RETRY_ATTEMPTS = 4
+
+
+def _is_transient(exc: BaseException) -> bool:
+    """Retry transport failures and upstream 5xx; never 4xx.
+
+    404/403/429 from the GitHub API are deterministic for far longer than our
+    backoff budget (rate-limit windows are up to an hour), so retrying them only
+    burns quota.
+    """
+    if isinstance(exc, httpx.TransportError):
+        return True
+    return isinstance(exc, httpx.HTTPStatusError) and exc.response.status_code >= 500
+
+
+_transient_retry = retry(
+    retry=retry_if_exception(_is_transient),
+    wait=wait_exponential(multiplier=1.0, max=20.0),
+    stop=stop_after_attempt(RETRY_ATTEMPTS),
+)
+
+
+def _raise_download_error(what: str, exc: BaseException) -> NoReturn:
+    """Convert a tenacity/httpx/OS failure into :class:`DownloadError`.
+
+    Unwraps :class:`RetryError` so the chained cause is the real last failure.
+    """
+    if isinstance(exc, RetryError):
+        cause = exc.last_attempt.exception()
+        raise DownloadError(
+            f"{what} after {RETRY_ATTEMPTS} attempts: {cause}. "
+            "Check your connection, raise CYBERFW_REQUEST_TIMEOUT, or set HTTPS_PROXY."
+        ) from cause
+    raise DownloadError(f"{what}: {exc}") from exc
 
 
 class ReleaseAsset:
@@ -76,8 +115,6 @@ class GitHubClient:
     """Resolves the latest release for a repo, with optional caching."""
 
     API = "https://api.github.com/repos/{owner}/{repo}/releases/latest"
-    #: Attempts made for one asset download before giving up.
-    DOWNLOAD_ATTEMPTS = 4
 
     def __init__(
         self,
@@ -155,12 +192,19 @@ class GitHubClient:
         return GitHubRelease(tag=tag, assets=assets, checksums_url=checksum_url)
 
     # -- network ------------------------------------------------------------
-    @retry(
-        retry=retry_if_exception_type((httpx.HTTPError, DownloadError)),
-        wait=wait_exponential(multiplier=1.0, max=20.0),
-        stop=stop_after_attempt(4),
-    )
+    @_transient_retry
+    def _get(self, url: str, *, headers: dict[str, str] | None = None) -> httpx.Response:
+        """GET ``url`` with the shared transient-retry policy; raises on any 4xx/5xx."""
+        resp = self._client.get(url, headers=headers)
+        resp.raise_for_status()
+        return resp
+
     def latest(self, owner: str, repo: str) -> GitHubRelease:
+        """Resolve the latest release, from cache when fresh.
+
+        Raises :class:`DownloadError` for every failure mode (unreachable API,
+        exhausted retries, rate limit, unknown repository).
+        """
         cached = self._cache_may_load(owner, repo)
         if cached is not None:
             return cached
@@ -175,16 +219,19 @@ class GitHubClient:
             headers["User-Agent"] = "cyberfw"
 
         try:
-            resp = self._client.get(self.API.format(owner=owner, repo=repo), headers=headers)
-        except httpx.HTTPError as exc:  # pragma: no cover - network
-            raise DownloadError(f"GitHub API unreachable for {owner}/{repo}: {exc}") from exc
-
-        if resp.status_code in (429, 403):
-            raise DownloadError(f"GitHub rate limit ({resp.status_code}) for {owner}/{repo}: {resp.text[:200]}")
-        if resp.status_code == 404:
-            raise DownloadError(f"Repository not found: {owner}/{repo}")
-        if resp.status_code != 200:  # pragma: no cover - defensive
-            raise DownloadError(f"Unexpected GitHub status {resp.status_code} for {owner}/{repo}")
+            resp = self._get(self.API.format(owner=owner, repo=repo), headers=headers)
+        except httpx.HTTPStatusError as exc:
+            # Non-transient statuses come straight through tenacity, unwrapped.
+            status = exc.response.status_code
+            if status in (429, 403):
+                raise DownloadError(
+                    f"GitHub rate limit ({status}) for {owner}/{repo}: {exc.response.text[:200]}"
+                ) from exc
+            if status == 404:
+                raise DownloadError(f"Repository not found: {owner}/{repo}") from exc
+            raise DownloadError(f"Unexpected GitHub status {status} for {owner}/{repo}") from exc
+        except (RetryError, httpx.HTTPError) as exc:
+            _raise_download_error(f"GitHub API unreachable for {owner}/{repo}", exc)
 
         payload = resp.json()
         tag = payload.get("tag_name", "")
@@ -209,68 +256,51 @@ class GitHubClient:
             )
         release = GitHubRelease(tag=tag, assets=assets, checksums_url=checksums)
         self._cache_save(owner, repo, release)
-        release.tag = tag
         return release
 
     def download(self, url: str, destination: Path, *, expected_size: int | None = None) -> None:
         """Stream an asset to ``destination``.
 
-        Transient transport failures (timeouts, resets, TLS handshake stalls) are
-        retried with exponential backoff; HTTP status errors are not.
-        Raises :class:`DownloadError` on final failure or size mismatch.
+        Transient failures (timeouts, resets, TLS handshake stalls, upstream 5xx)
+        are retried with exponential backoff; other HTTP status errors are not.
+        Raises :class:`DownloadError` on final failure, filesystem trouble or
+        size mismatch, and never leaves a ``.part`` file behind.
         """
         if not url.startswith(("http://", "https://")):
             raise DownloadError(f"Invalid download URL: {url!r}")
         try:
             self._download_stream(url, destination, expected_size)
-        except RetryError as exc:
-            cause = exc.last_attempt.exception()
-            raise DownloadError(
-                f"Failed to download {url} after {self.DOWNLOAD_ATTEMPTS} attempts: {cause}. "
-                "Check your connection, raise CYBERFW_REQUEST_TIMEOUT, or set HTTPS_PROXY."
-            ) from cause
-        except httpx.HTTPError as exc:
-            raise DownloadError(f"Failed to download {url}: {exc}") from exc
+        except (RetryError, httpx.HTTPError, OSError) as exc:
+            _raise_download_error(f"Failed to download {url}", exc)
 
-    @retry(
-        retry=retry_if_exception_type(httpx.TransportError),
-        wait=wait_exponential(multiplier=1.0, max=20.0),
-        stop=stop_after_attempt(DOWNLOAD_ATTEMPTS),
-    )
+    @_transient_retry
     def _download_stream(self, url: str, destination: Path, expected_size: int | None) -> None:
-        with self._client.stream("GET", url) as resp:
-            resp.raise_for_status()
-            destination.parent.mkdir(parents=True, exist_ok=True)
-            tmp = destination.with_suffix(destination.suffix + ".part")
-            bytes_written = 0
-            with tmp.open("wb") as handle:
-                for chunk in resp.iter_bytes(chunk_size=64 * 1024):
-                    handle.write(chunk)
-                    bytes_written += len(chunk)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        tmp = destination.with_suffix(destination.suffix + ".part")
+        try:
+            with self._client.stream("GET", url) as resp:
+                resp.raise_for_status()
+                bytes_written = 0
+                with tmp.open("wb") as handle:
+                    for chunk in resp.iter_bytes(chunk_size=64 * 1024):
+                        handle.write(chunk)
+                        bytes_written += len(chunk)
             if expected_size is not None and bytes_written != expected_size:  # pragma: no cover - malformed
                 raise DownloadError(
                     f"Size mismatch: expected {expected_size} bytes, got {bytes_written} for {url}"
                 )
             shutil.move(str(tmp), str(destination))
+        except BaseException:
+            # Every retry restarts from byte 0, so a truncated .part is never useful.
+            with contextlib.suppress(OSError):
+                tmp.unlink(missing_ok=True)
+            raise
 
     def fetch_text(self, url: str) -> str:
         """Fetch a small text resource (e.g. ``checksums.txt``)."""
         if not url.startswith(("http://", "https://")):
             raise DownloadError(f"Invalid text URL: {url!r}")
         try:
-            resp = self._fetch_with_retry(url)
-            resp.raise_for_status()
-        except RetryError as exc:
-            cause = exc.last_attempt.exception()
-            raise DownloadError(f"Failed to fetch {url} after {self.DOWNLOAD_ATTEMPTS} attempts: {cause}") from cause
-        except httpx.HTTPError as exc:
-            raise DownloadError(f"Failed to fetch {url}: {exc}") from exc
-        return resp.text
-
-    @retry(
-        retry=retry_if_exception_type(httpx.TransportError),
-        wait=wait_exponential(multiplier=1.0, max=20.0),
-        stop=stop_after_attempt(DOWNLOAD_ATTEMPTS),
-    )
-    def _fetch_with_retry(self, url: str) -> httpx.Response:
-        return self._client.get(url, follow_redirects=True)
+            return self._get(url).text
+        except (RetryError, httpx.HTTPError) as exc:
+            _raise_download_error(f"Failed to fetch {url}", exc)

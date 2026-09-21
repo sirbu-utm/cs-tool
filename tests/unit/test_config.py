@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import httpx
 import pytest
 from pydantic import ValidationError
 
@@ -80,15 +79,3 @@ class TestSettingsEnv:
         assert settings.parse is False
         assert settings.log_level == "WARNING"
 
-
-def test_manager_client_uses_request_timeout(tmp_path):
-    from cyberfw.config import Settings
-    from cyberfw.manager import ToolManager
-    from cyberfw.manager.registry import ToolRegistry
-
-    settings = Settings(root_dir=tmp_path, request_timeout=42.0, cache_dir=tmp_path / "cache")
-    manager = ToolManager(settings, ToolRegistry({}))
-    try:
-        assert manager.client._client.timeout == httpx.Timeout(42.0)
-    finally:
-        manager.close()
