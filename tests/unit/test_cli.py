@@ -363,7 +363,8 @@ class TestStatusCommand:
     def test_status_flags_a_present_but_unreadable_binary_as_blocked(self, tmp_path: Path) -> None:
         """A downloaded-but-unreadable binary (e.g. Defender-blocked) shows 'blocked'."""
         binary = tmp_path / "tools_bin" / "subfinder"
-        binary.write_bytes(b"not-a-real-executable")  # no MZ/#! signature, no +x
+        binary.write_bytes(b"not-a-real-executable")  # no MZ/#! signature (Windows check)
+        binary.chmod(0o644)  # and no +x (POSIX check) — write_bytes keeps the fixture's mode
         result = runner.invoke(app, ["status"])
         assert result.exit_code == 0
         assert "blocked" in result.stdout

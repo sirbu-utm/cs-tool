@@ -100,7 +100,8 @@ def _find_bash() -> str | None:
         candidate = os.path.join(directory, "bash.exe")
         if not os.path.isfile(candidate):
             continue
-        if any(marker in candidate.lower() for marker in _WSL_SHIM_DIRS):
+        # Normalise separators so the markers also match on a POSIX host (CI).
+        if any(marker in candidate.lower().replace("/", "\\") for marker in _WSL_SHIM_DIRS):
             shim = shim or candidate
             continue
         return candidate
