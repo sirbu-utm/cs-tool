@@ -179,6 +179,18 @@ class PipelineEngine:
             outputs[node.stage] = inputs
         return result
 
+    async def run_single(
+        self, node: Node, ctx: ToolContext, *, parse: bool = True
+    ) -> tuple[NodeResult, list[ToolRecord]]:
+        """Run one node on its own (``cyberfw run``).
+
+        Same fan-out, list materialisation, timeout and failure handling as a
+        pipeline stage; ``ctx.inputs`` plays the role of the previous stage.
+        """
+        return await self._run_node(
+            node, ctx.target, ctx.inputs, parse=parse, extra_input=ctx.extra_input
+        )
+
     @staticmethod
     def _validate_wiring(nodes: list[Node]) -> None:
         """Fail fast on a pipeline whose ``input_from`` names a missing/later stage."""

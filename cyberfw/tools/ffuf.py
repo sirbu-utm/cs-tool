@@ -18,6 +18,8 @@ from cyberfw.tools.base import BaseTool, ToolContext
 class FfufTool(BaseTool):
     per_target = True
 
+    extra_input_prompt = "Wordlist path"
+
     def build_cmd(self, ctx: ToolContext) -> list[str]:
         targets = ctx.inputs if ctx.inputs else ([ctx.target] if ctx.target else [])
         if not targets:

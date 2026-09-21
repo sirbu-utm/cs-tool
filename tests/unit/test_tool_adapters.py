@@ -234,3 +234,45 @@ def test_each_tool_builds_standalone_command(name: str, target: str, tmp_path: P
 
     assert command[0].endswith(name)
     assert len(command) > 1
+
+
+class TestTargetKnowledgeLivesInTheAdapter:
+    """Prompts and target validation belong to the adapter, so the CLI/launcher need no
+    per-tool branches and a new tool brings its own wording."""
+
+    def test_gitleaks_rejects_a_url_before_any_binary_is_touched(self) -> None:
+        from cyberfw.tools.gitleaks import GitleaksTool
+
+        with pytest.raises(ValueError, match="local repository directory"):
+            GitleaksTool.validate_target("https://utm.md/")
+
+    def test_gitleaks_accepts_an_existing_directory(self, tmp_path: Path) -> None:
+        from cyberfw.tools.gitleaks import GitleaksTool
+
+        GitleaksTool.validate_target(str(tmp_path))
+
+    def test_default_validation_accepts_anything(self) -> None:
+        from cyberfw.tools.subfinder import SubfinderTool
+
+        SubfinderTool.validate_target("https://example.com/whatever")
+
+    def test_prompts_are_tool_specific(self) -> None:
+        from cyberfw.tools.ffuf import FfufTool
+        from cyberfw.tools.gitleaks import GitleaksTool
+        from cyberfw.tools.rustscan import RustscanTool
+        from cyberfw.tools.subfinder import SubfinderTool
+
+        assert GitleaksTool.target_prompt == "Local repository path"
+        assert RustscanTool.target_prompt == "Target host, IP or URL"
+        assert SubfinderTool.target_prompt == "Target (domain, URL or host)"
+        assert FfufTool.extra_input_prompt == "Wordlist path"
+        assert SubfinderTool.extra_input_prompt is None
+
+    def test_adapter_class_lookup_without_a_binary(self) -> None:
+        from cyberfw.exceptions import RegistryError
+        from cyberfw.tools import adapter_class
+        from cyberfw.tools.gitleaks import GitleaksTool
+
+        assert adapter_class("gitleaks") is GitleaksTool
+        with pytest.raises(RegistryError, match="bogus"):
+            adapter_class("bogus")

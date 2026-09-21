@@ -527,3 +527,24 @@ class TestStageTimeout:
         assert not result.succeeded()
         assert result.nodes[0].error is not None
         assert "timed out" in result.nodes[0].error
+
+
+class TestRunSingle:
+    async def test_public_single_node_entry_point(self, tmp_path: Path) -> None:
+        """``cyberfw run`` drives one node through the same fan-out/timeout/error handling
+        as a pipeline stage, via a public method rather than the engine's internals."""
+        registry_path = tmp_path / "registry.yaml"
+        registry_path.write_text(
+            "subfinder:\n  repo: org/subfinder\n  asset_patterns: []\n  binary: stub_probe.py\n",
+            encoding="utf-8",
+        )
+        engine = _make_engine(tmp_path, registry_path)
+        stub = _StubTool(engine.tool_manager.spec("subfinder"), _stub_binary(tmp_path))
+        engine.build_tool = lambda name: stub  # type: ignore[method-assign]
+
+        node_result, records = await engine.run_single(
+            Node(tool="subfinder", stage="subfinder"), ToolContext(target="seed.example.com")
+        )
+
+        assert node_result.ok
+        assert [r.target for r in records] == ["seed.example.com"]

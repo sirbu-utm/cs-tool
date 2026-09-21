@@ -41,6 +41,7 @@ from cyberfw.pipeline.schemas import ToolRecord
 from cyberfw.pipelines import build
 from cyberfw.report.html_report import generate_html_report
 from cyberfw.report.json_report import generate_json_report
+from cyberfw.tools import adapter_class
 from cyberfw.tools.base import ToolContext
 from cyberfw.ui import banner, tool_guide
 
@@ -354,15 +355,17 @@ def _ensure_tools() -> None:
 
 
 def _interactive_run(tool: str) -> None:
-    """Prompt for a target and run the tool selected by its menu number."""
+    """Prompt for a target and run the tool selected by its menu number.
+
+    The wording comes from the adapter (``target_prompt`` / ``extra_input_prompt``),
+    so a new tool needs no launcher changes.
+    """
     console.print(tool_guide(tool))
-    if tool == "gitleaks":
-        target = Prompt.ask("Local repository path")
-    elif tool == "rustscan":
-        target = Prompt.ask("Target host, IP or URL")
-    else:
-        target = Prompt.ask("Target (domain, URL or host)")
-    wordlist = Prompt.ask("Wordlist path", default="") or None if tool == "ffuf" else None
+    adapter = adapter_class(tool)
+    target = Prompt.ask(adapter.target_prompt)
+    wordlist: str | None = None
+    if adapter.extra_input_prompt is not None:
+        wordlist = Prompt.ask(adapter.extra_input_prompt, default="") or None
     run_cmd(tool, target=target, wordlist=wordlist)
 
 
@@ -535,16 +538,19 @@ def run_cmd(
     if target is None and list_file is None:
         console.print("[err]Provide a target via --target and/or a host list via --list.[/err]")
         raise typer.Exit(2)
-    if tool == "gitleaks" and target is not None:
-        source = Path(target).expanduser()
-        if not source.is_dir():
-            console.print(
-                "[err]gitleaks requires an existing local repository directory; "
-                "URLs are not supported.[/err]"
-            )
-            raise typer.Exit(2)
 
     settings, manager = _bootstrap()
+    try:
+        # The adapter knows what kind of target it takes; check that before
+        # looking for the binary so a wrong target is a usage error (exit 2).
+        if target is not None:
+            adapter_class(tool).validate_target(target)
+    except ValueError as exc:
+        console.print(f"[err]{exc}[/err]")
+        raise typer.Exit(2) from exc
+    except CyberfwError as exc:
+        console.print(f"[err]{exc}[/err]")
+        raise typer.Exit(1) from exc
     try:
         # Validate the binary is installed so we can offer a targeted hint.
         manager.binary_path(tool)
@@ -719,13 +725,7 @@ async def _run_single(
     engine: PipelineEngine, ctx: ToolContext, tool: str, parse: bool
 ) -> tuple[NodeResult, list[ToolRecord]]:
     """Run one tool stage through the engine (handles fan-out and crashes)."""
-    return await engine._run_node(
-        Node(tool=tool, stage=tool),
-        ctx.target,
-        ctx.inputs,
-        parse=parse,
-        extra_input=ctx.extra_input,
-    )
+    return await engine.run_single(Node(tool=tool, stage=tool), ctx, parse=parse)
 
 
 if __name__ == "__main__":

@@ -19,6 +19,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import ClassVar
 
 from cyberfw.manager.registry import ToolSpec
 from cyberfw.pipeline.schemas import ToolRecord, validate_record
@@ -61,9 +62,25 @@ class BaseTool(ABC):
     #: stdout is collected and parsed once via :meth:`parse_output` (e.g. gitleaks).
     buffered: bool = False
 
+    #: What the launcher asks for as this tool's single target.
+    target_prompt: ClassVar[str] = "Target (domain, URL or host)"
+
+    #: Prompt for a secondary input (e.g. a wordlist); ``None`` = nothing to ask.
+    extra_input_prompt: ClassVar[str | None] = None
+
     def __init__(self, spec: ToolSpec, binary: Path) -> None:
         self.spec: ToolSpec = spec
         self.binary: Path = binary
+
+    @classmethod  # noqa: B027 - intentional no-op default, not an abstract method
+    def validate_target(cls, target: str) -> None:
+        """Reject a target this tool cannot use, with a user-facing message.
+
+        A classmethod so the CLI can check the *kind* of target (a URL handed
+        to gitleaks, say) before it even looks for the binary — a usage error,
+        not a crashed process. Raises :class:`ValueError`; accepts anything by
+        default.
+        """
 
     @property
     def name(self) -> str:

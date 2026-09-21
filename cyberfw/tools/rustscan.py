@@ -24,6 +24,8 @@ class RustscanTool(BaseTool):
     # Consumes every host in one pass, so no fan-out.
     per_target = False
 
+    target_prompt = "Target host, IP or URL"
+
     @property
     def input_flag(self) -> str | None:
         # ``--addresses`` takes either a comma list or a newline-delimited file.

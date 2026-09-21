@@ -21,7 +21,7 @@ from cyberfw.tools.nuclei import NucleiTool
 from cyberfw.tools.rustscan import RustscanTool
 from cyberfw.tools.subfinder import SubfinderTool
 
-__all__ = ["ADAPTERS", "adapter_for"]
+__all__ = ["ADAPTERS", "adapter_class", "adapter_for"]
 
 ADAPTERS: dict[str, type[BaseTool]] = {
     "subfinder": SubfinderTool,
@@ -35,9 +35,18 @@ ADAPTERS: dict[str, type[BaseTool]] = {
 }
 
 
+def adapter_class(name: str) -> type[BaseTool]:
+    """Return the adapter class for tool ``name`` (no binary needed).
+
+    Lets the CLI use class-level knowledge — prompts, target validation —
+    before the tool is installed.
+    """
+    cls = ADAPTERS.get(name)
+    if cls is None:
+        raise RegistryError(f"no adapter registered for tool {name!r}")
+    return cls
+
+
 def adapter_for(spec: ToolSpec, binary: Path) -> BaseTool:
     """Instantiate the adapter for ``spec``, given its installed binary path."""
-    cls = ADAPTERS.get(spec.name)
-    if cls is None:
-        raise RegistryError(f"no adapter registered for tool {spec.name!r}")
-    return cls(spec, binary)
+    return adapter_class(spec.name)(spec, binary)

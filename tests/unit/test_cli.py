@@ -464,3 +464,64 @@ class TestLauncherScalesWithRegistry:
 
         assert "1-9  select tool" in rendered
         assert "r    run pipeline" in rendered
+
+
+class TestLauncherPromptsComeFromTheAdapter:
+    @staticmethod
+    def _capture(monkeypatch: pytest.MonkeyPatch, answers: list[str]) -> tuple[list[str], list[tuple]]:
+        prompts: list[str] = []
+        calls: list[tuple] = []
+        replies = iter(answers)
+
+        def fake_ask(prompt: str, *_a, **_k) -> str:
+            prompts.append(prompt)
+            return next(replies)
+
+        monkeypatch.setattr("cyberfw.cli.Prompt.ask", fake_ask)
+        monkeypatch.setattr("cyberfw.cli.run_cmd", lambda tool, **kw: calls.append((tool, kw)))
+        return prompts, calls
+
+    def test_gitleaks_asks_for_a_repository_path(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from cyberfw.cli import _interactive_run
+
+        prompts, calls = self._capture(monkeypatch, ["C:/repo"])
+        _interactive_run("gitleaks")
+
+        assert prompts == ["Local repository path"]
+        assert calls == [("gitleaks", {"target": "C:/repo", "wordlist": None})]
+
+    def test_ffuf_also_asks_for_its_wordlist(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from cyberfw.cli import _interactive_run
+
+        prompts, calls = self._capture(monkeypatch, ["https://example.com", "words.txt"])
+        _interactive_run("ffuf")
+
+        assert prompts == ["Target (domain, URL or host)", "Wordlist path"]
+        assert calls == [("ffuf", {"target": "https://example.com", "wordlist": "words.txt"})]
+
+    def test_a_tool_without_extra_input_gets_one_question(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from cyberfw.cli import _interactive_run
+
+        prompts, _calls = self._capture(monkeypatch, ["example.com"])
+        _interactive_run("subfinder")
+
+        assert prompts == ["Target (domain, URL or host)"]
+
+    def test_a_new_adapter_brings_its_own_prompt(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """No per-tool branch in the CLI: registering an adapter is all a new tool needs."""
+        from cyberfw.cli import _interactive_run
+        from cyberfw.tools import ADAPTERS
+        from cyberfw.tools.base import BaseTool
+
+        class PlanetScan(BaseTool):
+            target_prompt = "Which planet?"
+
+            def build_cmd(self, ctx):  # pragma: no cover - never run here
+                return [str(self.binary)]
+
+        monkeypatch.setitem(ADAPTERS, "planetscan", PlanetScan)
+        prompts, calls = self._capture(monkeypatch, ["mars"])
+        _interactive_run("planetscan")
+
+        assert prompts == ["Which planet?"]
+        assert calls == [("planetscan", {"target": "mars", "wordlist": None})]

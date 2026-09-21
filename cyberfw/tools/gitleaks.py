@@ -14,6 +14,7 @@ Targets gitleaks v8.x, whose scanning commands are ``dir`` (files) and ``git``
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 from cyberfw.exceptions import ParseError
 from cyberfw.pipeline.schemas import GitleaksResult, ToolRecord
@@ -23,6 +24,15 @@ from cyberfw.tools.base import BaseTool, ToolContext
 class GitleaksTool(BaseTool):
     # gitleaks writes one JSON array to stdout, not line-delimited JSON.
     buffered = True
+
+    target_prompt = "Local repository path"
+
+    @classmethod
+    def validate_target(cls, target: str) -> None:
+        if not Path(target).expanduser().is_dir():
+            raise ValueError(
+                "gitleaks requires an existing local repository directory; URLs are not supported."
+            )
 
     def build_cmd(self, ctx: ToolContext) -> list[str]:
         cmd: list[str] = [str(self.binary), "dir"]
