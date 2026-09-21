@@ -211,11 +211,11 @@ class TestRunStage:
             'import json, sys\n'
             'sys.stdout.write(json.dumps({"host": "ctx.example.com"}) + "\\n")\n',
         )
-        context = SessionContext(root_dir=tmp_path, session_id="sess")
-        await run_stage(
-            [sys.executable, str(script)], tool="subfinder", stage="sub", context=context
-        )
-        targets = context.targets("sub")
+        with SessionContext(root_dir=tmp_path, session_id="sess") as context:
+            await run_stage(
+                [sys.executable, str(script)], tool="subfinder", stage="sub", context=context
+            )
+            targets = context.targets("sub")
         assert targets == ["ctx.example.com"]
 
 

@@ -473,3 +473,34 @@ class TestBuildToolDependencyCheck:
             engine.build_tool("rustscan")
 
         assert not caplog.records
+
+
+class TestContextStoreLifecycle:
+    async def test_stage_files_are_released_once_the_stage_is_over(self, tmp_path: Path, monkeypatch) -> None:
+        """The store keeps a stage's JSONL file open while records stream in; the engine
+        must close it when the stage finishes, so nothing outlives the run."""
+        registry_path = tmp_path / "registry.yaml"
+        registry_path.write_text(
+            "subfinder:\n  repo: org/subfinder\n  asset_patterns: []\n  binary: stub_probe.py\n",
+            encoding="utf-8",
+        )
+        engine = _make_engine(tmp_path, registry_path)
+        stub = _StubTool(engine.tool_manager.spec("subfinder"), _stub_binary(tmp_path))
+        engine.build_tool = lambda name: stub  # type: ignore[method-assign]
+        assert engine.context is not None
+
+        await engine.run([Node(tool="subfinder", stage="sub")], seed="seed.example.com")
+
+        opens = 0
+        real_open = Path.open
+
+        def counting_open(self: Path, *args, **kwargs):
+            nonlocal opens
+            opens += 1
+            return real_open(self, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "open", counting_open)
+        engine.context.append("sub", ToolRecord(tool="subfinder", target="late.example.com", kind="host"))
+        engine.context.close()
+
+        assert opens == 1, "the stage file was still open after the run"

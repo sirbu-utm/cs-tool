@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any
+from typing import IO, Any
 
 from cyberfw.exceptions import ContextStoreError
 from cyberfw.pipeline.schemas import ToolRecord
@@ -20,8 +20,16 @@ __all__ = ["SessionContext"]
 class SessionContext:
     """Writer + reader for one pipeline session.
 
-    Safe for concurrent use from coroutines on one event loop: ``append`` opens,
-    writes and closes synchronously with no ``await`` in between, so writes can
+    Each stage's JSONL file is opened once, on its first record, and stays open
+    until :meth:`close` — re-opening per record would cost a syscall (and, on
+    Windows, an antivirus scan) for every finding. Every write is flushed
+    immediately, so a crash loses nothing already appended and readers see the
+    data without a ``close()``. ``close()`` is idempotent and the store stays
+    usable afterwards (the next append simply re-opens the file); the owner
+    calls it when the run is over, or uses the context manager form.
+
+    Safe for concurrent use from coroutines on one event loop: ``append``
+    writes and flushes synchronously with no ``await`` in between, so writes can
     never interleave. It is *not* guarded against multiple OS threads or
     processes writing the same session — the framework never does that.
     """
@@ -31,22 +39,41 @@ class SessionContext:
         self.session_id = session_id
         self.session_dir = self.root_dir / session_id
         self.session_dir.mkdir(parents=True, exist_ok=True)
+        self._handles: dict[Path, IO[str]] = {}
+
+    def __enter__(self) -> SessionContext:
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        self.close()
+
+    def close(self) -> None:
+        """Release every open stage file (idempotent; appends afterwards re-open)."""
+        handles, self._handles = self._handles, {}
+        for handle in handles.values():
+            handle.close()
 
     # -- writers --------------------------------------------------------------
     def append(self, stage: str, record: ToolRecord) -> None:
         """Persist one validated record to ``<session_dir>/<stage>.jsonl``."""
-        path = self._stage_path(stage)
         line = record.as_dict()
         line["stage"] = stage
-        try:
-            with path.open("a", encoding="utf-8") as handle:
-                handle.write(json.dumps(line, ensure_ascii=False) + "\n")
-        except OSError as exc:
-            raise ContextStoreError(f"cannot write {path}: {exc}") from exc
+        self._write_line(stage, json.dumps(line, ensure_ascii=False))
 
     def append_raw(self, stage: str, text: str) -> None:
         """Persist an unparsed line (diagnostics); tolerated but discouraged."""
-        self._stage_path(stage).open("a", encoding="utf-8").write(text.rstrip("\n") + "\n")
+        self._write_line(stage, text.rstrip("\n"))
+
+    def _write_line(self, stage: str, text: str) -> None:
+        path = self._stage_path(stage)
+        try:
+            handle = self._handles.get(path)
+            if handle is None:
+                handle = self._handles[path] = path.open("a", encoding="utf-8")
+            handle.write(text + "\n")
+            handle.flush()
+        except OSError as exc:
+            raise ContextStoreError(f"cannot write {path}: {exc}") from exc
 
     # -- readers --------------------------------------------------------------
     def records(self, stage: str) -> list[dict[str, Any]]:

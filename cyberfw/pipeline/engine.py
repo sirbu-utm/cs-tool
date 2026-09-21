@@ -221,6 +221,11 @@ class PipelineEngine:
         except Exception as exc:  # noqa: BLE001 - never let one tool stop the pipeline
             LOG.exception("stage %s raised %s", node.stage, type(exc).__name__)
             return NodeResult(node=node, ok=False, count=0, error=f"{type(exc).__name__}: {exc}"), []
+        finally:
+            # The store keeps this stage's JSONL file open while records stream
+            # in; release it now rather than leaving it to the caller (or GC).
+            if self.context is not None:
+                self.context.close()
 
         if node.max_records:
             records = records[: node.max_records]
