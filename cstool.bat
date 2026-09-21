@@ -14,8 +14,8 @@ if not defined UV_EXE (
     ) else if exist "%USERPROFILE%\.cargo\bin\uv.exe" (
         set "UV_EXE=%USERPROFILE%\.cargo\bin\uv.exe"
     ) else (
-        echo [!] uv is not installed. Installing uv...
-        powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
+        echo [!] uv is not installed. Installing a pinned, checksum-verified uv...
+        powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\install-uv.ps1"
         if exist "%USERPROFILE%\.local\bin\uv.exe" set "UV_EXE=%USERPROFILE%\.local\bin\uv.exe"
         if exist "%USERPROFILE%\.cargo\bin\uv.exe" set "UV_EXE=%USERPROFILE%\.cargo\bin\uv.exe"
     )
