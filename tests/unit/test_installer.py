@@ -122,12 +122,17 @@ class TestSafeMember:
     def test_zip_slip_rejected(self, tmp_path: Path) -> None:
         installer = _installer(tmp_path, _FakeClient(None, b""), _spec())
         with pytest.raises(ArchiveSafetyError):
-            installer._safe_member("../evil.txt")
+            installer._safe_member("../evil.txt", installer.tools_dir / "subfinder")
+
+    def test_member_escaping_into_a_sibling_tool_dir_rejected(self, tmp_path: Path) -> None:
+        installer = _installer(tmp_path, _FakeClient(None, b""), _spec())
+        with pytest.raises(ArchiveSafetyError):
+            installer._safe_member("../httpx/httpx", installer.tools_dir / "subfinder")
 
     def test_nested_within_root_allowed(self, tmp_path: Path) -> None:
         installer = _installer(tmp_path, _FakeClient(None, b""), _spec())
-        target = installer._safe_member("subfinder/subfinder")
-        assert ".." not in str(target.relative_to(installer.tools_dir))
+        target = installer._safe_member("subfinder_1.0/subfinder", installer.tools_dir / "subfinder")
+        assert target.relative_to(installer.tools_dir / "subfinder") == Path("subfinder_1.0/subfinder")
 
 
 class TestInstall:
@@ -208,8 +213,9 @@ class TestInstall:
             )
         )
 
-        assert not (installer.tools_dir / "naabu").exists()
-        assert result.binary.name == "naabu.exe"
+        # The flat-layout binary is gone; ``tools_bin/naabu`` is now the tool's directory.
+        assert not (installer.tools_dir / "naabu").is_file()
+        assert result.binary == (installer.tools_dir / "naabu" / "naabu.exe").resolve()
 
     def test_locked_stale_binary_is_moved_aside_not_fatal(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """Windows refuses to unlink a running/AV-scanned exe but allows renaming it; init must survive that."""
@@ -232,8 +238,10 @@ class TestInstall:
 
         result = installer.install(_spec(name="naabu", binary="naabu", asset_patterns=["*windows*amd64*"]))
 
-        assert result.binary == stale.resolve()
-        assert stale.read_bytes() != b"stale"
+        assert result.binary == (installer.tools_dir / "naabu" / "naabu.exe").resolve()
+        assert result.binary.read_bytes() == b"#!/bin/sh\necho new\n"
+        # The locked file was renamed aside, so its old name no longer shadows anything.
+        assert not stale.exists()
 
     def test_install_copies_raw_binary(self, tmp_path: Path) -> None:
         payload = b"#!/bin/sh\nraw executable"
@@ -317,3 +325,99 @@ class TestArchiveSizeLimit:
         )
 
         assert installer.install(_spec()).binary.read_bytes() == payload
+
+
+class TestToolsDirLayout:
+    """Every tool lives in ``tools_bin/<tool>/``; nothing but those directories (and the
+    install-state files ToolManager keeps) may accumulate at the top level."""
+
+    @staticmethod
+    def _release(name: str, archive: bytes) -> GitHubRelease:
+        asset = ReleaseAsset(name, "http://x", len(archive))
+        return GitHubRelease(tag="v1.0.0", assets=[asset], checksums_url=None)
+
+    def test_archive_members_land_in_a_per_tool_directory(self, tmp_path: Path) -> None:
+        archive = _zip_bytes({"subfinder": b"#!/bin/sh\necho ok\n", "README.md": b"docs", "LICENSE": b"mit"})
+        client = _FakeClient(self._release("subfinder_1.0.0_linux_amd64.zip", archive), archive)
+        installer = _installer(tmp_path, client, _spec())
+
+        result = installer.install(_spec())
+
+        tool_dir = installer.tools_dir / "subfinder"
+        assert result.binary == (tool_dir / "subfinder").resolve()
+        assert (tool_dir / "README.md").is_file()
+        assert not (installer.tools_dir / "README.md").exists(), "docs from one tool must not clobber another's"
+
+    def test_downloaded_archive_is_removed_after_extraction(self, tmp_path: Path) -> None:
+        archive = _zip_bytes({"subfinder": b"#!/bin/sh\necho ok\n"})
+        client = _FakeClient(self._release("subfinder_1.0.0_linux_amd64.zip", archive), archive)
+        installer = _installer(tmp_path, client, _spec())
+
+        installer.install(_spec())
+
+        assert not client.downloaded[0].exists()
+
+    def test_corrupt_archive_is_not_left_behind_either(self, tmp_path: Path) -> None:
+        archive = b"PK\x03\x04 definitely not a zip"
+        client = _FakeClient(self._release("subfinder_1.0.0_linux_amd64.zip", archive), archive)
+        installer = _installer(tmp_path, client, _spec())
+
+        with pytest.raises(DownloadError):
+            installer.install(_spec())
+
+        assert not client.downloaded[0].exists()
+
+    def test_raw_asset_leaves_no_copy_under_its_release_name(self, tmp_path: Path) -> None:
+        payload = b"#!/bin/sh\nraw executable"
+        client = _FakeClient(self._release("gowitness-1.0.0-linux-amd64", payload), payload)
+        spec = _spec(name="gowitness", binary="gowitness", archive="raw")
+        installer = _installer(tmp_path, client, spec)
+
+        result = installer.install(spec)
+
+        assert result.binary.parent == (installer.tools_dir / "gowitness").resolve()
+        assert result.binary.stem == "gowitness"
+        assert [p.name for p in installer.tools_dir.iterdir()] == ["gowitness"]
+
+    def test_reinstall_discards_files_of_the_previous_version(self, tmp_path: Path) -> None:
+        archive = _zip_bytes({"subfinder": b"#!/bin/sh\necho new\n"})
+        client = _FakeClient(self._release("subfinder_1.0.0_linux_amd64.zip", archive), archive)
+        installer = _installer(tmp_path, client, _spec())
+        old = installer.tools_dir / "subfinder" / "CHANGELOG-0.9.md"
+        old.parent.mkdir(parents=True)
+        old.write_text("old release notes", encoding="utf-8")
+
+        installer.install(_spec())
+
+        assert not old.exists()
+
+    def test_legacy_flat_layout_binary_gives_way_to_the_tool_directory(self, tmp_path: Path) -> None:
+        """Older installs put the binary at ``tools_bin/subfinder`` — the very path that is
+        now the tool's directory. Re-installing must replace the file with the directory."""
+        archive = _zip_bytes({"subfinder": b"#!/bin/sh\necho new\n"})
+        client = _FakeClient(self._release("subfinder_1.0.0_linux_amd64.zip", archive), archive)
+        installer = _installer(tmp_path, client, _spec())
+        legacy = installer.tools_dir / "subfinder"
+        legacy.write_bytes(b"#!/bin/sh\necho old\n")
+
+        result = installer.install(_spec())
+
+        assert legacy.is_dir()
+        assert result.binary == (legacy / "subfinder").resolve()
+        assert result.binary.read_bytes() == b"#!/bin/sh\necho new\n"
+
+    def test_stale_downloads_of_the_same_tool_are_removed(self, tmp_path: Path) -> None:
+        """Earlier versions left the archive next to the binary; a re-install cleans up
+        exactly those (they match this tool's asset patterns) and nothing else."""
+        archive = _zip_bytes({"subfinder": b"#!/bin/sh\necho ok\n"})
+        client = _FakeClient(self._release("subfinder_1.0.0_linux_amd64.zip", archive), archive)
+        installer = _installer(tmp_path, client, _spec())
+        ours = installer.tools_dir / "subfinder_0.9.0_linux_amd64.zip"
+        theirs = installer.tools_dir / "httpx_0.9.0_linux_amd64.zip"
+        ours.write_bytes(b"old")
+        theirs.write_bytes(b"not mine")
+
+        installer.install(_spec(asset_patterns=["subfinder_*_linux_amd64.zip"]))
+
+        assert not ours.exists()
+        assert theirs.exists()

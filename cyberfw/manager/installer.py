@@ -2,10 +2,16 @@
 
 Guards against `Zip Slip` (any member path escaping ``tools_bin/``), enforces an
 upper bound on archive size, and makes extracted binaries executable on Unix.
+
+Layout: each tool is unpacked into its own ``tools_bin/<tool>/`` directory, which
+is wiped on re-install; the downloaded archive is deleted once extracted. The
+top level of ``tools_bin/`` therefore only holds those directories plus the
+``.<tool>.install.json`` state files written by :class:`ToolManager`.
 """
 
 from __future__ import annotations
 
+import fnmatch
 import os
 import shutil
 import stat
@@ -93,10 +99,18 @@ class ToolInstaller:
                 f"arch={self.mapping.arch}. Release tag: {release.tag}. "
                 f"Tried patterns: {patterns or '<none>'}."
             )
+        tool_dir = self.tools_dir / spec.name
         archive_path = self.tools_dir / asset.name
-        self._download_checked(asset, archive_path, release, spec)
-        self._remove_existing_binary(spec)
-        binary = self._extract(spec, archive_path)
+        try:
+            self._download_checked(asset, archive_path, release, spec)
+            # Only touch the previous install once the new archive is safely on
+            # disk, so a failed download leaves a working tool in place.
+            self._remove_existing_binary(spec)
+            self._remove_stale_downloads(spec, keep=archive_path)
+            self._reset_tool_dir(tool_dir)
+            binary = self._extract(spec, archive_path, tool_dir)
+        finally:
+            archive_path.unlink(missing_ok=True)
         self._make_executable(binary)
         return InstallResult(spec=spec, binary=binary.resolve(), version=release.version)
 
@@ -107,10 +121,10 @@ class ToolInstaller:
             body = self.client.fetch_text(release.checksums_url)
             verify_checksum(body, asset.name, dst)
 
-    def _extract(self, spec: ToolSpec, archive_path: Path) -> Path:
+    def _extract(self, spec: ToolSpec, archive_path: Path, tool_dir: Path) -> Path:
         kind = _archive_kind(spec.archive, archive_path.name)
         try:
-            self._extract_kind(kind, spec, archive_path)
+            self._extract_kind(kind, spec, archive_path, tool_dir)
         except _CORRUPT_ARCHIVE_ERRORS as exc:
             # Truncated download, forged size/CRC headers, bad DEFLATE stream.
             # The stdlib already bounds each member to its declared size, so a
@@ -119,34 +133,32 @@ class ToolInstaller:
             raise DownloadError(f"corrupt archive {archive_path.name}: {exc}") from exc
         # Ensure everything is executable *before* locating, because just-unpacked
         # zip members carry no exec bit and ensure_binary refuses non-executables.
-        self._make_whole_tree_executable()
-        return self._locate_binary(spec)
+        self._make_tree_executable(tool_dir)
+        return self._locate_binary(spec, tool_dir)
 
-    def _extract_kind(self, kind: str, spec: ToolSpec, archive_path: Path) -> None:
+    def _extract_kind(self, kind: str, spec: ToolSpec, archive_path: Path, tool_dir: Path) -> None:
         if kind == "zip":
-            self._extract_zip(archive_path)
+            self._extract_zip(archive_path, tool_dir)
         elif kind == "tar":
-            self._extract_tar(archive_path)
+            self._extract_tar(archive_path, tool_dir)
         elif kind == "raw":
             if spec.binary is None:
                 raise DownloadError(f"Raw asset for {spec.name} requires a binary name")
             binary_name = spec.binary
             if os.name == "nt" and not binary_name.lower().endswith(".exe"):
                 binary_name += ".exe"
-            target = self.tools_dir / binary_name
-            if target.name != spec.binary:
-                (self.tools_dir / spec.binary).unlink(missing_ok=True)
-            target.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(archive_path, target)
+            # The download *is* the binary: move it under its tool name rather
+            # than leaving a second copy behind under the release asset name.
+            shutil.move(str(archive_path), str(tool_dir / binary_name))
         else:
             raise DownloadError(f"Unsupported archive format for {archive_path.name}")
 
     # -- extraction ----------------------------------------------------------
-    def _extract_zip(self, archive_path: Path) -> None:
+    def _extract_zip(self, archive_path: Path, dest: Path) -> None:
         with zipfile.ZipFile(archive_path) as zf:
             self._assert_extract_size(sum(i.file_size for i in zf.infolist()), archive_path)
             for info in zf.infolist():
-                target = self._safe_member(_normalize(info.filename))
+                target = self._safe_member(_normalize(info.filename), dest)
                 if info.is_dir():
                     target.mkdir(parents=True, exist_ok=True)
                     continue
@@ -154,12 +166,12 @@ class ToolInstaller:
                 with zf.open(info) as src, open(target, "wb") as out:
                     shutil.copyfileobj(src, out)
 
-    def _extract_tar(self, archive_path: Path) -> None:
+    def _extract_tar(self, archive_path: Path, dest: Path) -> None:
         with tarfile.open(archive_path, "r:*") as tf:
             total = sum(m.size for m in tf.getmembers() if m.isfile())
             self._assert_extract_size(total, archive_path)
             for member in tf.getmembers():
-                target = self._safe_member(_normalize(member.name))
+                target = self._safe_member(_normalize(member.name), dest)
                 if member.isdir():
                     target.mkdir(parents=True, exist_ok=True)
                     continue
@@ -173,12 +185,12 @@ class ToolInstaller:
                     shutil.copyfileobj(src, out)
                 os.chmod(target, member.mode | stat.S_IRWXU)
 
-    def _safe_member(self, member_rel: str) -> Path:
-        """Validate an archive member path stays inside ``tools_dir``."""
-        target = (self.tools_dir / member_rel).resolve()
-        root = self.tools_dir.resolve()
+    def _safe_member(self, member_rel: str, dest: Path) -> Path:
+        """Validate an archive member path stays inside ``dest`` (the tool's directory)."""
+        target = (dest / member_rel).resolve()
+        root = dest.resolve()
         if target != root and root not in target.parents:
-            raise ArchiveSafetyError(f"Archive member escapes tools_dir: {member_rel!r}")
+            raise ArchiveSafetyError(f"Archive member escapes {dest.name}/: {member_rel!r}")
         return target
 
     def _assert_extract_size(self, total: int, archive_path: Path) -> None:
@@ -189,21 +201,51 @@ class ToolInstaller:
             )
 
     # -- helpers -------------------------------------------------------------
-    def _make_whole_tree_executable(self) -> None:
-        """Set the exec bit on every regular file under ``tools_dir`` (Unix only)."""
+    def _make_tree_executable(self, root: Path) -> None:
+        """Set the exec bit on every regular file under ``root`` (Unix only)."""
         if os.name == "nt":
             return
-        for path in self.tools_dir.rglob("*"):
+        for path in root.rglob("*"):
             if path.is_file():
                 path.chmod(path.stat().st_mode | stat.S_IEXEC)
 
-    def _locate_binary(self, spec: ToolSpec) -> Path:
+    def _locate_binary(self, spec: ToolSpec, tool_dir: Path) -> Path:
         from cyberfw.manager.verify import ensure_binary
 
-        return ensure_binary(self.tools_dir, spec.name, spec.binary)
+        return ensure_binary(tool_dir, spec.name, spec.binary)
+
+    def _reset_tool_dir(self, tool_dir: Path) -> None:
+        """Empty ``tool_dir`` so nothing from the previous version survives the re-install.
+
+        A file Windows still holds open is parked under a ``.stale-*`` name (see
+        :meth:`_unlink_or_park`); ``rmtree`` then leaves it in place and the fresh
+        extraction happens around it.
+        """
+        if tool_dir.is_dir():
+            for path in list(tool_dir.rglob("*")):
+                if path.is_file():
+                    self._unlink_or_park(path)
+            shutil.rmtree(tool_dir, ignore_errors=True)
+        tool_dir.mkdir(parents=True, exist_ok=True)
+
+    def _remove_stale_downloads(self, spec: ToolSpec, *, keep: Path) -> None:
+        """Delete archives of *this* tool that earlier installs left at the top level.
+
+        Only files matching the tool's own asset patterns are touched; other tools'
+        files and the archive being installed right now are left alone.
+        """
+        patterns = [pattern.lower() for pattern in spec.asset_patterns]
+        for path in list(self.tools_dir.iterdir()):
+            if path == keep or not path.is_file():
+                continue
+            if any(fnmatch.fnmatch(path.name.lower(), pattern) for pattern in patterns):
+                self._unlink_or_park(path)
 
     def _remove_existing_binary(self, spec: ToolSpec) -> None:
-        """Remove stale platform variants before locating the new binary."""
+        """Remove stale copies of the binary anywhere under ``tools_dir``.
+
+        Covers the pre-per-tool-directory layout, where binaries sat at the top level.
+        """
         if spec.binary is None:
             return
         names = {spec.binary}
