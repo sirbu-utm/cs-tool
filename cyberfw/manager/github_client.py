@@ -15,7 +15,13 @@ import time
 from pathlib import Path
 
 import httpx
-from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
+from tenacity import (
+    RetryError,
+    retry,
+    retry_if_exception_type,
+    stop_after_attempt,
+    wait_exponential,
+)
 
 from cyberfw.exceptions import DownloadError
 
@@ -70,12 +76,23 @@ class GitHubClient:
     """Resolves the latest release for a repo, with optional caching."""
 
     API = "https://api.github.com/repos/{owner}/{repo}/releases/latest"
+    #: Attempts made for one asset download before giving up.
+    DOWNLOAD_ATTEMPTS = 4
 
-    def __init__(self, token: str | None = None, *, cache_dir: Path | None = None, ttl: float = 900.0) -> None:
+    def __init__(
+        self,
+        token: str | None = None,
+        *,
+        cache_dir: Path | None = None,
+        ttl: float = 900.0,
+        timeout: float = 60.0,
+    ) -> None:
         self.token = token
         self.cache_dir = cache_dir
         self.ttl = ttl
-        self._client = httpx.Client(follow_redirects=True, timeout=30.0)
+        # ``trust_env`` (the default) honours HTTP(S)_PROXY, which is how users
+        # behind a slow or filtered path to objects.githubusercontent.com get through.
+        self._client = httpx.Client(follow_redirects=True, timeout=timeout)
 
     def close(self) -> None:
         self._client.close()
@@ -198,35 +215,62 @@ class GitHubClient:
     def download(self, url: str, destination: Path, *, expected_size: int | None = None) -> None:
         """Stream an asset to ``destination``.
 
-        Raises :class:`DownloadError` on transport or size mismatch.
+        Transient transport failures (timeouts, resets, TLS handshake stalls) are
+        retried with exponential backoff; HTTP status errors are not.
+        Raises :class:`DownloadError` on final failure or size mismatch.
         """
         if not url.startswith(("http://", "https://")):
             raise DownloadError(f"Invalid download URL: {url!r}")
         try:
-            with self._client.stream("GET", url) as resp:
-                resp.raise_for_status()
-                destination.parent.mkdir(parents=True, exist_ok=True)
-                tmp = destination.with_suffix(destination.suffix + ".part")
-                bytes_written = 0
-                with tmp.open("wb") as handle:
-                    for chunk in resp.iter_bytes(chunk_size=64 * 1024):
-                        handle.write(chunk)
-                        bytes_written += len(chunk)
-                if expected_size is not None and bytes_written != expected_size:  # pragma: no cover - malformed
-                    raise DownloadError(
-                        f"Size mismatch: expected {expected_size} bytes, got {bytes_written} for {url}"
-                    )
-                shutil.move(str(tmp), str(destination))
+            self._download_stream(url, destination, expected_size)
+        except RetryError as exc:
+            cause = exc.last_attempt.exception()
+            raise DownloadError(
+                f"Failed to download {url} after {self.DOWNLOAD_ATTEMPTS} attempts: {cause}. "
+                "Check your connection, raise CYBERFW_REQUEST_TIMEOUT, or set HTTPS_PROXY."
+            ) from cause
         except httpx.HTTPError as exc:
             raise DownloadError(f"Failed to download {url}: {exc}") from exc
+
+    @retry(
+        retry=retry_if_exception_type(httpx.TransportError),
+        wait=wait_exponential(multiplier=1.0, max=20.0),
+        stop=stop_after_attempt(DOWNLOAD_ATTEMPTS),
+    )
+    def _download_stream(self, url: str, destination: Path, expected_size: int | None) -> None:
+        with self._client.stream("GET", url) as resp:
+            resp.raise_for_status()
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            tmp = destination.with_suffix(destination.suffix + ".part")
+            bytes_written = 0
+            with tmp.open("wb") as handle:
+                for chunk in resp.iter_bytes(chunk_size=64 * 1024):
+                    handle.write(chunk)
+                    bytes_written += len(chunk)
+            if expected_size is not None and bytes_written != expected_size:  # pragma: no cover - malformed
+                raise DownloadError(
+                    f"Size mismatch: expected {expected_size} bytes, got {bytes_written} for {url}"
+                )
+            shutil.move(str(tmp), str(destination))
 
     def fetch_text(self, url: str) -> str:
         """Fetch a small text resource (e.g. ``checksums.txt``)."""
         if not url.startswith(("http://", "https://")):
             raise DownloadError(f"Invalid text URL: {url!r}")
         try:
-            resp = self._client.get(url, follow_redirects=True)
+            resp = self._fetch_with_retry(url)
             resp.raise_for_status()
+        except RetryError as exc:
+            cause = exc.last_attempt.exception()
+            raise DownloadError(f"Failed to fetch {url} after {self.DOWNLOAD_ATTEMPTS} attempts: {cause}") from cause
         except httpx.HTTPError as exc:
             raise DownloadError(f"Failed to fetch {url}: {exc}") from exc
         return resp.text
+
+    @retry(
+        retry=retry_if_exception_type(httpx.TransportError),
+        wait=wait_exponential(multiplier=1.0, max=20.0),
+        stop=stop_after_attempt(DOWNLOAD_ATTEMPTS),
+    )
+    def _fetch_with_retry(self, url: str) -> httpx.Response:
+        return self._client.get(url, follow_redirects=True)

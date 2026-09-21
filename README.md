@@ -169,6 +169,24 @@ cyberfw init
 
 Токен не записывается в репозиторий.
 
+Загрузка бинарников идёт с `objects.githubusercontent.com` и при обрывах
+или таймаутах повторяется автоматически (4 попытки с растущей паузой).
+Если соединение до GitHub медленное и `cyberfw init` всё равно падает с
+`timed out`, увеличь таймаут одного запроса (по умолчанию 60 с) или
+укажи прокси — `httpx` берёт его из стандартных переменных окружения:
+
+```powershell
+$env:CYBERFW_REQUEST_TIMEOUT = "180"
+$env:HTTPS_PROXY = "http://127.0.0.1:1080"
+cyberfw init
+```
+
+```bash
+export CYBERFW_REQUEST_TIMEOUT=180
+export HTTPS_PROXY=http://127.0.0.1:1080
+cyberfw init
+```
+
 ## Результаты и отчёты
 
 `cyberfw pipeline` всегда пишет в `reports/<session>/`, поскольку

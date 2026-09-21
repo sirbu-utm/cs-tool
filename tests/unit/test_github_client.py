@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import httpx
+import pytest
 
 from cyberfw.manager.github_client import GitHubClient, GitHubRelease, ReleaseAsset
 
@@ -61,3 +62,92 @@ def test_latest_uses_github_token_for_authorization(monkeypatch, tmp_path: Path)
         client.close()
 
     assert captured["Authorization"] == "Bearer secret-token"
+
+
+def test_client_timeout_is_configurable() -> None:
+    client = GitHubClient(timeout=7.5)
+    try:
+        assert client._client.timeout == httpx.Timeout(7.5)
+    finally:
+        client.close()
+
+
+def test_download_retries_transient_transport_errors(monkeypatch, tmp_path: Path) -> None:
+    client = GitHubClient()
+    url = "https://example.test/tool.zip"
+    attempts: list[int] = []
+
+    class _Stream:
+        def __enter__(self) -> httpx.Response:
+            return httpx.Response(200, content=b"payload", request=httpx.Request("GET", url))
+
+        def __exit__(self, *exc: object) -> None:
+            return None
+
+    def fake_stream(method: str, target: str) -> _Stream:
+        attempts.append(1)
+        if len(attempts) < 3:
+            raise httpx.ReadTimeout("The read operation timed out", request=httpx.Request(method, target))
+        return _Stream()
+
+    monkeypatch.setattr(client._client, "stream", fake_stream)
+    monkeypatch.setattr(GitHubClient._download_stream.retry, "sleep", lambda *_: None)
+    dst = tmp_path / "tool.zip"
+    try:
+        client.download(url, dst, expected_size=7)
+    finally:
+        client.close()
+
+    assert len(attempts) == 3
+    assert dst.read_bytes() == b"payload"
+
+
+def test_download_gives_up_after_retries_with_download_error(monkeypatch, tmp_path: Path) -> None:
+    from cyberfw.exceptions import DownloadError
+
+    client = GitHubClient()
+    url = "https://example.test/tool.zip"
+    attempts: list[int] = []
+
+    def fake_stream(method: str, target: str) -> None:
+        attempts.append(1)
+        raise httpx.ConnectTimeout("_ssl.c:1064: The handshake operation timed out", request=httpx.Request(method, target))
+
+    monkeypatch.setattr(client._client, "stream", fake_stream)
+    monkeypatch.setattr(GitHubClient._download_stream.retry, "sleep", lambda *_: None)
+    try:
+        with pytest.raises(DownloadError, match="Failed to download .* after 4 attempts"):
+            client.download(url, tmp_path / "tool.zip")
+    finally:
+        client.close()
+
+    assert len(attempts) == 4
+
+
+def test_download_does_not_retry_http_status_errors(monkeypatch, tmp_path: Path) -> None:
+    from cyberfw.exceptions import DownloadError
+
+    client = GitHubClient()
+    url = "https://example.test/missing.zip"
+    attempts: list[int] = []
+
+    class _Stream:
+        def __enter__(self) -> httpx.Response:
+            return httpx.Response(404, request=httpx.Request("GET", url))
+
+        def __exit__(self, *exc: object) -> None:
+            return None
+
+    def fake_stream(method: str, target: str) -> _Stream:
+        attempts.append(1)
+        return _Stream()
+
+    monkeypatch.setattr(client._client, "stream", fake_stream)
+    monkeypatch.setattr(GitHubClient._download_stream.retry, "sleep", lambda *_: None)
+    try:
+        with pytest.raises(DownloadError):
+            client.download(url, tmp_path / "missing.zip")
+    finally:
+        client.close()
+
+    assert len(attempts) == 1

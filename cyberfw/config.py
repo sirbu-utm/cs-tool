@@ -47,7 +47,9 @@ class Settings(BaseSettings):
     github_rate_fallback: bool = Field(default=True, description="Cache GitHub API responses to save rate limit.")
     # Pipeline behaviour.
     concurrency: int = Field(default=4, ge=1, description="Max parallel jobs across pipeline stages.")
-    request_timeout: float = Field(default=60.0, gt=0)
+    request_timeout: float = Field(
+        default=60.0, gt=0, description="Per-request timeout (seconds) for GitHub API calls and asset downloads."
+    )
     wordlist: str | None = Field(default=None, description="Custom fuzz wordlist path for Ffuf.")
     parse: bool = Field(
         default=True,

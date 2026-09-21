@@ -50,6 +50,7 @@ class ToolManager:
             self._client = GitHubClient(
                 token=self.settings.github_token,
                 cache_dir=self.settings.cache_dir if self.settings.github_rate_fallback else None,
+                timeout=self.settings.request_timeout,
             )
         return self._client
 
