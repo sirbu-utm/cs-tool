@@ -2,8 +2,9 @@
 
 Spawns an external tool without a TTY, parses its stdout as JSONL line-by-line
 and its stderr separately (kept as a bounded tail for diagnostics), and on
-cancellation (Ctrl+C / SIGTERM) terminates the child with SIGTERM then SIGKILL
-so a long scan never orphans a process. A non-zero exit (including SIGSEGV /
+cancellation (Ctrl+C / SIGTERM) asks the child to exit (SIGTERM), waits a short
+grace period and only then SIGKILLs it, so a long scan never orphans a process
+yet a tool that flushes on SIGTERM gets to. A non-zero exit (including SIGSEGV /
 OOM kill by the OS) is surfaced as :class:`ExecutionError` carrying the last
 stderr lines; the pipeline engine catches it and does not crash the parent.
 """
@@ -27,6 +28,9 @@ LOG = get_logger("executor")
 
 #: How many trailing stderr lines to keep for error reporting.
 _STDERR_KEEP = 25
+
+#: Seconds a child gets to exit after SIGTERM before it is SIGKILLed.
+_TERM_GRACE = 3.0
 
 
 def _prepare_cmd(cmd: list[str]) -> list[str]:
@@ -248,16 +252,14 @@ async def run_stage(
 
     try:
         try:
-            probe, drain = await asyncio.gather(_drain_stdout(), _drain_stderr())
-            # gather returns both; we only need to wait for process exit afterwards.
-            del probe, drain  # pragma: no cover - keeps linters honest
+            await asyncio.gather(_drain_stdout(), _drain_stderr())
         except asyncio.CancelledError:
-            _terminate(proc)
+            await _stop(proc)
             raise
         exit_code = await proc.wait()
         if exit_code != 0:
             raise ExecutionError(
-                f"{tool} exited with code {exit_code}",
+                f"{tool} {_describe_crash(exit_code)}",
                 exit_code=exit_code,
                 stderr_tail=list(stderr_tail),
             )
@@ -280,8 +282,9 @@ async def run_stage(
         return records
     finally:
         # Leaving this block with a live child — a callback or Context Store
-        # error mid-stream, or cancellation — must never orphan a scanner.
-        # (transport.close() below also kills, but via a private attribute.)
+        # error mid-stream, or a second cancellation during the grace period —
+        # must never orphan a scanner. (transport.close() below also kills,
+        # but via a private attribute.)
         _kill_if_running(proc)
         # Release pipe transports while the loop is still alive, so their
         # __del__ doesn't fire noisy ResourceWarnings at interpreter shutdown.
@@ -315,30 +318,47 @@ def _kill_if_running(proc: asyncio.subprocess.Process) -> None:
         pass
 
 
-def _terminate(proc: asyncio.subprocess.Process) -> None:
+async def _stop(proc: asyncio.subprocess.Process, grace: float = _TERM_GRACE) -> None:
+    """Ask the child to exit, wait up to ``grace`` seconds, then hard-kill it.
+
+    ``terminate()`` is SIGTERM on POSIX (which well-behaved scanners handle by
+    flushing and exiting) and ``TerminateProcess`` on Windows (immediate, so the
+    wait returns at once). Awaiting here — instead of scheduling the kill on a
+    detached task — means nothing outlives ``run_stage``.
+    """
     if proc.returncode is not None:
         return
     try:
         proc.terminate()
     except ProcessLookupError:  # pragma: no cover - already gone
-        pass
-    # Give it a short grace, then hard-kill.
-    asyncio.create_task(_kill_after(proc, 3.0))
+        return
+    try:
+        await asyncio.wait_for(proc.wait(), grace)
+    except asyncio.TimeoutError:
+        _kill_if_running(proc)
+        await proc.wait()
 
 
-async def _kill_after(proc: asyncio.subprocess.Process, delay: float) -> None:
-    await asyncio.sleep(delay)
-    if proc.returncode is None:
-        try:
-            proc.kill()
-        except ProcessLookupError:  # pragma: no cover
-            pass
+#: NTSTATUS codes Windows reports as a process exit code when it dies.
+_WINDOWS_CRASH_CODES: dict[int, str] = {
+    0xC0000005: "crashed with an access violation (0xC0000005)",
+    0xC00000FD: "crashed with a stack overflow (0xC00000FD)",
+    0xC0000409: "crashed with a stack buffer overrun / fast-fail (0xC0000409)",
+}
 
 
 def _describe_crash(exit_code: int) -> str:
-    if exit_code < 0:
+    """Human wording for a non-zero exit: signal name on POSIX, NTSTATUS on Windows."""
+    if exit_code < 0:  # POSIX: asyncio reports death-by-signal as -signum
         signum = -exit_code
-        if signum in (signal.SIGSEGV,):
-            return "crashed with SIGSEGV"
-        return f"killed by signal {signum}"
-    return f"exited with code {exit_code}"  # pragma: no cover - defensive
+        try:
+            name = signal.Signals(signum).name
+        except ValueError:
+            return f"killed by signal {signum}"
+        if signum == signal.SIGSEGV:
+            return f"crashed with {name}"
+        return f"killed by {name} (signal {signum})"
+    described = _WINDOWS_CRASH_CODES.get(exit_code)
+    if described is not None:
+        return described
+    return f"exited with code {exit_code}"

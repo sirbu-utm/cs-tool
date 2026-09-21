@@ -347,3 +347,86 @@ def test_close_transport_closes_pipe_transport() -> None:
         _transport = type("T", (), {"close": lambda self: (_ for _ in ()).throw(OSError("x"))})()
 
     _close_transport(_Boom())  # type: ignore[arg-type]
+
+
+class TestCancellation:
+    """Ctrl+C / task cancellation must stop the child promptly *and* cleanly."""
+
+    @staticmethod
+    def _long_running_child(tmp_path: Path, marker: Path) -> Path:
+        # Exits cleanly (dropping ``marker``) on SIGTERM; otherwise sleeps far longer
+        # than any test would wait.
+        return _write_script(
+            tmp_path,
+            "import pathlib, signal, sys, time\n"
+            "def bye(signum, frame):\n"
+            f"    pathlib.Path({str(marker)!r}).write_text('terminated cleanly')\n"
+            "    sys.exit(0)\n"
+            "signal.signal(signal.SIGTERM, bye)\n"
+            "print('ready', flush=True)\n"
+            "time.sleep(30)\n",
+        )
+
+    @staticmethod
+    async def _start_and_cancel(script: Path) -> None:
+        ready = asyncio.Event()
+
+        async def on_stdout_raw(line: str) -> None:
+            if line == "ready":
+                ready.set()
+
+        task = asyncio.create_task(
+            run_stage([sys.executable, str(script)], tool="x", stage="s", context=None, on_stdout_raw=on_stdout_raw)
+        )
+        await asyncio.wait_for(ready.wait(), 10)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    async def test_cancellation_leaves_no_background_task_behind(self, tmp_path: Path) -> None:
+        """A fire-and-forget "kill later" task used to outlive run_stage and get destroyed
+        with the event loop; cleanup must finish before the cancellation propagates."""
+        marker = tmp_path / "terminated-cleanly"
+        await self._start_and_cancel(self._long_running_child(tmp_path, marker))
+
+        stray = [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
+        assert stray == []
+
+    @pytest.mark.skipif(os.name == "nt", reason="TerminateProcess has no graceful form on Windows")
+    async def test_cancellation_gives_the_child_a_chance_to_exit_cleanly(self, tmp_path: Path) -> None:
+        """SIGTERM first, SIGKILL only if the child ignores it: a scanner that flushes
+        its output on SIGTERM must get to do so."""
+        marker = tmp_path / "terminated-cleanly"
+        await self._start_and_cancel(self._long_running_child(tmp_path, marker))
+
+        assert marker.read_text() == "terminated cleanly"
+
+
+class TestCrashDescription:
+    @pytest.mark.parametrize(
+        ("exit_code", "expected"),
+        [
+            (3, "exited with code 3"),
+            (-11, "crashed with SIGSEGV"),
+            (-9, "signal 9"),
+            (0xC0000005, "access violation"),
+        ],
+    )
+    def test_describe_crash(self, exit_code: int, expected: str) -> None:
+        from cyberfw.pipeline.executor import _describe_crash
+
+        assert expected in _describe_crash(exit_code)
+
+    @pytest.mark.skipif(os.name == "nt", reason="POSIX signals")
+    async def test_signal_death_is_named_in_the_error(self, tmp_path: Path) -> None:
+        script = _write_script(tmp_path, "import os, signal\nos.kill(os.getpid(), signal.SIGSEGV)\n")
+        with pytest.raises(ExecutionError, match="crashed with SIGSEGV") as exc_info:
+            await run_stage([sys.executable, str(script)], tool="nuclei", stage="s", context=None)
+        assert exc_info.value.exit_code == -11
+
+    @pytest.mark.skipif(os.name != "nt", reason="NTSTATUS exit codes")
+    async def test_access_violation_is_named_in_the_error(self, tmp_path: Path) -> None:
+        # os._exit takes a C int: pass STATUS_ACCESS_VIOLATION in its signed form.
+        script = _write_script(tmp_path, "import os\nos._exit(0xC0000005 - 2**32)\n")
+        with pytest.raises(ExecutionError, match="access violation"):
+            await run_stage([sys.executable, str(script)], tool="nuclei", stage="s", context=None)
