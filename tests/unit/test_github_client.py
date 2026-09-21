@@ -384,3 +384,64 @@ def test_fetch_text_retries_server_errors(monkeypatch: pytest.MonkeyPatch, no_re
 
     assert body == "abc  tool.zip"
     assert len(calls) == 2
+
+
+class TestReleaseByTag:
+    def test_pinned_tag_uses_the_tags_endpoint(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        client = GitHubClient()
+        urls: list[str] = []
+
+        def fake_get(url: str, *, headers: dict[str, str]) -> httpx.Response:
+            urls.append(url)
+            return _json_response(url, 200, {"tag_name": "v2.6.6", "assets": []})
+
+        monkeypatch.setattr(client._client, "get", fake_get)
+        try:
+            release = client.release("org", "tool", "v2.6.6")
+        finally:
+            client.close()
+
+        assert urls == ["https://api.github.com/repos/org/tool/releases/tags/v2.6.6"]
+        assert release.version == "2.6.6"
+
+    def test_latest_keyword_uses_the_latest_endpoint(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        client = GitHubClient()
+        urls: list[str] = []
+
+        def fake_get(url: str, *, headers: dict[str, str]) -> httpx.Response:
+            urls.append(url)
+            return _json_response(url, 200, {"tag_name": "v3.0.0", "assets": []})
+
+        monkeypatch.setattr(client._client, "get", fake_get)
+        try:
+            client.release("org", "tool", "latest")
+        finally:
+            client.close()
+
+        assert urls == ["https://api.github.com/repos/org/tool/releases/latest"]
+
+    def test_unknown_tag_names_the_tag(self, monkeypatch: pytest.MonkeyPatch, no_retry_sleep: None) -> None:
+        client = GitHubClient()
+        monkeypatch.setattr(client._client, "get", lambda url, *, headers: _json_response(url, 404, {}))
+        try:
+            with pytest.raises(DownloadError, match="v9.9.9"):
+                client.release("org", "tool", "v9.9.9")
+        finally:
+            client.close()
+
+    def test_pinned_and_latest_are_cached_separately(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+        client = GitHubClient(cache_dir=tmp_path)
+        tags = iter(["v3.0.0", "v2.6.6"])
+
+        def fake_get(url: str, *, headers: dict[str, str]) -> httpx.Response:
+            return _json_response(url, 200, {"tag_name": next(tags), "assets": []})
+
+        monkeypatch.setattr(client._client, "get", fake_get)
+        try:
+            assert client.release("org", "tool", "latest").version == "3.0.0"
+            assert client.release("org", "tool", "v2.6.6").version == "2.6.6"
+            # both served from cache now: the iterator would raise StopIteration otherwise
+            assert client.release("org", "tool", "latest").version == "3.0.0"
+            assert client.release("org", "tool", "v2.6.6").version == "2.6.6"
+        finally:
+            client.close()

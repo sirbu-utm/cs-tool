@@ -92,18 +92,35 @@ class ToolManager:
             and state.get("arch") == self.mapping.arch
         )
 
-    def install(self, name: str) -> InstallResult:
-        """Install (or refresh) one tool; returns where its binary now lives."""
+    def install(self, name: str, *, force: bool = False) -> InstallResult:
+        """Install one tool; returns where its binary lives.
+
+        Nothing is downloaded when the wanted version is already installed and
+        runnable: a pinned ``version`` is compared against the install record
+        without touching the network, ``latest`` after one (cached) API call.
+        ``force`` re-downloads regardless.
+        """
         spec = self.registry.require(name)
-        state_path = self.settings.tools_dir / f".{name}.install.json"
-        state_path.unlink(missing_ok=True)
         installer = ToolInstaller(
             self.client,
             self.settings.tools_dir,
             self.mapping,
             max_archive_size=self.settings.max_archive_size,
         )
-        result = installer.install(spec)
+        state = self.install_state(name) if not force else None
+        installed = state.get("version") if state is not None and self.is_installed(name) else None
+        release = None
+        if installed is not None:
+            wanted = spec.pinned_version
+            if wanted is None:
+                release = installer.resolve_release(spec)
+                wanted = release.version
+            if installed == wanted:
+                return InstallResult(spec, self.binary_path(name), installed, up_to_date=True)
+
+        state_path = self.settings.tools_dir / f".{name}.install.json"
+        state_path.unlink(missing_ok=True)
+        result = installer.install(spec, release)
         state_path.write_text(
             json.dumps(
                 {

@@ -103,12 +103,14 @@ def ensure_binary(tools_dir: Path, name: str, binary_hint: str | None = None) ->
 
 
 def verify_checksum(checksums_text: str | bytes, asset_name: str, archive_path: Path) -> bool:
-    """True if ``archive_path`` matches the SHA-256 upstream lists for ``asset_name``.
+    """Check ``archive_path`` against the SHA-256 upstream lists for ``asset_name``.
 
     ``checksums_text`` is the body of ``checksums.txt``; filenames may carry a
-    leading ``*``/`` `` (BSD/GPG signing style). A missing entry tolerates (the
-    tool did not publish one for this asset); a present-but-mismatched entry
-    raises :class:`ChecksumError` so a corrupted download is never unpacked.
+    leading ``*``/`` `` (BSD/GPG signing style). Returns True when an entry was
+    found and matched, False when the file has no entry for this asset (the
+    caller decides how loudly to report an unverified download); a
+    present-but-mismatched entry raises :class:`ChecksumError` so a corrupted
+    download is never unpacked.
     """
     if isinstance(checksums_text, bytes):
         checksums_text = checksums_text.decode("utf-8", errors="replace")
@@ -121,7 +123,7 @@ def verify_checksum(checksums_text: str | bytes, asset_name: str, archive_path: 
             entry = line.split()[0]
             break
     if entry is None:
-        return True  # upstream publishes no checksum for this archive
+        return False  # upstream publishes no checksum for this archive
     actual = sha256_hex(archive_path)
     if actual != entry.lower():
         raise ChecksumError(

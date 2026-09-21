@@ -9,11 +9,12 @@ an entry here (plus, when its JSONL schema is novel, a parser in ``tools/``).
 
 from __future__ import annotations
 
+import re
 from collections.abc import Iterator
 from pathlib import Path
 
 import yaml
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from cyberfw.exceptions import RegistryError
 
@@ -28,12 +29,32 @@ class ToolSpec(BaseModel):
     asset_patterns: list[str]
     archive: str = "auto"  # auto | zip | tar | raw
     binary: str | None = None  # file to chmod +x inside the archive, else guessed
+    #: Release tag to install (``v2.6.6``) or ``latest``. Pin it for reproducible
+    #: installs: a tool that changes its output format under you is otherwise
+    #: only noticed as "N lines did not match the schema".
+    version: str = "latest"
     needs_checksum: bool = True
+    #: ``asset name -> SHA-256`` for releases whose upstream publishes no
+    #: checksums file (only meaningful together with a pinned ``version``).
+    sha256: dict[str, str] = Field(default_factory=dict)
     check_deps: list[str] = Field(default_factory=list)  # e.g. ["nmap"]
     interactive_input: dict[str, str] = Field(
         default_factory=dict,
         description="Static CLI flags injected by the tool adapter (e.g. JSON output).",
     )
+
+    @field_validator("sha256")
+    @classmethod
+    def _hex_digests(cls, value: dict[str, str]) -> dict[str, str]:
+        for asset, digest in value.items():
+            if not re.fullmatch(r"[0-9a-fA-F]{64}", digest):
+                raise ValueError(f"sha256 for {asset!r} must be 64 hex characters")
+        return {asset: digest.lower() for asset, digest in value.items()}
+
+    @property
+    def pinned_version(self) -> str | None:
+        """``2.6.6`` for ``version: v2.6.6``; ``None`` when tracking ``latest``."""
+        return None if self.version == "latest" else self.version.lstrip("vV")
 
     @property
     def repo_owner(self) -> str:

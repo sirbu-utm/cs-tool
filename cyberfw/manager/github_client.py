@@ -115,6 +115,7 @@ class GitHubClient:
     """Resolves the latest release for a repo, with optional caching."""
 
     API = "https://api.github.com/repos/{owner}/{repo}/releases/latest"
+    API_TAG = "https://api.github.com/repos/{owner}/{repo}/releases/tags/{tag}"
 
     def __init__(
         self,
@@ -141,13 +142,14 @@ class GitHubClient:
         self.close()
 
     # -- caching helpers -----------------------------------------------------
-    def _cache_path(self, owner: str, repo: str) -> Path | None:
+    def _cache_path(self, owner: str, repo: str, tag: str = "latest") -> Path | None:
         if self.cache_dir is None:
             return None
-        return Path(self.cache_dir) / f"{owner}-{repo}.json"
+        suffix = "" if tag == "latest" else "@" + "".join(ch if ch.isalnum() or ch in "._-" else "_" for ch in tag)
+        return Path(self.cache_dir) / f"{owner}-{repo}{suffix}.json"
 
-    def _cache_may_load(self, owner: str, repo: str) -> GitHubRelease | None:
-        path = self._cache_path(owner, repo)
+    def _cache_may_load(self, owner: str, repo: str, tag: str = "latest") -> GitHubRelease | None:
+        path = self._cache_path(owner, repo, tag)
         if path is None or not path.exists():
             return None
         try:
@@ -160,8 +162,8 @@ class GitHubClient:
         release = self._from_cache_dict(data)
         return release
 
-    def _cache_save(self, owner: str, repo: str, release: GitHubRelease) -> None:
-        path = self._cache_path(owner, repo)
+    def _cache_save(self, owner: str, repo: str, release: GitHubRelease, tag: str = "latest") -> None:
+        path = self._cache_path(owner, repo, tag)
         if path is None:
             return
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -200,12 +202,16 @@ class GitHubClient:
         return resp
 
     def latest(self, owner: str, repo: str) -> GitHubRelease:
-        """Resolve the latest release, from cache when fresh.
+        """Resolve the latest release (see :meth:`release`)."""
+        return self.release(owner, repo, "latest")
+
+    def release(self, owner: str, repo: str, tag: str) -> GitHubRelease:
+        """Resolve one release — ``latest`` or a specific tag — from cache when fresh.
 
         Raises :class:`DownloadError` for every failure mode (unreachable API,
-        exhausted retries, rate limit, unknown repository).
+        exhausted retries, rate limit, unknown repository or tag).
         """
-        cached = self._cache_may_load(owner, repo)
+        cached = self._cache_may_load(owner, repo, tag)
         if cached is not None:
             return cached
 
@@ -218,8 +224,12 @@ class GitHubClient:
         else:
             headers["User-Agent"] = "cyberfw"
 
+        if tag == "latest":
+            endpoint = self.API.format(owner=owner, repo=repo)
+        else:
+            endpoint = self.API_TAG.format(owner=owner, repo=repo, tag=tag)
         try:
-            resp = self._get(self.API.format(owner=owner, repo=repo), headers=headers)
+            resp = self._get(endpoint, headers=headers)
         except httpx.HTTPStatusError as exc:
             # Non-transient statuses come straight through tenacity, unwrapped.
             status = exc.response.status_code
@@ -227,6 +237,8 @@ class GitHubClient:
                 raise DownloadError(
                     f"GitHub rate limit ({status}) for {owner}/{repo}: {exc.response.text[:200]}"
                 ) from exc
+            if status == 404 and tag != "latest":
+                raise DownloadError(f"No release {tag} for {owner}/{repo} (check `version:` in registry.yaml)") from exc
             if status == 404:
                 raise DownloadError(f"Repository not found: {owner}/{repo}") from exc
             raise DownloadError(f"Unexpected GitHub status {status} for {owner}/{repo}") from exc
@@ -234,7 +246,7 @@ class GitHubClient:
             _raise_download_error(f"GitHub API unreachable for {owner}/{repo}", exc)
 
         payload = resp.json()
-        tag = payload.get("tag_name", "")
+        tag_name = payload.get("tag_name", "")
         checksums: str | None = None
         assets: list[ReleaseAsset] = []
         for asset in payload.get("assets", []):
@@ -254,8 +266,8 @@ class GitHubClient:
                     size=int(asset.get("size", 0)),
                 )
             )
-        release = GitHubRelease(tag=tag, assets=assets, checksums_url=checksums)
-        self._cache_save(owner, repo, release)
+        release = GitHubRelease(tag=tag_name, assets=assets, checksums_url=checksums)
+        self._cache_save(owner, repo, release, tag)
         return release
 
     def download(self, url: str, destination: Path, *, expected_size: int | None = None) -> None:

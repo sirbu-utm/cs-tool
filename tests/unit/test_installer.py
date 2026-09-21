@@ -66,13 +66,16 @@ def _installer_for_mapping(tmp_path: Path, client, mapping: Mapping) -> ToolInst
 
 class _FakeClient:
     def __init__(self, release, archive_bytes: bytes, checksums: str | None = None) -> None:
-        self.release = release
+        self.current = release
         self.archive_bytes = archive_bytes
         self.checksums = checksums
         self.downloaded: list[Path] = []
 
     def latest(self, owner: str, repo: str) -> GitHubRelease:
-        return self.release
+        return self.current
+
+    def release(self, owner: str, repo: str, tag: str) -> GitHubRelease:
+        return self.current
 
     def download(self, url: str, destination: Path, *, expected_size: int | None = None) -> None:
         destination.parent.mkdir(parents=True, exist_ok=True)
@@ -421,3 +424,91 @@ class TestToolsDirLayout:
 
         assert not ours.exists()
         assert theirs.exists()
+
+
+class _TagAwareClient(_FakeClient):
+    """Fake that also answers ``release(owner, repo, tag)`` and remembers the tag asked for."""
+
+    def __init__(self, release, archive_bytes: bytes, checksums: str | None = None) -> None:
+        super().__init__(release, archive_bytes, checksums)
+        self.tags: list[str] = []
+
+    def release(self, owner: str, repo: str, tag: str) -> GitHubRelease:
+        self.tags.append(tag)
+        return self.current
+
+
+class TestPinnedVersion:
+    def test_pinned_spec_asks_for_that_tag(self, tmp_path: Path) -> None:
+        archive = _zip_bytes({"subfinder": b"#!/bin/sh\necho ok\n"})
+        asset = ReleaseAsset("subfinder_2.6.6_linux_amd64.zip", "http://x", len(archive))
+        release = GitHubRelease(tag="v2.6.6", assets=[asset], checksums_url=None)
+        client = _TagAwareClient(release, archive)
+        installer = _installer(tmp_path, client, _spec())
+
+        result = installer.install(_spec(version="v2.6.6"))
+
+        assert client.tags == ["v2.6.6"]
+        assert result.version == "2.6.6"
+
+    def test_unpinned_spec_asks_for_latest(self, tmp_path: Path) -> None:
+        archive = _zip_bytes({"subfinder": b"#!/bin/sh\necho ok\n"})
+        asset = ReleaseAsset("subfinder_2.6.6_linux_amd64.zip", "http://x", len(archive))
+        release = GitHubRelease(tag="v2.6.6", assets=[asset], checksums_url=None)
+        client = _TagAwareClient(release, archive)
+        installer = _installer(tmp_path, client, _spec())
+
+        installer.install(_spec())
+
+        assert client.tags == ["latest"]
+
+
+class TestRegistryChecksums:
+    @staticmethod
+    def _release(archive: bytes) -> GitHubRelease:
+        asset = ReleaseAsset("subfinder_1.0.0_linux_amd64.zip", "http://x", len(archive))
+        return GitHubRelease(tag="v1.0.0", assets=[asset], checksums_url=None)
+
+    def test_registry_digest_mismatch_rejects_the_download(self, tmp_path: Path) -> None:
+        """A sha256 pinned in registry.yaml is checked even when upstream publishes no checksums."""
+        archive = _zip_bytes({"subfinder": b"#!/bin/sh\necho ok\n"})
+        client = _TagAwareClient(self._release(archive), archive)
+        installer = _installer(tmp_path, client, _spec())
+        spec = _spec(sha256={"subfinder_1.0.0_linux_amd64.zip": "0" * 64})
+
+        with pytest.raises(ChecksumError):
+            installer.install(spec)
+
+    def test_registry_digest_match_installs(self, tmp_path: Path) -> None:
+        archive = _zip_bytes({"subfinder": b"#!/bin/sh\necho ok\n"})
+        client = _TagAwareClient(self._release(archive), archive)
+        installer = _installer(tmp_path, client, _spec())
+        digest = sha256_hex(_write_tmp_archive(tmp_path, archive))
+
+        result = installer.install(_spec(sha256={"subfinder_1.0.0_linux_amd64.zip": digest}))
+
+        assert result.binary.exists()
+
+    def test_unverifiable_download_is_reported(self, tmp_path: Path, caplog) -> None:
+        """needs_checksum with neither an upstream checksums file nor a registry digest:
+        install, but say so — silence would look like verification happened."""
+        archive = _zip_bytes({"subfinder": b"#!/bin/sh\necho ok\n"})
+        client = _TagAwareClient(self._release(archive), archive)
+        installer = _installer(tmp_path, client, _spec())
+
+        with caplog.at_level("WARNING", logger="cyberfw.manager"):
+            installer.install(_spec(needs_checksum=True))
+
+        assert any("not verified" in r.getMessage() for r in caplog.records)
+
+    def test_upstream_file_without_an_entry_is_reported(self, tmp_path: Path, caplog) -> None:
+        archive = _zip_bytes({"subfinder": b"#!/bin/sh\necho ok\n"})
+        asset = ReleaseAsset("subfinder_1.0.0_linux_amd64.zip", "http://x", len(archive))
+        release = GitHubRelease(tag="v1.0.0", assets=[asset], checksums_url="http://x/sha")
+        client = _TagAwareClient(release, archive, checksums="b" * 64 + "  something_else.zip")
+        installer = _installer(tmp_path, client, _spec())
+
+        with caplog.at_level("WARNING", logger="cyberfw.manager"):
+            installer.install(_spec(needs_checksum=True))
+
+        assert any("not verified" in r.getMessage() for r in caplog.records)

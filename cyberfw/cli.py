@@ -395,8 +395,16 @@ def init_cmd(
     tools: Annotated[list[str] | None, typer.Argument(help="Tool names to install; omit for all.")] = None,
     token: Annotated[str | None, typer.Option("--token", envvar="CYBERFW_GITHUB_TOKEN",
                                              help="GitHub token to raise the rate limit.")] = None,
+    force: Annotated[
+        bool,
+        typer.Option("--force", help="Re-download even when the wanted version is already installed."),
+    ] = False,
 ) -> None:
-    """Download and install precompiled tool binaries into ``tools_bin/``."""
+    """Download and install precompiled tool binaries into ``tools_bin/``.
+
+    A tool whose installed version already matches (the pinned ``version:`` in
+    registry.yaml, or the latest release) is left alone unless ``--force``.
+    """
     settings, manager = _bootstrap()
     if token:
         settings = settings.model_copy(update={"github_token": token})
@@ -408,15 +416,19 @@ def init_cmd(
     try:
         for name in targets:
             spec = manager.spec(name)
-            console.print(f"[info]fetching[/info] {name} ({spec.repo}) ...")
+            wanted = spec.version if spec.version != "latest" else "latest release"
+            console.print(f"[info]checking[/info] {name} ({spec.repo}, {wanted}) ...")
             try:
-                result = manager.install(name)
+                result = manager.install(name, force=force)
             except CyberfwError as exc:
                 failed += 1
                 console.print(f"[err]  ✗ {name}:[/err] {exc}")
                 continue
             ok += 1
-            console.print(f"[ok]  ✓ {name} v{result.version}[/ok] -> {result.binary}")
+            if result.up_to_date:
+                console.print(f"[muted]  = {name} v{result.version} up to date[/muted]")
+            else:
+                console.print(f"[ok]  ✓ {name} v{result.version}[/ok] -> {result.binary}")
     finally:
         manager.close()
 

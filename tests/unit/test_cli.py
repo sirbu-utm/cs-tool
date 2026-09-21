@@ -346,6 +346,67 @@ class TestInitCommand:
         assert result.exit_code == 0
         assert "0 tool" in result.stdout
 
+    @pytest.fixture
+    def fake_github(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> object:
+        """Serve one release of ``pinme`` without the network by swapping ToolManager.client."""
+        import io
+        import zipfile
+
+        from cyberfw.manager import ToolManager
+        from cyberfw.manager.github_client import GitHubRelease, ReleaseAsset
+
+        buffer = io.BytesIO()
+        with zipfile.ZipFile(buffer, "w") as zf:
+            zf.writestr("pinme", "#!/usr/bin/env bash\necho hi\n")
+        archive = buffer.getvalue()
+
+        class FakeClient:
+            downloads = 0
+
+            def release(self, owner: str, repo: str, tag: str) -> GitHubRelease:
+                return GitHubRelease(
+                    tag="v1.2.3",
+                    assets=[ReleaseAsset("pinme_1.2.3_windows_amd64.zip", "http://x", len(archive)),
+                            ReleaseAsset("pinme_1.2.3_linux_amd64.zip", "http://x", len(archive)),
+                            ReleaseAsset("pinme_1.2.3_darwin_amd64.zip", "http://x", len(archive)),
+                            ReleaseAsset("pinme_1.2.3_darwin_arm64.zip", "http://x", len(archive)),
+                            ReleaseAsset("pinme_1.2.3_linux_arm64.zip", "http://x", len(archive))],
+                    checksums_url=None,
+                )
+
+            def download(self, url: str, destination: Path, *, expected_size: int | None = None) -> None:
+                FakeClient.downloads += 1
+                destination.write_bytes(archive)
+
+            def fetch_text(self, url: str) -> str:
+                return ""
+
+            def close(self) -> None:
+                pass
+
+        fake = FakeClient()
+        monkeypatch.setattr(ToolManager, "client", property(lambda self: fake))
+        with (tmp_path / "registry.yaml").open("a", encoding="utf-8") as handle:
+            handle.write("pinme:\n  repo: org/pinme\n  asset_patterns: ['pinme_*']\n  binary: pinme\n  needs_checksum: false\n")
+        return FakeClient
+
+    def test_second_init_reports_up_to_date_and_skips_the_download(self, fake_github: object) -> None:
+        first = runner.invoke(app, ["init", "pinme"])
+        second = runner.invoke(app, ["init", "pinme"])
+
+        assert first.exit_code == 0 and "pinme v1.2.3" in first.stdout
+        assert second.exit_code == 0
+        assert "up to date" in second.stdout
+        assert fake_github.downloads == 1  # type: ignore[attr-defined]
+
+    def test_force_reinstalls(self, fake_github: object) -> None:
+        runner.invoke(app, ["init", "pinme"])
+        result = runner.invoke(app, ["init", "pinme", "--force"])
+
+        assert result.exit_code == 0
+        assert "up to date" not in result.stdout
+        assert fake_github.downloads == 2  # type: ignore[attr-defined]
+
 
 class TestStatusCommand:
     def test_status_shows_tools_deps_and_settings(self) -> None:

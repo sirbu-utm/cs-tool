@@ -85,3 +85,39 @@ class TestToolSpec:
         spec = ToolSpec(name="x", repo="org/repo", asset_patterns=[])
         assert spec.repo_owner == "org"
         assert spec.repo_name == "repo"
+
+
+class TestVersionPinning:
+    def test_version_defaults_to_latest(self, tmp_path: Path) -> None:
+        path = tmp_path / "registry.yaml"
+        path.write_text(yaml.dump({"x": {"repo": "o/x", "asset_patterns": []}}), encoding="utf-8")
+        spec = load_registry(path).require("x")
+        assert spec.version == "latest"
+        assert spec.pinned_version is None
+        assert spec.sha256 == {}
+
+    def test_pinned_tag_is_kept_and_normalised(self, tmp_path: Path) -> None:
+        path = tmp_path / "registry.yaml"
+        path.write_text(
+            yaml.dump({"x": {"repo": "o/x", "asset_patterns": [], "version": "v2.6.6"}}), encoding="utf-8"
+        )
+        spec = load_registry(path).require("x")
+        assert spec.version == "v2.6.6"
+        assert spec.pinned_version == "2.6.6"
+
+    def test_registry_checksums_are_a_mapping_of_asset_to_hex(self, tmp_path: Path) -> None:
+        digest = "a" * 64
+        path = tmp_path / "registry.yaml"
+        path.write_text(
+            yaml.dump({"x": {"repo": "o/x", "asset_patterns": [], "sha256": {"x_1.0.0_linux_amd64.zip": digest}}}),
+            encoding="utf-8",
+        )
+        assert load_registry(path).require("x").sha256 == {"x_1.0.0_linux_amd64.zip": digest}
+
+    def test_malformed_registry_checksum_is_rejected(self, tmp_path: Path) -> None:
+        path = tmp_path / "registry.yaml"
+        path.write_text(
+            yaml.dump({"x": {"repo": "o/x", "asset_patterns": [], "sha256": {"x.zip": "not-hex"}}}), encoding="utf-8"
+        )
+        with pytest.raises(RegistryError, match="sha256"):
+            load_registry(path)

@@ -21,13 +21,16 @@ import zipfile
 import zlib
 from pathlib import Path
 
-from cyberfw.exceptions import ArchiveSafetyError, DownloadError
+from cyberfw.exceptions import ArchiveSafetyError, ChecksumError, DownloadError
+from cyberfw.logging import get_logger
 from cyberfw.manager.github_client import GitHubClient, GitHubRelease, ReleaseAsset
 from cyberfw.manager.platform_map import Mapping, asset_patterns
 from cyberfw.manager.registry import ToolSpec
-from cyberfw.manager.verify import verify_checksum
+from cyberfw.manager.verify import sha256_hex, verify_checksum
 
 __all__ = ["InstallResult", "ToolInstaller", "DEFAULT_MAX_ARCHIVE_SIZE"]
+
+LOG = get_logger("manager.installer")
 
 #: Upper bound on what an archive may extract to; ``Settings.max_archive_size``
 #: overrides it (``CYBERFW_MAX_ARCHIVE_SIZE`` / ``config.local.yaml``).
@@ -44,15 +47,17 @@ _CORRUPT_ARCHIVE_ERRORS: tuple[type[BaseException], ...] = (
 
 
 class InstallResult:
-    """Outcome of a successful install."""
+    """Outcome of a successful install (or of finding the wanted version in place)."""
 
-    def __init__(self, spec: ToolSpec, binary: Path, version: str) -> None:
+    def __init__(self, spec: ToolSpec, binary: Path, version: str, *, up_to_date: bool = False) -> None:
         self.spec = spec
         self.binary = binary
         self.version = version
+        #: True when nothing was downloaded because this version was already installed.
+        self.up_to_date = up_to_date
 
     def __repr__(self) -> str:  # pragma: no cover - debug aid
-        return f"InstallResult(binary={self.binary}, version={self.version})"
+        return f"InstallResult(binary={self.binary}, version={self.version}, up_to_date={self.up_to_date})"
 
 
 class ToolInstaller:
@@ -72,8 +77,13 @@ class ToolInstaller:
         self.max_archive_size = max_archive_size
 
     # -- public --------------------------------------------------------------
-    def install(self, spec: ToolSpec) -> InstallResult:
-        release = self.client.latest(spec.repo_owner, spec.repo_name)
+    def resolve_release(self, spec: ToolSpec) -> GitHubRelease:
+        """The release ``spec`` asks for: its pinned ``version`` tag, or the latest."""
+        return self.client.release(spec.repo_owner, spec.repo_name, spec.version)
+
+    def install(self, spec: ToolSpec, release: GitHubRelease | None = None) -> InstallResult:
+        if release is None:
+            release = self.resolve_release(spec)
         platform_patterns = asset_patterns(self.mapping)
         exact_platform_patterns = [pattern for pattern in platform_patterns if pattern != "*windows*"]
         asset = release.find_asset(*exact_platform_patterns)
@@ -117,9 +127,28 @@ class ToolInstaller:
     # -- pipeline ------------------------------------------------------------
     def _download_checked(self, asset: ReleaseAsset, dst: Path, release: GitHubRelease, spec: ToolSpec) -> None:
         self.client.download(asset.url, dst, expected_size=asset.size)
-        if spec.needs_checksum and release.checksums_url:
+        pinned = spec.sha256.get(asset.name)
+        if pinned is not None:
+            actual = sha256_hex(dst)
+            if actual != pinned:
+                raise ChecksumError(
+                    f"SHA-256 mismatch for {asset.name}: registry.yaml pins {pinned}, got {actual}"
+                )
+            return
+        if not spec.needs_checksum:
+            return
+        verified = False
+        if release.checksums_url:
             body = self.client.fetch_text(release.checksums_url)
-            verify_checksum(body, asset.name, dst)
+            verified = verify_checksum(body, asset.name, dst)
+        if not verified:
+            # Say so rather than let silence pass for a check that never ran.
+            LOG.warning(
+                "%s: download of %s was not verified — the release publishes no checksum for it; "
+                "pin `version:` and add its digest under `sha256:` in registry.yaml to enforce one",
+                spec.name,
+                asset.name,
+            )
 
     def _extract(self, spec: ToolSpec, archive_path: Path, tool_dir: Path) -> Path:
         kind = _archive_kind(spec.archive, archive_path.name)
