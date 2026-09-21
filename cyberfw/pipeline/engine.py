@@ -19,6 +19,7 @@ import sys
 import tempfile
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -93,9 +94,18 @@ class PipelineResult:
 
     nodes: list[NodeResult] = field(default_factory=list)
     records: list[ToolRecord] = field(default_factory=list)
+    #: Wall-clock bounds of :meth:`PipelineEngine.run` (UTC); ``None`` until it ran.
+    started_at: datetime | None = None
+    finished_at: datetime | None = None
 
     def succeeded(self) -> bool:
         return bool(self.nodes) and all(n.ok for n in self.nodes)
+
+    @property
+    def duration_s(self) -> float | None:
+        if self.started_at is None or self.finished_at is None:
+            return None
+        return (self.finished_at - self.started_at).total_seconds()
 
     @property
     def totals_by_tool(self) -> dict[str, int]:
@@ -164,19 +174,22 @@ class PipelineEngine:
         don't consume it simply ignore it.
         """
         self._validate_wiring(nodes)
-        result = PipelineResult()
+        result = PipelineResult(started_at=datetime.now(timezone.utc))
         outputs: dict[str, list[str]] = {}  # stage -> targets it produced
         inputs: list[str] = []
-        for node in nodes:
-            if node.input_from is not None:
-                inputs = outputs[node.input_from]
-            node_result, step_records = await self._run_node(
-                node, seed, inputs, extra_input=extra_input
-            )
-            result.nodes.append(node_result)
-            result.records.extend(step_records)
-            inputs = [r.target for r in step_records]
-            outputs[node.stage] = inputs
+        try:
+            for node in nodes:
+                if node.input_from is not None:
+                    inputs = outputs[node.input_from]
+                node_result, step_records = await self._run_node(
+                    node, seed, inputs, extra_input=extra_input
+                )
+                result.nodes.append(node_result)
+                result.records.extend(step_records)
+                inputs = [r.target for r in step_records]
+                outputs[node.stage] = inputs
+        finally:
+            result.finished_at = datetime.now(timezone.utc)
         return result
 
     async def run_single(

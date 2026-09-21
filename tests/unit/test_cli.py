@@ -6,6 +6,7 @@ so the whole code path runs without network and without real precompiled tools.
 
 from __future__ import annotations
 
+import json
 import os
 import stat
 from collections.abc import Iterator
@@ -662,3 +663,17 @@ class TestYamlPipelines:
 
         assert result.exit_code == 2
         assert "no adapter registered" in result.stdout
+
+
+class TestReportProvenance:
+    def test_pipeline_report_names_pipeline_seed_session_and_tools(self, tmp_path: Path) -> None:
+        result = runner.invoke(app, ["pipeline", "recon-to-vuln", "-t", "example.com", "--session", "prov"])
+
+        assert result.exit_code == 0, result.stdout
+        run = json.loads((tmp_path / "reports" / "prov" / "report.json").read_text(encoding="utf-8"))["run"]
+        assert run["pipeline"] == "recon-to-vuln"
+        assert run["seed"] == "example.com"
+        assert run["session_id"] == "prov"
+        assert set(run["tool_versions"]) == {"subfinder", "httpx", "nuclei"}
+        assert run["duration_s"] is not None and run["duration_s"] >= 0
+        assert "/" in run["platform"]

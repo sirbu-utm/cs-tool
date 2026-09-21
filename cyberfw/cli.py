@@ -41,6 +41,7 @@ from cyberfw.pipeline.schemas import ToolRecord
 from cyberfw.pipelines import PIPELINES, available_pipelines, build
 from cyberfw.report.html_report import generate_html_report
 from cyberfw.report.json_report import generate_json_report
+from cyberfw.report.run_info import RunInfo
 from cyberfw.tools import adapter_class
 from cyberfw.tools.base import ToolContext
 from cyberfw.ui import banner, tool_guide
@@ -732,9 +733,22 @@ def pipeline_cmd(
     console.print(f"[info]session:[/info] {session_id}  [info]records:[/info] {len(result.records)}")
 
     if not no_report:
+        run = RunInfo(
+            pipeline=name,
+            seed=target,
+            session_id=session_id,
+            platform=f"{manager.mapping.os_name}/{manager.mapping.arch}",
+            tool_versions={
+                tool: (manager.install_state(tool) or {}).get("version") for tool in sorted({n.tool for n in nodes})
+            },
+        )
         try:
-            json_path = generate_json_report(result, session_id=session_id, reports_dir=settings.reports_dir)
-            html_path = generate_html_report(result, session_id=session_id, reports_dir=settings.reports_dir)
+            json_path = generate_json_report(
+                result, session_id=session_id, reports_dir=settings.reports_dir, run=run
+            )
+            html_path = generate_html_report(
+                result, session_id=session_id, reports_dir=settings.reports_dir, run=run
+            )
         except CyberfwError as exc:
             console.print(f"[err]report failed:[/err] {exc}")
             return

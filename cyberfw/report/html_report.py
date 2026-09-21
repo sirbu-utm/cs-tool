@@ -15,6 +15,7 @@ from cyberfw.exceptions import ReportError
 from cyberfw.logging import get_logger
 from cyberfw.pipeline.engine import PipelineResult
 from cyberfw.pipeline.schemas import ToolRecord
+from cyberfw.report.run_info import RunInfo
 
 LOG = get_logger("report.html")
 
@@ -30,11 +31,13 @@ def generate_html_report(
     *,
     session_id: str | None = None,
     reports_dir: Path | None = None,
+    run: RunInfo | None = None,
 ) -> Path:
     """Write the HTML report and return its path.
 
     ``output_path`` takes priority; otherwise ``reports_dir / session_id /
-    report.html`` is used (creating directories as needed).
+    report.html`` is used (creating directories as needed). ``run`` supplies
+    the provenance rows (pipeline, seed, timing, tool versions).
     """
     path = _resolve_path(output_path, session_id, reports_dir)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -47,6 +50,7 @@ def generate_html_report(
         ok="success" if result.succeeded() else "failed",
         totals=_totals_summary(result),
         total_records=len(result.records),
+        run_rows=_render_run(result, run or RunInfo()),
         headers_row=headers_row,
         stages_rows=stages_rows,
         records_rows=records_rows,
@@ -63,6 +67,31 @@ def _totals_summary(result: PipelineResult) -> str:
     """Comma-joined ``tool: count`` for the header line."""
     parts = [f"{tool}: {count}" for tool, count in result.totals_by_tool.items()]
     return " · ".join(parts) if parts else "no records"
+
+
+def _render_run(result: PipelineResult, run: RunInfo) -> str:
+    """Rows of the provenance table; every value is escaped (the seed is user input,
+    tool versions come from install records)."""
+    info = run.as_dict(result)
+    versions = " · ".join(
+        f"{tool} {version or '—'}" for tool, version in sorted(run.tool_versions.items())
+    )
+    duration = info["duration_s"]
+    rows = [
+        ("pipeline", info["pipeline"]),
+        ("seed", info["seed"]),
+        ("session", info["session_id"]),
+        ("platform", info["platform"]),
+        ("started (UTC)", info["started_at"]),
+        ("duration", None if duration is None else f"{duration:.1f} s"),
+        ("tools", versions or None),
+        ("cyberfw", info["cyberfw_version"]),
+    ]
+    return "\n".join(f"<tr><th>{html.escape(label)}</th><td>{_cell(value)}</td></tr>" for label, value in rows)
+
+
+def _cell(value: object) -> str:
+    return '<span class="dim">—</span>' if value is None else html.escape(str(value))
 
 
 def _render_stages(result: PipelineResult) -> str:
@@ -139,6 +168,7 @@ _PAGE_TEMPLATE = """<!DOCTYPE html>
   th {{ background: #eceef1; font-size: 11px; text-transform: uppercase;
        letter-spacing: .04em; }}
   .detail {{ word-break: break-word; }}
+  table.run th {{ width: 160px; text-transform: none; letter-spacing: 0; font-size: 13px; }}
   .dim {{ color: #8a919c; }}
   .ok {{ color: #15803d; background: #f0fdf4; }}
   .err {{ color: #b91c1c; background: #fef2f2; }}
@@ -159,6 +189,10 @@ _PAGE_TEMPLATE = """<!DOCTYPE html>
 <div class="wrap">
   <h1>cyberfw report</h1>
   <div class="meta"><span class="pill {ok}">{ok}</span> · {totals} · {total_records} records</div>
+  <h2>Run</h2>
+  <table class="run"><tbody>
+  {run_rows}
+  </tbody></table>
   <h2>Stages</h2>
   <table><thead><tr><th>tool</th><th>stage</th><th>count</th><th>status</th><th>error</th></tr></thead>
   <tbody>

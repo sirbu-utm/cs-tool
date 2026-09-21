@@ -3,16 +3,19 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
 
+from cyberfw import __version__
 from cyberfw.exceptions import ReportError
 from cyberfw.pipeline.engine import Node, NodeResult, PipelineResult
 from cyberfw.pipeline.schemas import NucleiResult, SubfinderResult
 from cyberfw.report import generate_html_report, generate_json_report
 from cyberfw.report.html_report import generate_html_report as html_report_gen
 from cyberfw.report.json_report import generate_json_report as json_report_gen
+from cyberfw.report.run_info import RunInfo
 
 
 def _ok_result() -> PipelineResult:
@@ -99,4 +102,66 @@ class TestHtmlReport:
         )
         text = html_report_gen(result, output_path=tmp_path / "x.html").read_text(encoding="utf-8")
         assert "<script>" not in text
+        assert "&lt;script&gt;" in text
+
+
+class TestRunProvenance:
+    """A security report must say what was scanned, with which tool versions and when —
+    otherwise a finding cannot be reproduced or attributed to a scanner release."""
+
+    @staticmethod
+    def _run_info() -> RunInfo:
+        return RunInfo(
+            pipeline="recon-to-vuln",
+            seed="example.com",
+            session_id="pipeline-recon-to-vuln-20260922-120000",
+            platform="windows/amd64",
+            tool_versions={"subfinder": "2.6.6", "nuclei": None},
+        )
+
+    def test_json_report_carries_the_run_block(self, tmp_path: Path) -> None:
+        result = _ok_result()
+        result.started_at = datetime(2026, 9, 22, 12, 0, 0, tzinfo=timezone.utc)
+        result.finished_at = datetime(2026, 9, 22, 12, 0, 42, tzinfo=timezone.utc)
+
+        path = json_report_gen(result, output_path=tmp_path / "r.json", run=self._run_info())
+
+        run = json.loads(path.read_text(encoding="utf-8"))["run"]
+        assert run["pipeline"] == "recon-to-vuln"
+        assert run["seed"] == "example.com"
+        assert run["session_id"] == "pipeline-recon-to-vuln-20260922-120000"
+        assert run["platform"] == "windows/amd64"
+        assert run["tool_versions"] == {"subfinder": "2.6.6", "nuclei": None}
+        assert run["started_at"] == "2026-09-22T12:00:00+00:00"
+        assert run["finished_at"] == "2026-09-22T12:00:42+00:00"
+        assert run["duration_s"] == 42.0
+        assert run["cyberfw_version"] == __version__
+        assert run["generated_at"].endswith("+00:00")
+
+    def test_json_report_without_run_info_still_has_the_block(self, tmp_path: Path) -> None:
+        path = json_report_gen(_ok_result(), output_path=tmp_path / "r.json")
+
+        run = json.loads(path.read_text(encoding="utf-8"))["run"]
+        assert run["cyberfw_version"] == __version__
+        assert run["pipeline"] is None and run["duration_s"] is None
+
+    def test_html_report_shows_the_provenance(self, tmp_path: Path) -> None:
+        result = _ok_result()
+        result.started_at = datetime(2026, 9, 22, 12, 0, 0, tzinfo=timezone.utc)
+        result.finished_at = datetime(2026, 9, 22, 12, 0, 42, tzinfo=timezone.utc)
+
+        text = html_report_gen(result, output_path=tmp_path / "r.html", run=self._run_info()).read_text(
+            encoding="utf-8"
+        )
+
+        assert "recon-to-vuln" in text
+        assert "example.com" in text
+        assert "subfinder 2.6.6" in text
+        assert "windows/amd64" in text
+        assert "42" in text and "2026-09-22" in text
+
+    def test_html_seed_is_escaped(self, tmp_path: Path) -> None:
+        run = RunInfo(pipeline="p", seed="<script>alert(1)</script>")
+        text = html_report_gen(_ok_result(), output_path=tmp_path / "r.html", run=run).read_text(encoding="utf-8")
+        assert "<script>alert(1)</script>" not in text
         assert "&lt;script&gt;" in text

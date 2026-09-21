@@ -214,6 +214,27 @@ JSONL-контекст по этапам — это механизм перед�
 - self-contained HTML-отчёт;
 - JSONL-файлы контекста по этапам pipeline.
 
+Оба отчёта начинаются с блока провенанса (`run` в JSON, таблица «Run» в
+HTML): имя pipeline, seed-цель, сессия, платформа (`windows/amd64`), время
+начала (UTC) и длительность, версии инструментов из install-записей
+`tools_bin/.<tool>.install.json` и версия cyberfw. Без этого находку нельзя
+воспроизвести или привязать к релизу сканера.
+
+```json
+"run": {
+  "generated_at": "2026-09-22T09:41:07+00:00",
+  "cyberfw_version": "1.0.0",
+  "pipeline": "recon-to-vuln",
+  "seed": "example.com",
+  "session_id": "pipeline-recon-to-vuln-20260922-124055",
+  "platform": "windows/amd64",
+  "started_at": "2026-09-22T09:40:55+00:00",
+  "finished_at": "2026-09-22T09:41:07+00:00",
+  "duration_s": 12.3,
+  "tool_versions": {"httpx": "1.12.0", "nuclei": "3.6.0", "subfinder": "2.9.0"}
+}
+```
+
 Для отдельного `cyberfw run` архивация не включена по умолчанию — см. флаг
 `--save` выше.
 

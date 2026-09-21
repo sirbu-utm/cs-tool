@@ -574,3 +574,25 @@ class TestMissingBinaryIsAStageFailure:
         assert "not installed" in (result.nodes[0].error or "")
         assert result.nodes[1].ok is True
         assert [r.target for r in result.records] == ["seed.example.com"]
+
+
+class TestRunTiming:
+    async def test_result_records_when_the_run_started_and_finished(self, tmp_path: Path) -> None:
+        from datetime import datetime, timezone
+
+        registry_path = tmp_path / "registry.yaml"
+        registry_path.write_text(
+            "subfinder:\n  repo: org/subfinder\n  asset_patterns: []\n  binary: stub_probe.py\n",
+            encoding="utf-8",
+        )
+        engine = _make_engine(tmp_path, registry_path)
+        stub = _StubTool(engine.tool_manager.spec("subfinder"), _stub_binary(tmp_path))
+        engine.build_tool = lambda name: stub  # type: ignore[method-assign]
+        before = datetime.now(timezone.utc)
+
+        result = await engine.run([Node(tool="subfinder", stage="sub")], seed="x")
+
+        assert result.started_at is not None and result.finished_at is not None
+        assert result.started_at.tzinfo is not None, "timestamps must be timezone-aware (UTC)"
+        assert before <= result.started_at <= result.finished_at <= datetime.now(timezone.utc)
+        assert result.duration_s is not None and result.duration_s >= 0

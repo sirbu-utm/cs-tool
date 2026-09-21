@@ -12,6 +12,7 @@ from typing import Any
 from cyberfw.exceptions import ReportError
 from cyberfw.logging import get_logger
 from cyberfw.pipeline.engine import PipelineResult
+from cyberfw.report.run_info import RunInfo
 
 LOG = get_logger("report.json")
 
@@ -24,16 +25,20 @@ def generate_json_report(
     *,
     session_id: str | None = None,
     reports_dir: Path | None = None,
+    run: RunInfo | None = None,
 ) -> Path:
     """Write the JSON report and return its path.
 
     ``output_path`` takes priority; otherwise ``reports_dir / session_id /
-    report.json`` is used (creating directories as needed).
+    report.json`` is used (creating directories as needed). ``run`` fills the
+    provenance block (``run``: pipeline, seed, timing, tool versions); it is
+    always present so consumers can rely on its keys.
     """
     path = _resolve_path(output_path, session_id, reports_dir)
     path.parent.mkdir(parents=True, exist_ok=True)
     payload: dict[str, Any] = {
         "ok": result.succeeded(),
+        "run": (run or RunInfo()).as_dict(result),
         "stages": [
             {
                 "tool": nr.node.tool,
