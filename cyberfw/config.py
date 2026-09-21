@@ -41,6 +41,9 @@ class Settings(BaseSettings):
     tools_dir: Path = Field(default=Path("tools_bin"))
     reports_dir: Path = Field(default=Path("reports"))
     logs_dir: Path = Field(default=Path("logs"))
+    pipelines_dir: Path = Field(
+        default=Path("pipelines"), description="Directory of user-defined <name>.yaml pipelines."
+    )
     cache_dir: Path = Field(default=Path.home() / ".cache" / "cyberfw")
     # Remote behaviour.
     github_token: str | None = Field(default=None, exclude=True)
@@ -87,7 +90,7 @@ class Settings(BaseSettings):
     @model_validator(mode="after")
     def _make_dirs_absolute(self) -> Settings:
         """Resolve relative paths against ``root_dir`` (the CWD)."""
-        for name in ("tools_dir", "reports_dir", "logs_dir"):
+        for name in ("tools_dir", "reports_dir", "logs_dir", "pipelines_dir"):
             value: Path = getattr(self, name)
             if not value.is_absolute():
                 setattr(self, name, (self.root_dir / value).resolve())

@@ -29,6 +29,7 @@ _FAKE_OUTPUT = {
         '{"template-id": "xss", "matched-at": "https://sub.example.com/", '
         '"info": {"name": "XSS check", "severity": "medium"}}\n'
     ),
+    "ffuf": '{"url": "https://sub.example.com/admin", "status": 200, "length": 12}\n',
 }
 
 
@@ -95,7 +96,7 @@ class TestHelpAndUnknown:
             manager.close()
 
         assert rendered.columns[0].header == "#"
-        assert len(rendered.rows) == 3
+        assert len(rendered.rows) == len(_FAKE_OUTPUT)
 
     def test_every_tool_has_usage_guide(self) -> None:
         assert set(TOOL_GUIDES) == {
@@ -525,3 +526,78 @@ class TestLauncherPromptsComeFromTheAdapter:
 
         assert prompts == ["Which planet?"]
         assert calls == [("planetscan", {"target": "mars", "wordlist": None})]
+
+
+class TestYamlPipelines:
+    """A pipeline defined in pipelines/<name>.yaml runs exactly like a built-in one."""
+
+    @staticmethod
+    def _write_pipeline(root: Path, name: str, text: str) -> None:
+        (root / "pipelines").mkdir(exist_ok=True)
+        (root / "pipelines" / f"{name}.yaml").write_text(text, encoding="utf-8")
+
+    def test_yaml_pipeline_runs_end_to_end(self, tmp_path: Path) -> None:
+        self._write_pipeline(
+            tmp_path,
+            "web-check",
+            "description: probe then scan\n"
+            "nodes:\n"
+            "  - tool: subfinder\n    stage: subdomains\n"
+            "  - tool: httpx\n    stage: live_http\n"
+            "  - tool: nuclei\n    stage: vulns\n    input_from: live_http\n",
+        )
+
+        result = runner.invoke(app, ["pipeline", "web-check", "-t", "example.com"])
+
+        assert result.exit_code == 0, result.stdout
+        assert "report.json" in result.stdout
+        report = next((tmp_path / "reports").rglob("report.json")).read_text(encoding="utf-8")
+        assert '"stage": "vulns"' in report
+
+    def test_yaml_pipeline_with_an_unregistered_tool_is_a_usage_error(self, tmp_path: Path) -> None:
+        self._write_pipeline(tmp_path, "typo", "nodes:\n  - tool: httpxx\n    stage: live\n")
+
+        result = runner.invoke(app, ["pipeline", "typo", "-t", "example.com"])
+
+        assert result.exit_code == 2
+        assert "httpxx" in result.stdout
+        assert "Traceback" not in result.stdout
+
+    def test_broken_yaml_pipeline_is_a_usage_error(self, tmp_path: Path) -> None:
+        self._write_pipeline(tmp_path, "bad", "nodes:\n  - tool: httpx\n    stage: a\n    input_from: nope\n")
+
+        result = runner.invoke(app, ["pipeline", "bad", "-t", "example.com"])
+
+        assert result.exit_code == 2
+        assert "input_from" in result.stdout
+
+    def test_launcher_offers_yaml_pipelines(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        from cyberfw.cli import _interactive_pipeline
+
+        self._write_pipeline(tmp_path, "web-check", "nodes:\n  - tool: httpx\n    stage: live\n")
+        seen: dict[str, object] = {}
+
+        def fake_ask(prompt: str, *_a, **kw) -> str:
+            if prompt == "Pipeline":
+                seen["choices"] = kw.get("choices")
+                return "web-check"
+            return "example.com"
+
+        monkeypatch.setattr("cyberfw.cli.Prompt.ask", fake_ask)
+        monkeypatch.setattr("cyberfw.cli.Confirm.ask", lambda *_a, **_k: pytest.fail("no recon options for a YAML pipeline"))
+        monkeypatch.setattr("cyberfw.cli.pipeline_cmd", lambda name, **kw: seen.update(name=name, **kw))
+        _interactive_pipeline()
+
+        assert seen["choices"] == ["recon-to-vuln", "web-check"]
+        assert seen["name"] == "web-check"
+        assert seen["target"] == "example.com"
+
+    def test_registered_tool_without_an_adapter_is_a_usage_error(self, tmp_path: Path) -> None:
+        with (tmp_path / "registry.yaml").open("a", encoding="utf-8") as handle:
+            handle.write("weirdtool:\n  repo: org/weirdtool\n  asset_patterns: []\n  binary: weirdtool\n")
+        self._write_pipeline(tmp_path, "weird", "nodes:\n  - tool: weirdtool\n    stage: w\n")
+
+        result = runner.invoke(app, ["pipeline", "weird", "-t", "example.com"])
+
+        assert result.exit_code == 2
+        assert "no adapter registered" in result.stdout

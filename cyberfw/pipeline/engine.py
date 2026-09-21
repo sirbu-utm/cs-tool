@@ -213,7 +213,6 @@ class PipelineEngine:
         parse: bool = True,
         extra_input: str | None = None,
     ) -> tuple[NodeResult, list[ToolRecord]]:
-        adapter = self.build_tool(node.tool)
         ctx = ToolContext(
             target=seed,
             inputs=inputs,
@@ -221,6 +220,9 @@ class PipelineEngine:
         )
 
         try:
+            # Inside the try: a registered-but-uninstalled tool is a failed
+            # stage like any other, not the end of the run (and its report).
+            adapter = self.build_tool(node.tool)
             records = await self._dispatch(adapter, ctx, node, parse=parse)
         except ExecutionError as exc:
             LOG.warning("stage %s failed: %s (stderr tail: %s)", node.stage, exc, exc.stderr_tail)

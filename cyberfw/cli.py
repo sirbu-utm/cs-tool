@@ -38,7 +38,7 @@ from cyberfw.manager import ToolManager, load_registry
 from cyberfw.pipeline.context import SessionContext
 from cyberfw.pipeline.engine import Node, NodeResult, PipelineEngine, PipelineResult
 from cyberfw.pipeline.schemas import ToolRecord
-from cyberfw.pipelines import build
+from cyberfw.pipelines import PIPELINES, available_pipelines, build
 from cyberfw.report.html_report import generate_html_report
 from cyberfw.report.json_report import generate_json_report
 from cyberfw.tools import adapter_class
@@ -370,13 +370,16 @@ def _interactive_run(tool: str) -> None:
 
 
 def _interactive_pipeline() -> None:
-    name = Prompt.ask("Pipeline", choices=["recon-to-vuln"], default="recon-to-vuln")
+    choices = available_pipelines(load_settings().pipelines_dir)
+    name = Prompt.ask("Pipeline", choices=choices, default=choices[0])
     target = Prompt.ask("Seed target (domain or URL)")
-    include_ffuf = Confirm.ask("Include Ffuf?", default=False)
+    include_ffuf = include_gowitness = False
     wordlist = None
-    if include_ffuf:
-        wordlist = Prompt.ask("Ffuf wordlist path", default="") or None
-    include_gowitness = Confirm.ask("Include Gowitness?", default=False)
+    if name in PIPELINES:  # the optional stages are recon-to-vuln's; YAML pipelines have none
+        include_ffuf = Confirm.ask("Include Ffuf?", default=False)
+        if include_ffuf:
+            wordlist = Prompt.ask("Ffuf wordlist path", default="") or None
+        include_gowitness = Confirm.ask("Include Gowitness?", default=False)
     pipeline_cmd(
         name,
         target=target,
@@ -623,7 +626,7 @@ def run_cmd(
 
 @app.command("pipeline")
 def pipeline_cmd(
-    name: Annotated[str, typer.Argument(help="Pipeline name (recon-to-vuln).")],
+    name: Annotated[str, typer.Argument(help="Pipeline name: recon-to-vuln or a file from pipelines/<name>.yaml.")],
     target: Annotated[str | None, typer.Option("--target", "-t", help="Seed domain/URL for the first stage.")] = None,
     ffuf: Annotated[bool, typer.Option("--ffuf", help="Include the Ffuf node.")] = False,
     gowitness: Annotated[bool, typer.Option("--gowitness", help="Include the Gowitness node.")] = False,
@@ -645,13 +648,22 @@ def pipeline_cmd(
         console.print("[err]Provide a seed target via --target.[/err]")
         raise typer.Exit(2)
 
+    settings, manager = _bootstrap()
     try:
-        nodes = build(name, include_ffuf=ffuf, include_gowitness=gowitness, max_httpx=max_httpx)
+        nodes = build(
+            name,
+            pipelines_dir=settings.pipelines_dir,
+            include_ffuf=ffuf,
+            include_gowitness=gowitness,
+            max_httpx=max_httpx,
+        )
+        for node in nodes:  # a YAML pipeline may name a tool the registry (or the code) lacks
+            manager.spec(node.tool)
+            adapter_class(node.tool)
     except RegistryError as exc:
         console.print(f"[err]{exc}[/err]")
+        manager.close()
         raise typer.Exit(2) from exc
-
-    settings, manager = _bootstrap()
     wordlist = wordlist or settings.wordlist
     if ffuf and not wordlist:
         console.print(

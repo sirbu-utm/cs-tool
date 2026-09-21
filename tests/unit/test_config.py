@@ -113,3 +113,6 @@ class TestSettingsEnv:
     def test_zero_stage_timeout_rejected(self, tmp_path: Path) -> None:
         with pytest.raises(ValidationError):
             Settings(root_dir=tmp_path, stage_timeout=0)
+
+    def test_pipelines_dir_resolves_against_root(self, tmp_path: Path) -> None:
+        assert Settings(root_dir=tmp_path).pipelines_dir == (tmp_path / "pipelines").resolve()

@@ -1,0 +1,20 @@
+# ports-to-vuln — активный вариант recon-to-vuln: вместо пассивного поиска
+# поддоменов сначала сканируются порты цели (naabu), найденные host:port
+# проверяются httpx, а по живым HTTP-сервисам прогоняется nuclei.
+#
+#   cyberfw pipeline ports-to-vuln --target example.com
+#
+# Формат (см. cyberfw/pipelines/loader.py):
+#   tool         — имя из registry.yaml
+#   stage        — имя этапа (файл reports/<session>/<stage>.jsonl)
+#   input_from   — этап, чьи записи получает узел (по умолчанию — предыдущий)
+#   max_records  — обрезать вывод этапа (0 = без ограничения)
+description: Active port scan, HTTP probe of the open ports, then nuclei on the live services
+nodes:
+  - tool: naabu
+    stage: ports
+  - tool: httpx
+    stage: live_http
+  - tool: nuclei
+    stage: vulns
+    input_from: live_http

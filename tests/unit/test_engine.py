@@ -548,3 +548,29 @@ class TestRunSingle:
 
         assert node_result.ok
         assert [r.target for r in records] == ["seed.example.com"]
+
+
+class TestMissingBinaryIsAStageFailure:
+    async def test_uninstalled_tool_fails_its_stage_and_the_rest_still_runs(self, tmp_path: Path) -> None:
+        """A registered tool whose binary is absent (``--gowitness`` never installed) must
+        become a failed NodeResult like any other stage error — not abort the run and
+        throw away the report for the stages that already completed."""
+        registry_path = tmp_path / "registry.yaml"
+        registry_path.write_text(
+            "gowitness:\n  repo: org/gowitness\n  asset_patterns: []\n  binary: gowitness\n"
+            "subfinder:\n  repo: org/subfinder\n  asset_patterns: []\n  binary: stub_probe.py\n",
+            encoding="utf-8",
+        )
+        engine = _make_engine(tmp_path, registry_path)
+        stub = _StubTool(engine.tool_manager.spec("subfinder"), _stub_binary(tmp_path))
+        real_build_tool = engine.build_tool
+        engine.build_tool = lambda name: stub if name == "subfinder" else real_build_tool(name)  # type: ignore[method-assign]
+
+        result = await engine.run(
+            [Node(tool="gowitness", stage="shots"), Node(tool="subfinder", stage="sub")], seed="seed.example.com"
+        )
+
+        assert result.nodes[0].ok is False
+        assert "not installed" in (result.nodes[0].error or "")
+        assert result.nodes[1].ok is True
+        assert [r.target for r in result.records] == ["seed.example.com"]

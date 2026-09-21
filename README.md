@@ -123,6 +123,9 @@ cyberfw pipeline recon-to-vuln --target example.com
 
 # Дополнительные этапы pipeline
 cyberfw pipeline recon-to-vuln --target example.com --ffuf --gowitness
+
+# Pipeline из файла pipelines/<name>.yaml (см. раздел «Свои pipeline»)
+cyberfw pipeline ports-to-vuln --target example.com
 ```
 
 Команда `cyberfw status` (алиас `cyberfw doctor`) — пре-флайт проверка
@@ -245,6 +248,9 @@ log_to_file: true     # писать ли диагностику в logs/cyberfw
 
 # Вордлист для Ffuf (нужен для --ffuf в pipeline и `run ffuf`)
 wordlist: C:\wordlists\common.txt
+
+# Каталог с pipeline-файлами <name>.yaml (по умолчанию pipelines/ в корне)
+pipelines_dir: pipelines
 ```
 
 Те же ключи доступны как переменные окружения: `CYBERFW_PARSE=false`,
@@ -254,6 +260,37 @@ wordlist: C:\wordlists\common.txt
 `log_level`/`log_to_file` (неверный уровень отклоняется с понятной ошибкой).
 
 Файл локальной конфигурации игнорируется Git.
+
+## Свои pipeline
+
+Помимо встроенного `recon-to-vuln`, любой файл `pipelines/<name>.yaml`
+(каталог настраивается ключом `pipelines_dir`) — это pipeline, который
+запускается по имени файла: `cyberfw pipeline <name> --target ...`; он же
+появляется в списке выбора лаунчера (`r`). В репозитории лежит пример
+`pipelines/ports-to-vuln.yaml` — активный вариант recon-to-vuln через naabu:
+
+```yaml
+description: Active port scan, HTTP probe of the open ports, then nuclei on the live services
+nodes:
+  - tool: naabu          # имя из registry.yaml
+    stage: ports         # имя этапа: reports/<session>/ports.jsonl
+  - tool: httpx
+    stage: live_http     # по умолчанию узел получает записи предыдущего этапа
+  - tool: nuclei
+    stage: vulns
+    input_from: live_http  # либо любого более раннего этапа по имени
+    max_records: 0         # обрезать вывод этапа (0 = без ограничения)
+```
+
+Движок уже управляется данными, так что файл — это только описание узлов:
+fan-out по целям (ffuf, gowitness), передача списка хостов через `-l`,
+`stage_timeout`, изоляция ошибок и отчёты работают так же, как для
+встроенного pipeline. Ошибки в файле (опечатка в ключе, `input_from` на
+несуществующий или более поздний этап, повтор `stage`, инструмент, которого
+нет в `registry.yaml`) выявляются до запуска и завершают команду с кодом 2.
+Флаги `--ffuf`/`--gowitness`/`--max-httpx` относятся к `recon-to-vuln`; для
+YAML-pipeline они игнорируются с предупреждением. При совпадении имён
+встроенный pipeline имеет приоритет.
 
 ## Реестр инструментов
 
@@ -309,11 +346,12 @@ cyberfw/
   ui.py                  Rich UI, логотипы и гайды инструментов
   manager/               GitHub API, реестр, установка и проверка бинарников
   pipeline/              executor, context store и pipeline engine
-  pipelines/             готовые pipeline
+  pipelines/             встроенные pipeline и загрузчик YAML-описаний
   tools/                 адаптеры восьми внешних инструментов
   report/                JSON и HTML отчёты
 tests/                   unit и integration тесты
 registry.yaml            декларативный реестр релизов
+pipelines/               свои pipeline в YAML (пример: ports-to-vuln.yaml)
 cstool.bat               Windows launcher (bootstrap + CLI)
 cstool / start.sh        Linux/macOS launcher (bootstrap + CLI)
 ```
