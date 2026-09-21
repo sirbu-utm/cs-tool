@@ -39,6 +39,20 @@ class TestSettings:
         settings = load_settings(root_dir=tmp_path, local_file=yaml_file)
         assert settings.concurrency == 7
 
+    def test_yaml_relative_dir_is_resolved_and_validated(self, tmp_path: Path) -> None:
+        """YAML overrides must go through the same validators as constructor kwargs."""
+        yaml_file = tmp_path / "config.local.yaml"
+        yaml_file.write_text("reports_dir: out\nlog_level: debug\n", encoding="utf-8")
+        settings = load_settings(root_dir=tmp_path, local_file=yaml_file)
+        assert settings.reports_dir == (tmp_path / "out").resolve()
+        assert settings.log_level == "DEBUG"
+
+    def test_yaml_invalid_value_is_rejected(self, tmp_path: Path) -> None:
+        yaml_file = tmp_path / "config.local.yaml"
+        yaml_file.write_text("concurrency: 0\n", encoding="utf-8")
+        with pytest.raises(ValidationError):
+            load_settings(root_dir=tmp_path, local_file=yaml_file)
+
     def test_yaml_beats_default(self, tmp_path: Path) -> None:
         yaml_file = tmp_path / "config.local.yaml"
         yaml_file.write_text("concurrency: 13\n", encoding="utf-8")

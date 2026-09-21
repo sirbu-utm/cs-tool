@@ -13,7 +13,6 @@ from __future__ import annotations
 import asyncio
 import collections
 import os
-import shutil
 import signal
 import subprocess
 from collections.abc import Awaitable, Callable
@@ -59,11 +58,49 @@ def _prepare_cmd(cmd: list[str]) -> list[str]:
     if not first.startswith(b"#!"):
         return cmd
 
-    bash = shutil.which("bash")
+    bash = _find_bash()
     if not bash:
         return cmd
 
     return [bash, _to_posix_path(path, bash), *cmd[1:]]
+
+
+#: Directories whose ``bash.exe`` is the WSL launcher, not a native shell.
+_WSL_SHIM_DIRS = ("\\windows\\system32", "\\microsoft\\windowsapps")
+
+
+def _find_bash() -> str | None:
+    """Locate a ``bash.exe``, preferring Git Bash / MSYS2 over the WSL shim.
+
+    ``C:\\Windows\\System32\\bash.exe`` (and its WindowsApps alias) launches a WSL
+    distribution: it fails outright when none is installed, takes seconds to
+    boot, and sees the filesystem under ``/mnt/c``. It frequently precedes Git's
+    ``usr\\bin`` on PATH, so a plain ``shutil.which`` would pick it. Walk every
+    PATH entry plus Git for Windows' default install locations, and only fall
+    back to the WSL shim when no native bash exists anywhere.
+    """
+    program_files = os.environ.get("ProgramFiles", r"C:\Program Files")
+    local_appdata = os.environ.get("LOCALAPPDATA", "")
+    git_dirs = [
+        os.path.join(program_files, "Git", "bin"),
+        os.path.join(program_files, "Git", "usr", "bin"),
+        os.path.join(local_appdata, "Programs", "Git", "bin") if local_appdata else "",
+        os.path.join(local_appdata, "Programs", "Git", "usr", "bin") if local_appdata else "",
+    ]
+    path_dirs = [d for d in os.environ.get("PATH", "").split(os.pathsep) if d]
+
+    shim: str | None = None
+    for directory in [*path_dirs, *git_dirs]:
+        if not directory:
+            continue
+        candidate = os.path.join(directory, "bash.exe")
+        if not os.path.isfile(candidate):
+            continue
+        if any(marker in candidate.lower() for marker in _WSL_SHIM_DIRS):
+            shim = shim or candidate
+            continue
+        return candidate
+    return shim
 
 
 def _to_posix_path(path: Path, bash: str) -> str:
@@ -143,6 +180,7 @@ async def run_stage(
     parser = parse_line
     buffered = parse and parse_buffer is not None
     buffer_lines: list[str] = []
+    unparsed = 0
 
     async def _drain_stderr() -> None:
         assert proc.stderr is not None
@@ -157,6 +195,7 @@ async def run_stage(
                     await on_stderr(text)
 
     async def _drain_stdout() -> None:
+        nonlocal unparsed
         assert proc.stdout is not None
         lineno = 0
         while True:
@@ -198,6 +237,7 @@ async def run_stage(
                     rec = parser(text, lineno)
             except ParseError as exc:
                 logger.debug("%s", exc)
+                unparsed += 1
                 rec = None
             if rec is not None:
                 records.append(rec)
@@ -228,8 +268,21 @@ async def run_stage(
                     await on_record(rec)
                 if context is not None:
                     context.append(stage, rec)
+        if unparsed:
+            # One summary, not one line per failure: a tool whose JSON shape
+            # drifted would otherwise lose every finding with only DEBUG noise.
+            logger.warning(
+                "%s: %d stdout line(s) did not match the expected schema and were dropped "
+                "(re-run with --no-parse to see the raw output)",
+                tool,
+                unparsed,
+            )
         return records
     finally:
+        # Leaving this block with a live child — a callback or Context Store
+        # error mid-stream, or cancellation — must never orphan a scanner.
+        # (transport.close() below also kills, but via a private attribute.)
+        _kill_if_running(proc)
         # Release pipe transports while the loop is still alive, so their
         # __del__ doesn't fire noisy ResourceWarnings at interpreter shutdown.
         _close_transport(proc)
@@ -250,6 +303,16 @@ def _close_transport(proc: asyncio.subprocess.Process) -> None:
             transport.close()
         except Exception:  # noqa: BLE001 - cleanup must never raise
             pass
+
+
+def _kill_if_running(proc: asyncio.subprocess.Process) -> None:
+    """Hard-kill the child if it has not exited yet (best effort, never raises)."""
+    if proc.returncode is not None:
+        return
+    try:
+        proc.kill()
+    except (ProcessLookupError, PermissionError):  # pragma: no cover - already gone
+        pass
 
 
 def _terminate(proc: asyncio.subprocess.Process) -> None:

@@ -74,6 +74,16 @@ class BaseTool(ABC):
         """The ``-l`` / ``-iL``/other flag this tool uses for a host list."""
         return None
 
+    def prepare_inputs(self, inputs: list[str]) -> list[str]:
+        """Normalise upstream targets before the engine hands them to this tool.
+
+        Called on ``ctx.inputs`` ahead of materialising the ``input_flag`` file,
+        so a tool that only understands bare hosts can strip schemes/ports from
+        URLs or ``host:port`` records produced by an earlier stage. Identity by
+        default; the engine deduplicates afterwards.
+        """
+        return inputs
+
     @abstractmethod
     def build_cmd(self, ctx: ToolContext) -> list[str]:
         """Return the full argv (including the binary path) to run this tool."""

@@ -21,22 +21,31 @@ class RustscanTool(BaseTool):
     # own non-greppable/human banner uses.
     _GREPPABLE_LINE = re.compile(r"^(?P<host>\S+)\s*->\s*\[(?P<ports>[\d,\s]+)\]\s*$")
 
-    # Consumes every host in one pass (joined via -a), so no fan-out.
+    # Consumes every host in one pass, so no fan-out.
     per_target = False
 
     @property
     def input_flag(self) -> str | None:
-        return None  # RustScan consumes hosts via positional/`-a`
+        # ``--addresses`` takes either a comma list or a newline-delimited file.
+        # Prefer the file for multi-host input: comma-joining thousands of
+        # subfinder hosts into one argument overflows Windows' command line.
+        return "--addresses"
+
+    def prepare_inputs(self, inputs: list[str]) -> list[str]:
+        return [_hostname(host) for host in inputs]
 
     def build_cmd(self, ctx: ToolContext) -> list[str]:
-        hosts = ctx.inputs if ctx.inputs else ([ctx.target] if ctx.target else [])
-        if not hosts:
-            raise ToolNotFoundError("RustScan needs at least one target (host or IP).")
-        hosts = [_hostname(host) for host in hosts]
+        if ctx.input_file is not None:
+            addresses = str(ctx.input_file)
+        else:
+            hosts = ctx.inputs if ctx.inputs else ([ctx.target] if ctx.target else [])
+            if not hosts:
+                raise ToolNotFoundError("RustScan needs at least one target (host or IP).")
+            addresses = ",".join(_hostname(host) for host in hosts)
         return [
             str(self.binary),
             "--addresses",
-            ",".join(hosts),
+            addresses,
             "--greppable",
             *self._static_flags(),
         ]
@@ -61,6 +70,11 @@ class RustscanTool(BaseTool):
 
 
 def _hostname(target: str) -> str:
-    """Accept a URL in the UI while passing RustScan only a host name."""
-    parsed = urlsplit(target)
+    """Accept a URL or ``host:port`` in the UI while passing RustScan only a host name.
+
+    ``urlsplit`` only recognises a netloc after ``//``; a scheme-less
+    ``192.0.2.10:8080`` (naabu's ``target`` shape) would otherwise parse as
+    ``scheme="192.0.2.10"`` and come back unchanged, port included.
+    """
+    parsed = urlsplit(target if "://" in target else f"//{target}")
     return parsed.hostname or target

@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import io
+import struct
+import tarfile
 import zipfile
 from pathlib import Path
 
 import pytest
 
-from cyberfw.exceptions import ArchiveSafetyError, ChecksumError, ToolNotFoundError
+from cyberfw.exceptions import ArchiveSafetyError, ChecksumError, DownloadError, ToolNotFoundError
 from cyberfw.manager.github_client import GitHubRelease, ReleaseAsset
 from cyberfw.manager.installer import ToolInstaller
 from cyberfw.manager.platform_map import Mapping
@@ -22,6 +24,20 @@ def _zip_bytes(members: dict[str, bytes]) -> bytes:
         for name, data in members.items():
             zf.writestr(name, data)
     return buffer.getvalue()
+
+
+def _lying_zip_bytes(name: str, real_size: int, declared_size: int) -> bytes:
+    """A DEFLATE member that inflates to ``real_size`` but whose headers claim ``declared_size``.
+
+    This is the "header-forged decompression bomb" shape: the size check that sums
+    ``file_size`` over the central directory sees only ``declared_size``.
+    """
+    data = bytearray(_zip_bytes({name: b"A" * real_size}))
+    packed = struct.pack("<I", declared_size)
+    data[22:26] = packed  # local file header: uncompressed size
+    central = data.rfind(b"PK\x01\x02")
+    data[central + 24 : central + 28] = packed  # central directory: uncompressed size
+    return bytes(data)
 
 
 def _spec(name: str = "subfinder", **overrides) -> ToolSpec:
@@ -65,6 +81,41 @@ class _FakeClient:
 
     def fetch_text(self, url: str) -> str:
         return self.checksums or ""
+
+
+class TestArchiveBombs:
+    def test_forged_size_header_cannot_write_more_than_declared(self, tmp_path: Path) -> None:
+        """A member whose DEFLATE stream inflates to 4 MiB but declares 16 bytes must not
+        land 4 MiB on disk — and the corrupt archive must surface as a clean DownloadError,
+        not a bare ``zipfile.BadZipFile`` traceback."""
+        declared, real = 16, 4 * 1024 * 1024
+        archive = _lying_zip_bytes("subfinder", real_size=real, declared_size=declared)
+        asset = ReleaseAsset("subfinder_1.0.0_linux_amd64.zip", "http://x", len(archive))
+        release = GitHubRelease(tag="v1.0.0", assets=[asset], checksums_url=None)
+        installer = _installer(tmp_path, _FakeClient(release, archive), _spec())
+
+        with pytest.raises(DownloadError, match="corrupt"):
+            installer.install(_spec())
+
+        written = sum(
+            p.stat().st_size for p in installer.tools_dir.rglob("*") if p.is_file() and p.suffix != ".zip"
+        )
+        assert written <= declared
+
+    def test_truncated_tarball_is_a_clean_download_error(self, tmp_path: Path) -> None:
+        buffer = io.BytesIO()
+        with tarfile.open(fileobj=buffer, mode="w:gz") as tf:
+            info = tarfile.TarInfo("subfinder")
+            payload = b"#!/bin/sh\necho hi\n" * 200
+            info.size = len(payload)
+            tf.addfile(info, io.BytesIO(payload))
+        archive = buffer.getvalue()[: len(buffer.getvalue()) // 2]
+        asset = ReleaseAsset("subfinder_1.0.0_linux_amd64.tar.gz", "http://x", len(archive))
+        release = GitHubRelease(tag="v1.0.0", assets=[asset], checksums_url=None)
+        installer = _installer(tmp_path, _FakeClient(release, archive), _spec(archive="tar"))
+
+        with pytest.raises(DownloadError, match="corrupt"):
+            installer.install(_spec(archive="tar"))
 
 
 class TestSafeMember:
@@ -111,6 +162,25 @@ class TestInstall:
 
         assert client.downloaded[0].name == windows.name
 
+    def test_no_asset_for_this_os_raises_instead_of_downloading_foreign_binary(self, tmp_path: Path) -> None:
+        """Registry patterns for *other* OSes must never be used as a last resort."""
+        archive = _zip_bytes({"rustscan": b"#!/bin/sh\necho ok\n"})
+        linux = ReleaseAsset("x86_64-linux-rustscan.zip", "http://linux", len(archive))
+        windows = ReleaseAsset("x86_64-windows-rustscan.zip", "http://windows", len(archive))
+        release = GitHubRelease(tag="v2.4.1", assets=[linux, windows], checksums_url=None)
+        client = _FakeClient(release, archive)
+        spec = _spec(
+            name="rustscan",
+            binary="rustscan",
+            asset_patterns=["*x86_64*linux*rustscan*.zip", "*x86_64*windows*rustscan*.zip"],
+            archive="zip",
+        )
+        installer = _installer_for_mapping(tmp_path, client, Mapping("darwin", "amd64"))
+
+        with pytest.raises(DownloadError, match="OS=darwin"):
+            installer.install(spec)
+        assert client.downloaded == []
+
     def test_install_extracts_binary(self, tmp_path: Path) -> None:
         archive = _zip_bytes({"subfinder_2.6.6_linux_amd64/subfinder": b"#!/bin/sh\necho hi\n"})
         asset = ReleaseAsset("subfinder_2.6.6_linux_amd64.zip", "http://x", len(archive))
@@ -140,6 +210,30 @@ class TestInstall:
 
         assert not (installer.tools_dir / "naabu").exists()
         assert result.binary.name == "naabu.exe"
+
+    def test_locked_stale_binary_is_moved_aside_not_fatal(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Windows refuses to unlink a running/AV-scanned exe but allows renaming it; init must survive that."""
+        archive = _zip_bytes({"naabu.exe": b"#!/bin/sh\necho new\n"})
+        asset = ReleaseAsset("naabu_1.0.0_windows_amd64.zip", "http://x", len(archive))
+        release = GitHubRelease(tag="v1.0.0", assets=[asset], checksums_url=None)
+        client = _FakeClient(release, archive)
+        installer = _installer_for_mapping(tmp_path, client, Mapping("windows", "amd64"))
+        stale = installer.tools_dir / "naabu.exe"
+        stale.write_bytes(b"stale")
+
+        real_unlink = Path.unlink
+
+        def locked_unlink(self: Path, missing_ok: bool = False) -> None:
+            if self.read_bytes() == b"stale":
+                raise PermissionError(32, "The process cannot access the file because it is being used")
+            real_unlink(self, missing_ok=missing_ok)
+
+        monkeypatch.setattr(Path, "unlink", locked_unlink)
+
+        result = installer.install(_spec(name="naabu", binary="naabu", asset_patterns=["*windows*amd64*"]))
+
+        assert result.binary == stale.resolve()
+        assert stale.read_bytes() != b"stale"
 
     def test_install_copies_raw_binary(self, tmp_path: Path) -> None:
         payload = b"#!/bin/sh\nraw executable"

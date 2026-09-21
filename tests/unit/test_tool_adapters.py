@@ -72,6 +72,14 @@ def test_gowitness_without_chrome_raises_clear_error(monkeypatch: pytest.MonkeyP
         _adapter("gowitness").build_cmd(ToolContext(target="https://example.com"))  # type: ignore[attr-defined]
 
 
+def test_gowitness_without_target_raises_toolnotfound_like_other_adapters(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("cyberfw.tools.gowitness._find_chrome", lambda: "/usr/bin/chrome")
+    with pytest.raises(ToolNotFoundError):
+        _adapter("gowitness").build_cmd(ToolContext())  # type: ignore[attr-defined]
+
+
 def test_ffuf_builds_command_with_a_real_wordlist(tmp_path: Path) -> None:
     wordlist = tmp_path / "words.txt"
     wordlist.write_text("admin\nlogin\n", encoding="utf-8")
@@ -81,6 +89,16 @@ def test_ffuf_builds_command_with_a_real_wordlist(tmp_path: Path) -> None:
     assert "-w" in command
     assert str(wordlist) in command
     assert "https://example.com/FUZZ" in command
+
+
+def test_ffuf_prefixes_https_onto_a_bare_host(tmp_path: Path) -> None:
+    """ffuf rejects ``-u host/FUZZ`` (no scheme); a bare host from subfinder must become https://host."""
+    wordlist = tmp_path / "words.txt"
+    wordlist.write_text("admin\n", encoding="utf-8")
+    command = _adapter("ffuf").build_cmd(  # type: ignore[attr-defined]
+        ToolContext(target="api.example.com", extra_input=str(wordlist))
+    )
+    assert "https://api.example.com/FUZZ" in command
 
 
 def test_gitleaks_uses_v8_dir_command_not_detect() -> None:
@@ -129,6 +147,37 @@ def test_ffuf_rejects_nonexistent_wordlist_path() -> None:
 def test_rustscan_normalizes_url_to_hostname() -> None:
     assert _hostname("https://utm.md/path") == "utm.md"
     assert _hostname("192.0.2.10") == "192.0.2.10"
+
+
+def test_rustscan_strips_port_from_naabu_style_host_port() -> None:
+    """``--addresses`` takes hosts only; a ``host:port`` record from naabu must lose its port."""
+    assert _hostname("192.168.1.50:8080") == "192.168.1.50"
+    assert _hostname("api.example.com:443") == "api.example.com"
+    assert _hostname("[::1]:8080") == "::1"
+
+
+def test_rustscan_passes_a_host_list_file_instead_of_a_giant_argv(tmp_path: Path) -> None:
+    """Thousands of subfinder hosts comma-joined into one argument overflow Windows' command-line limit."""
+    hosts = tmp_path / "ports.input"
+    hosts.write_text("a.example.com\nb.example.com\n", encoding="utf-8")
+    command = _adapter("rustscan").build_cmd(  # type: ignore[attr-defined]
+        ToolContext(inputs=["a.example.com", "b.example.com"], input_file=hosts)
+    )
+    assert command[command.index("--addresses") + 1] == str(hosts)
+    assert not any("," in part for part in command)
+
+
+def test_rustscan_declares_addresses_as_its_list_flag_and_normalises_hosts() -> None:
+    adapter = _adapter("rustscan")
+    assert adapter.input_flag == "--addresses"  # type: ignore[attr-defined]
+    # scheme/path and port are stripped; dedup is the engine's job
+    assert adapter.prepare_inputs(
+        ["https://a.example.com/x", "10.0.0.1:8080", "a.example.com"]
+    ) == [  # type: ignore[attr-defined]
+        "a.example.com",
+        "10.0.0.1",
+        "a.example.com",
+    ]
 
 
 def test_rustscan_parses_greppable_output() -> None:

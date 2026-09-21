@@ -34,9 +34,18 @@ def generate_json_report(
     path.parent.mkdir(parents=True, exist_ok=True)
     payload: dict[str, Any] = {
         "ok": result.succeeded(),
-        "stages": [node.__dict__.get("node", node).__dict__ if hasattr(node, "node") else {"tool": node.node.tool, "ok": node.ok, "count": node.count, "error": node.error} for node in result.nodes],
+        "stages": [
+            {
+                "tool": nr.node.tool,
+                "stage": nr.node.stage,
+                "ok": nr.ok,
+                "count": nr.count,
+                "error": nr.error,
+            }
+            for nr in result.nodes
+        ],
         "total_records": len(result.records),
-        "records": [r.as_dict() if hasattr(r, "as_dict") else {"target": getattr(r, "target", ""), "kind": getattr(r, "kind", ""), "tool": getattr(r, "tool", "")} for r in result.records],
+        "records": [r.as_dict() for r in result.records],
     }
     try:
         path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")

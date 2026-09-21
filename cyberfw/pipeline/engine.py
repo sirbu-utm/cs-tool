@@ -2,9 +2,10 @@
 
 A pipeline is an ordered list of :class:`Node` values. Each node runs its tool
 with a :class:`ToolContext` seeded either from the original ``-d`` target or from
-the previous stage's validated records (written to the Context Store and
-re-read as deduplicated targets). Tools that accept a host list run in one
-process via ``-l``/``-iL``; ``per_target`` tools fan out one invocation per input.
+an earlier stage's validated records — the immediately preceding node by
+default, or the node named by ``Node.input_from``. Tools that accept a host
+list run in one process via ``-l``/``-iL``; ``per_target`` tools fan out one
+invocation per input.
 A crashed or non-zero child (:class:`ExecutionError`) is recorded on the node but
 never aborts the whole pipeline — the stage simply contributes no records.
 """
@@ -12,8 +13,10 @@ never aborts the whole pipeline — the stage simply contributes no records.
 from __future__ import annotations
 
 import asyncio
+import os
 import shutil
 import sys
+import tempfile
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -56,11 +59,18 @@ def _dependency_hint(dep: str) -> str:
 
 @dataclass
 class Node:
-    """One stage of a pipeline."""
+    """One stage of a pipeline.
+
+    ``input_from`` names an *earlier* node's ``stage`` whose targets this node
+    consumes; by default a node consumes the immediately preceding node's
+    records. Several nodes may read the same upstream stage (e.g. nuclei, ffuf
+    and gowitness all scanning httpx's live hosts).
+    """
 
     tool: str
     stage: str
     max_records: int = 0  # 0 = unlimited
+    input_from: str | None = None
 
     def __post_init__(self) -> None:
         allow = {"-", "_", ".", "/", "\\", ":"}
@@ -148,19 +158,38 @@ class PipelineEngine:
     ) -> PipelineResult:
         """Run ``nodes`` in order, threading results forward.
 
-        ``extra_input`` (e.g. an Ffuf wordlist) is offered to every stage that
-        wants it; stages that don't consume it simply ignore it.
+        Each node consumes the targets of the node named by its ``input_from``,
+        or of the immediately preceding node when unset. ``extra_input`` (e.g.
+        an Ffuf wordlist) is offered to every stage that wants it; stages that
+        don't consume it simply ignore it.
         """
+        self._validate_wiring(nodes)
         result = PipelineResult()
+        outputs: dict[str, list[str]] = {}  # stage -> targets it produced
         inputs: list[str] = []
         for node in nodes:
+            if node.input_from is not None:
+                inputs = outputs[node.input_from]
             node_result, step_records = await self._run_node(
                 node, seed, inputs, extra_input=extra_input
             )
             result.nodes.append(node_result)
             result.records.extend(step_records)
             inputs = [r.target for r in step_records]
+            outputs[node.stage] = inputs
         return result
+
+    @staticmethod
+    def _validate_wiring(nodes: list[Node]) -> None:
+        """Fail fast on a pipeline whose ``input_from`` names a missing/later stage."""
+        seen: set[str] = set()
+        for node in nodes:
+            if node.input_from is not None and node.input_from not in seen:
+                raise ValueError(
+                    f"node {node.stage!r} has input_from={node.input_from!r}, "
+                    f"which is not an earlier stage (known: {sorted(seen) or '<none>'})"
+                )
+            seen.add(node.stage)
 
     # -- internals -----------------------------------------------------------
     async def _run_node(
@@ -211,13 +240,14 @@ class PipelineEngine:
         if not use_inputs:
             return []
 
+        inputs = self._uniq(adapter.prepare_inputs(ctx.inputs)) if has_inputs else []
         input_file: Path | None = None
-        if adapter.input_flag and ctx.inputs:
-            input_file = self._materialize(node.stage_id, ctx.inputs)
+        if adapter.input_flag and inputs:
+            input_file = self._materialize(node.stage_id, inputs)
 
         run_ctx = ToolContext(
             target=ctx.target if not has_inputs else None,
-            inputs=ctx.inputs,
+            inputs=inputs,
             input_file=input_file,
             extra_input=ctx.extra_input,
         )
@@ -240,30 +270,54 @@ class PipelineEngine:
     ) -> list[ToolRecord]:
         targets = ctx.inputs or ([ctx.target] if ctx.target else [])
         semaphore = asyncio.Semaphore(self.settings.concurrency)
+        failures: list[tuple[str, ExecutionError]] = []
 
         async def run_target(target: str) -> list[ToolRecord]:
             async with semaphore:
                 cmd = adapter.build_cmd(ToolContext(target=target, extra_input=ctx.extra_input))
-                return await run_stage(
-                    cmd,
-                    tool=node.tool,
-                    stage=node.stage_id,
-                    context=self.context,
-                    on_record=self._on_record,
-                    on_stderr=self._on_stderr,
-                    on_stdout_raw=self._on_stdout_raw,
-                    parse_line=adapter.parse_line,
-                    parse_buffer=adapter.parse_output if adapter.buffered else None,
-                    parse=parse,
-                )
+                try:
+                    return await run_stage(
+                        cmd,
+                        tool=node.tool,
+                        stage=node.stage_id,
+                        context=self.context,
+                        on_record=self._on_record,
+                        on_stderr=self._on_stderr,
+                        on_stdout_raw=self._on_stdout_raw,
+                        parse_line=adapter.parse_line,
+                        parse_buffer=adapter.parse_output if adapter.buffered else None,
+                        parse=parse,
+                    )
+                except ExecutionError as exc:
+                    # One unreachable host must not throw away every other
+                    # host's results: record it and let the siblings finish.
+                    LOG.warning(
+                        "%s failed for %s: %s (stderr tail: %s)", node.tool, target, exc, exc.stderr_tail
+                    )
+                    failures.append((target, exc))
+                    return []
 
         batches = await asyncio.gather(*(run_target(target) for target in targets))
+        if targets and len(failures) == len(targets):
+            first = failures[0][1]
+            raise ExecutionError(
+                f"{node.tool} failed for all {len(targets)} target(s); first error: {first}",
+                exit_code=first.exit_code,
+                stderr_tail=first.stderr_tail,
+            )
         return [record for batch in batches for record in batch]
 
     def _materialize(self, stage_id: str, inputs: list[str]) -> Path:
-        if self.context is None:
-            raise ValueError("pipeline context required to materialise an input list")
-        path = self.context.session_dir / f"{stage_id}.input"
+        """Write ``inputs`` one per line and return the file the tool's list flag should point at.
+
+        Lives in the session directory when there is one; an ad-hoc ``run --list``
+        without ``--save`` has no session, so fall back to the system temp dir
+        rather than refusing to run the tool.
+        """
+        if self.context is not None:
+            path = self.context.session_dir / f"{stage_id}.input"
+        else:
+            path = Path(tempfile.gettempdir()) / f"cyberfw-{os.getpid()}-{stage_id}.input"
         path.write_text("\n".join(self._uniq(inputs)) + "\n", encoding="utf-8")
         return path
 

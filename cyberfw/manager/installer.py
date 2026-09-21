@@ -10,7 +10,9 @@ import os
 import shutil
 import stat
 import tarfile
+import uuid
 import zipfile
+import zlib
 from pathlib import Path
 
 from cyberfw.exceptions import ArchiveSafetyError, DownloadError
@@ -20,6 +22,15 @@ from cyberfw.manager.registry import ToolSpec
 from cyberfw.manager.verify import verify_checksum
 
 __all__ = ["InstallResult", "ToolInstaller"]
+
+#: What the stdlib raises for a damaged or forged archive (bad CRC / size
+#: headers, truncated gzip stream, invalid DEFLATE data).
+_CORRUPT_ARCHIVE_ERRORS: tuple[type[BaseException], ...] = (
+    zipfile.BadZipFile,
+    tarfile.TarError,
+    zlib.error,
+    EOFError,
+)
 
 
 class InstallResult:
@@ -48,16 +59,22 @@ class ToolInstaller:
         platform_patterns = asset_patterns(self.mapping)
         exact_platform_patterns = [pattern for pattern in platform_patterns if pattern != "*windows*"]
         asset = release.find_asset(*exact_platform_patterns)
-        os_patterns = [pattern for pattern in spec.asset_patterns if self.mapping.os_name in pattern.lower()]
+        # Registry patterns cover every OS; only the ones naming *this* OS are
+        # eligible — a Linux/Windows build must never be picked as a fallback
+        # on macOS just because it is listed first.
+        os_tokens = {self.mapping.os_name}
+        if self.mapping.os_name == "darwin":
+            os_tokens.add("macos")
+        os_patterns = [
+            pattern
+            for pattern in spec.asset_patterns
+            if any(token in pattern.lower() for token in os_tokens)
+        ]
         if asset is None and os_patterns:
             asset = release.find_asset(*os_patterns)
-        if asset is None and spec.asset_patterns:
-            asset = release.find_asset(*spec.asset_patterns)
         if asset is None:
             asset = release.find_asset(*platform_patterns)
-        patterns = [*platform_patterns, *spec.asset_patterns]
-        if asset is None and not patterns:
-            asset = self._first_asset(release)
+        patterns = [*platform_patterns, *os_patterns]
         if asset is None:
             raise DownloadError(
                 f"No released asset for {spec.repo} matches OS={self.mapping.os_name}, "
@@ -71,10 +88,6 @@ class ToolInstaller:
         self._make_executable(binary)
         return InstallResult(spec=spec, binary=binary.resolve(), version=release.version)
 
-    @staticmethod
-    def _first_asset(release: GitHubRelease) -> ReleaseAsset | None:
-        return release.assets[0] if release.assets else None
-
     # -- pipeline ------------------------------------------------------------
     def _download_checked(self, asset: ReleaseAsset, dst: Path, release: GitHubRelease, spec: ToolSpec) -> None:
         self.client.download(asset.url, dst, expected_size=asset.size)
@@ -84,6 +97,20 @@ class ToolInstaller:
 
     def _extract(self, spec: ToolSpec, archive_path: Path) -> Path:
         kind = _archive_kind(spec.archive, archive_path.name)
+        try:
+            self._extract_kind(kind, spec, archive_path)
+        except _CORRUPT_ARCHIVE_ERRORS as exc:
+            # Truncated download, forged size/CRC headers, bad DEFLATE stream.
+            # The stdlib already bounds each member to its declared size, so a
+            # header-forged bomb cannot inflate past the limit checked above —
+            # but the failure must read as a clean install error, not a traceback.
+            raise DownloadError(f"corrupt archive {archive_path.name}: {exc}") from exc
+        # Ensure everything is executable *before* locating, because just-unpacked
+        # zip members carry no exec bit and ensure_binary refuses non-executables.
+        self._make_whole_tree_executable()
+        return self._locate_binary(spec)
+
+    def _extract_kind(self, kind: str, spec: ToolSpec, archive_path: Path) -> None:
         if kind == "zip":
             self._extract_zip(archive_path)
         elif kind == "tar":
@@ -101,10 +128,6 @@ class ToolInstaller:
             shutil.copy2(archive_path, target)
         else:
             raise DownloadError(f"Unsupported archive format for {archive_path.name}")
-        # Ensure everything is executable *before* locating, because just-unpacked
-        # zip members carry no exec bit and ensure_binary refuses non-executables.
-        self._make_whole_tree_executable()
-        return self._locate_binary(spec)
 
     # -- extraction ----------------------------------------------------------
     def _extract_zip(self, archive_path: Path) -> None:
@@ -174,9 +197,30 @@ class ToolInstaller:
         names = {spec.binary}
         if os.name == "nt" and not spec.binary.lower().endswith(".exe"):
             names.add(spec.binary + ".exe")
-        for path in self.tools_dir.rglob("*"):
-            if path.is_file() and path.name.lower() in {name.lower() for name in names}:
-                path.unlink()
+        wanted = {name.lower() for name in names}
+        for path in list(self.tools_dir.rglob("*")):
+            if path.is_file() and path.name.lower() in wanted:
+                self._unlink_or_park(path)
+
+    @staticmethod
+    def _unlink_or_park(path: Path) -> None:
+        """Delete ``path``; if Windows holds it open (running exe, AV scan), rename it aside.
+
+        Windows refuses to delete a mapped executable but does allow renaming
+        it, so parking the stale file frees its name for the fresh extract; the
+        parked copy is removed if possible and otherwise left as harmless clutter.
+        """
+        try:
+            path.unlink()
+            return
+        except PermissionError:
+            pass
+        parked = path.with_name(f"{path.name}.stale-{uuid.uuid4().hex[:8]}")
+        path.replace(parked)
+        try:
+            parked.unlink()
+        except OSError:  # still locked — a different name, so it no longer shadows the new binary
+            pass
 
     def _make_executable(self, binary: Path) -> None:
         if os.name == "nt":

@@ -53,6 +53,12 @@ class TestJsonReport:
         assert len(payload["stages"]) == 2
         assert any(r["target"] == "api.example.com" for r in payload["records"])
 
+    def test_stages_carry_outcome_not_just_node_config(self, tmp_path: Path) -> None:
+        """Each stage entry must expose the *run* outcome (ok/count/error), not only the Node config."""
+        path = json_report_gen(_failed_result(), output_path=tmp_path / "r.json")
+        stage = json.loads(path.read_text(encoding="utf-8"))["stages"][0]
+        assert stage == {"tool": "subfinder", "stage": "subfinder", "ok": False, "count": 0, "error": "boom"}
+
     def test_explicit_output_path_wins(self, tmp_path: Path) -> None:
         out = tmp_path / "custom" / "r.json"
         path = json_report_gen(_ok_result(), output_path=out)

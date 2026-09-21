@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import os
 import sys
 from pathlib import Path
 
@@ -46,6 +48,23 @@ class TestRunStage:
         # only the valid line produces a record
         assert len(records) == 1
         assert records[0].target == "ok.example.com"
+
+    async def test_unparsed_lines_are_summarised_as_one_warning(self, tmp_path: Path, caplog) -> None:
+        """A schema drift must not silently swallow findings: surface a count at WARNING."""
+        script = _write_script(
+            tmp_path,
+            "import json\n"
+            "for i in range(3): print('garbage', i)\n"
+            "print(json.dumps({'host': 'ok.example.com'}))\n",
+        )
+        with caplog.at_level("WARNING", logger="cyberfw.executor"):
+            records = await run_stage(
+                [sys.executable, str(script)], tool="subfinder", stage="sub", context=None
+            )
+        assert len(records) == 1
+        warnings = [r for r in caplog.records if r.levelname == "WARNING"]
+        assert len(warnings) == 1
+        assert "3" in warnings[0].getMessage() and "subfinder" in warnings[0].getMessage()
 
     async def test_uses_tool_parser_for_non_json_output(self, tmp_path: Path) -> None:
         script = _write_script(
@@ -198,6 +217,96 @@ class TestRunStage:
         )
         targets = context.targets("sub")
         assert targets == ["ctx.example.com"]
+
+
+@pytest.mark.parametrize("transport_cleanup", ["real", "disabled"])
+async def test_child_is_killed_when_a_callback_raises_mid_stream(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, transport_cleanup: str
+) -> None:
+    """A failing on_record hook must not leave the scanner running in the background.
+
+    The child prints one record, then sleeps and drops a marker file; if it survived
+    the executor's cleanup the marker would appear. Closing the pipe transport also
+    kills the child, but that goes through a private attribute, so the kill must not
+    depend on it: the "disabled" variant turns transport cleanup into a no-op.
+    """
+    if transport_cleanup == "disabled":
+        monkeypatch.setattr("cyberfw.pipeline.executor._close_transport", lambda proc: None)
+    marker = tmp_path / "still_alive"
+    script = _write_script(
+        tmp_path,
+        "import json, sys, time, pathlib\n"
+        "print(json.dumps({'host': 'x.example.com'}), flush=True)\n"
+        "time.sleep(0.5)\n"
+        f"pathlib.Path({str(marker)!r}).write_text('alive')\n",
+    )
+
+    async def boom(record: ToolRecord) -> None:
+        raise RuntimeError("callback failed")
+
+    with pytest.raises(RuntimeError, match="callback failed"):
+        await run_stage([sys.executable, str(script)], tool="subfinder", stage="s", context=None, on_record=boom)
+    await asyncio.sleep(1.0)
+    assert not marker.exists(), "child process outlived run_stage"
+
+
+class TestFindBash:
+    """On Windows ``bash.exe`` in System32 is the WSL launcher: it needs a distro, boots
+    for seconds and mounts drives under /mnt. Git Bash must win whenever it exists."""
+
+    @staticmethod
+    def _bash_in(directory: Path) -> Path:
+        directory.mkdir(parents=True, exist_ok=True)
+        exe = directory / "bash.exe"
+        exe.write_bytes(b"MZ")
+        return exe
+
+    def test_prefers_git_bash_later_on_path_over_system32_shim(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from cyberfw.pipeline.executor import _find_bash
+
+        wsl = self._bash_in(tmp_path / "Windows" / "System32")
+        git = self._bash_in(tmp_path / "Git" / "usr" / "bin")
+        monkeypatch.setenv("PATH", os.pathsep.join([str(wsl.parent), str(git.parent)]))
+        monkeypatch.setenv("ProgramFiles", str(tmp_path / "nowhere"))
+        monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "nowhere"))
+
+        assert _find_bash() == str(git)
+
+    def test_falls_back_to_git_default_install_dir_when_not_on_path(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from cyberfw.pipeline.executor import _find_bash
+
+        wsl = self._bash_in(tmp_path / "Windows" / "System32")
+        git = self._bash_in(tmp_path / "Program Files" / "Git" / "bin")
+        monkeypatch.setenv("PATH", str(wsl.parent))
+        monkeypatch.setenv("ProgramFiles", str(tmp_path / "Program Files"))
+        monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "nowhere"))
+
+        assert _find_bash() == str(git)
+
+    def test_uses_wsl_shim_only_when_nothing_else_exists(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from cyberfw.pipeline.executor import _find_bash
+
+        wsl = self._bash_in(tmp_path / "Windows" / "System32")
+        monkeypatch.setenv("PATH", str(wsl.parent))
+        monkeypatch.setenv("ProgramFiles", str(tmp_path / "nowhere"))
+        monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "nowhere"))
+
+        assert _find_bash() == str(wsl)
+
+    def test_none_when_no_bash_at_all(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        from cyberfw.pipeline.executor import _find_bash
+
+        monkeypatch.setenv("PATH", str(tmp_path / "empty"))
+        monkeypatch.setenv("ProgramFiles", str(tmp_path / "nowhere"))
+        monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "nowhere"))
+
+        assert _find_bash() is None
 
 
 @pytest.mark.parametrize("exit_code", [1, 255])

@@ -10,7 +10,10 @@ import asyncio
 import sys
 from pathlib import Path
 
+import pytest
+
 from cyberfw.config import Settings
+from cyberfw.exceptions import ExecutionError
 from cyberfw.manager import ToolManager
 from cyberfw.manager.registry import load_registry
 from cyberfw.pipeline.context import SessionContext
@@ -242,6 +245,105 @@ class TestEngine:
         # The input file should be the stage-specific one (b.input for stage "b")
         assert "b.input" in cmd_str, f"Stage 2 should use its own input file, got: {cmd_str}"
 
+    async def test_input_from_reads_a_named_earlier_stage_not_the_previous_one(self, tmp_path: Path) -> None:
+        """nuclei/ffuf/gowitness must all fan out over httpx's live hosts, not over each other's findings."""
+        registry_path = tmp_path / "registry.yaml"
+        registry_path.write_text(
+            "subfinder:\n  repo: org/subfinder\n  asset_patterns: []\n  binary: stub_probe.py\n",
+            encoding="utf-8",
+        )
+        engine = _make_engine(tmp_path, registry_path)
+        script = tmp_path / "append_x.py"
+        script.write_text(
+            'import json, sys\n'
+            'sys.stdout.write(json.dumps({"host": sys.argv[1] + "x"}) + "\\n")\n',
+            encoding="utf-8",
+        )
+        seen_inputs: list[list[str]] = []
+
+        class _RecordingTool(_StubTool):
+            def build_cmd(self, ctx: ToolContext) -> list[str]:
+                seen_inputs.append(list(ctx.inputs))
+                return super().build_cmd(ctx)
+
+        stub = _RecordingTool(engine.tool_manager.spec("subfinder"), script)
+        engine.build_tool = lambda name: stub  # type: ignore[method-assign]
+
+        result = await engine.run(
+            [
+                Node(tool="subfinder", stage="a"),
+                Node(tool="subfinder", stage="b"),
+                Node(tool="subfinder", stage="c", input_from="a"),
+            ],
+            seed="s",
+        )
+
+        # a: s -> sx ; b: sx -> sxx ; c reads a's output (sx), not b's (sxx)
+        assert seen_inputs == [[], ["sx"], ["sx"]]
+        assert [r.target for r in result.records] == ["sx", "sxx", "sxx"]
+
+    async def test_input_from_unknown_stage_is_rejected_up_front(self, tmp_path: Path) -> None:
+        registry_path = tmp_path / "registry.yaml"
+        registry_path.write_text(
+            "subfinder:\n  repo: org/subfinder\n  asset_patterns: []\n  binary: stub_probe.py\n",
+            encoding="utf-8",
+        )
+        engine = _make_engine(tmp_path, registry_path)
+        with pytest.raises(ValueError, match="input_from"):
+            await engine.run(
+                [Node(tool="subfinder", stage="a"), Node(tool="subfinder", stage="b", input_from="nope")],
+                seed="s",
+            )
+
+    async def test_input_list_is_materialised_without_a_session_context(self, tmp_path: Path) -> None:
+        """`run <tool> --list hosts.txt` without --save has no SessionContext but must still get -l <file>."""
+        registry_path = tmp_path / "registry.yaml"
+        registry_path.write_text(
+            "subfinder:\n  repo: org/subfinder\n  asset_patterns: []\n  binary: stub_probe.py\n",
+            encoding="utf-8",
+        )
+        engine = _make_engine(tmp_path, registry_path)
+        engine.context = None
+        script = tmp_path / "noop.py"
+        script.write_text("pass\n", encoding="utf-8")
+        stub = _CaptureCmdTool(engine.tool_manager.spec("subfinder"), script)
+        engine.build_tool = lambda name: stub  # type: ignore[method-assign]
+
+        node_result, _ = await engine._run_node(Node(tool="subfinder", stage="s"), None, ["a.example.com", "b.example.com"])
+
+        assert node_result.ok, node_result.error
+        assert _CaptureCmdTool.last_cmd is not None and "-l" in _CaptureCmdTool.last_cmd
+        listed = Path(_CaptureCmdTool.last_cmd[-1]).read_text(encoding="utf-8").split()
+        assert listed == ["a.example.com", "b.example.com"]
+
+    async def test_adapter_can_normalise_inputs_before_they_are_materialised(self, tmp_path: Path, monkeypatch) -> None:
+        """RustScan wants bare hosts in its --addresses file even when upstream handed over URLs / host:port."""
+        from cyberfw.tools.rustscan import RustscanTool
+
+        registry_path = tmp_path / "registry.yaml"
+        registry_path.write_text(
+            "rustscan:\n  repo: org/rustscan\n  asset_patterns: []\n  binary: rustscan\n",
+            encoding="utf-8",
+        )
+        engine = _make_engine(tmp_path, registry_path)
+        adapter = RustscanTool(engine.tool_manager.spec("rustscan"), tmp_path / "rustscan")
+        captured: list[list[str]] = []
+
+        async def fake_run_stage(command, **kwargs):
+            captured.append(command)
+            return []
+
+        monkeypatch.setattr("cyberfw.pipeline.engine.run_stage", fake_run_stage)
+        await engine._dispatch(
+            adapter,
+            ToolContext(inputs=["https://a.example.com/login", "10.0.0.1:8080", "a.example.com"]),
+            Node(tool="rustscan", stage="ports"),
+        )
+
+        cmd = captured[0]
+        addresses = Path(cmd[cmd.index("--addresses") + 1])
+        assert addresses.read_text(encoding="utf-8").split() == ["a.example.com", "10.0.0.1"]
+
     async def test_fan_out_honors_concurrency_limit(self, tmp_path: Path, monkeypatch) -> None:
         registry_path = tmp_path / "registry.yaml"
         registry_path.write_text(
@@ -271,6 +373,48 @@ class TestEngine:
 
         assert peak == 2
         assert [record.target for record in records] == [f"host-{index}" for index in range(5)]
+
+    async def test_fan_out_keeps_other_targets_when_one_crashes(self, tmp_path: Path, monkeypatch) -> None:
+        """One unreachable host (ffuf/gowitness exits non-zero) must not discard the other 49."""
+        registry_path = tmp_path / "registry.yaml"
+        registry_path.write_text(
+            "subfinder:\n  repo: org/subfinder\n  asset_patterns: []\n  binary: stub_probe.py\n",
+            encoding="utf-8",
+        )
+        engine = _make_engine(tmp_path, registry_path)
+        adapter = _PerTargetTool(engine.tool_manager.spec("subfinder"), tmp_path / "stub_probe.py")
+
+        async def flaky_run_stage(command, **kwargs):
+            if command[0] == "host-1":
+                raise ExecutionError("gowitness exited with code 1", exit_code=1, stderr_tail=["connection reset"])
+            return [ToolRecord(tool="subfinder", target=command[0], kind="host")]
+
+        monkeypatch.setattr("cyberfw.pipeline.engine.run_stage", flaky_run_stage)
+        records = await engine._fan_out(
+            adapter,
+            ToolContext(inputs=["host-0", "host-1", "host-2"]),
+            Node(tool="subfinder", stage="fan-out"),
+        )
+
+        assert [record.target for record in records] == ["host-0", "host-2"]
+
+    async def test_fan_out_fails_the_stage_only_when_every_target_fails(self, tmp_path: Path, monkeypatch) -> None:
+        registry_path = tmp_path / "registry.yaml"
+        registry_path.write_text(
+            "subfinder:\n  repo: org/subfinder\n  asset_patterns: []\n  binary: stub_probe.py\n",
+            encoding="utf-8",
+        )
+        engine = _make_engine(tmp_path, registry_path)
+        adapter = _PerTargetTool(engine.tool_manager.spec("subfinder"), tmp_path / "stub_probe.py")
+
+        async def always_fail(command, **kwargs):
+            raise ExecutionError("boom", exit_code=1, stderr_tail=[])
+
+        monkeypatch.setattr("cyberfw.pipeline.engine.run_stage", always_fail)
+        with pytest.raises(ExecutionError, match="all 2 target"):
+            await engine._fan_out(
+                adapter, ToolContext(inputs=["host-0", "host-1"]), Node(tool="subfinder", stage="fan-out")
+            )
 
 
 class TestToolContextDefaults:

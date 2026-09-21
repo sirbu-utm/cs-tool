@@ -8,9 +8,10 @@
     ffuf*      --brute-force open .git dirs on live hosts      (--ffuf)
     gowitness* --headless screenshots of live hosts            (--gowitness)
 
-The first stage seeds from the user's ``-d`` target; every later stage reads the
-previous stage's validated records from the Context Store, so a crash mid-run
-loses nothing already written.
+The first stage seeds from the user's ``-d`` target; httpx reads subfinder's
+records, and nuclei / ffuf / gowitness each read httpx's live hosts
+(``input_from="live_http"``). Every record is written to the Context Store as
+it arrives, so a crash mid-run loses nothing already written.
 """
 
 from __future__ import annotations
@@ -33,13 +34,17 @@ class ReconToVulnOptions:
 def build_recon_to_vuln(options: ReconToVulnOptions | None = None) -> list[Node]:
     """Return the ordered node list for ``recon-to-vuln``."""
     opts = options or ReconToVulnOptions()
+    # Every stage after httpx scans the *live hosts*, not the previous stage's
+    # findings: chaining them linearly would make ffuf fuzz nuclei's matched
+    # URLs (or fall back to the bare seed when nuclei found nothing) and make
+    # gowitness screenshot ffuf's hits instead of the hosts themselves.
     nodes: list[Node] = [
         Node(tool="subfinder", stage="subdomains"),
         Node(tool="httpx", stage="live_http", max_records=opts.max_httpx),
-        Node(tool="nuclei", stage="vulns", max_records=opts.max_nuclei),
+        Node(tool="nuclei", stage="vulns", max_records=opts.max_nuclei, input_from="live_http"),
     ]
     if opts.include_ffuf:
-        nodes.append(Node(tool="ffuf", stage="fuzz"))
+        nodes.append(Node(tool="ffuf", stage="fuzz", input_from="live_http"))
     if opts.include_gowitness:
-        nodes.append(Node(tool="gowitness", stage="screenshots"))
+        nodes.append(Node(tool="gowitness", stage="screenshots", input_from="live_http"))
     return nodes

@@ -18,7 +18,13 @@ __all__ = ["SessionContext"]
 
 
 class SessionContext:
-    """Thread/async-safe writer + reader for one pipeline session."""
+    """Writer + reader for one pipeline session.
+
+    Safe for concurrent use from coroutines on one event loop: ``append`` opens,
+    writes and closes synchronously with no ``await`` in between, so writes can
+    never interleave. It is *not* guarded against multiple OS threads or
+    processes writing the same session — the framework never does that.
+    """
 
     def __init__(self, root_dir: Path, session_id: str) -> None:
         self.root_dir = Path(root_dir)

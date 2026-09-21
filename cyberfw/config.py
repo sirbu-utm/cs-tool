@@ -97,7 +97,6 @@ def load_settings(root_dir: Path | None = None, local_file: Path | None = None) 
     code defaults, environment beats YAML.
     """
     cwd = root_dir or Path.cwd()
-    settings = Settings(root_dir=cwd)
     candidate = local_file or cwd / "config.local.yaml"
     if candidate.exists():
         try:
@@ -113,9 +112,11 @@ def load_settings(root_dir: Path | None = None, local_file: Path | None = None) 
     # Environment beats YAML; YAML beats file defaults.
     patches: dict[str, Any] = {}
     for key, value in raw.items():
-        if key not in type(settings).model_fields:
+        if key not in Settings.model_fields:
             continue
         if f"CYBERFW_{key.upper()}" in os.environ:
             continue
         patches[key] = value
-    return settings.model_copy(update=patches)
+    # Construct (not ``model_copy(update=...)``, which skips validation) so the
+    # YAML values pass through the same field/model validators as kwargs do.
+    return Settings(**{"root_dir": cwd, **patches})

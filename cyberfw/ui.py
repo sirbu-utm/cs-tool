@@ -44,7 +44,7 @@ TOOL_GUIDES: dict[str, tuple[str, str, str]] = {
     "gitleaks": (
         "Secret scanning",
         "Finds passwords, API keys and other secrets in a local repository.",
-        "gitleaks detect --source C:\\Projects\\app",
+        "gitleaks dir C:\\Projects\\app",
     ),
     "gowitness": (
         "Web screenshots",

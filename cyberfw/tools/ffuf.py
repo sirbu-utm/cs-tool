@@ -10,7 +10,6 @@ default path across Windows/Linux/macOS.
 from __future__ import annotations
 
 from pathlib import Path
-from urllib.parse import urlparse
 
 from cyberfw.exceptions import ToolNotFoundError
 from cyberfw.tools.base import BaseTool, ToolContext
@@ -33,8 +32,7 @@ class FfufTool(BaseTool):
             raise ToolNotFoundError(f"Ffuf wordlist not found: {wordlist}")
         base = targets[0]
         if not base.startswith(("http://", "https://")):
-            host = urlparse(base).hostname  # bare host -> https seed
-            base = f"https://{host}" if host else targets[0]
+            base = f"https://{base}"  # bare host from subfinder -> https seed
         base = base.rstrip("/")
         cmd: list[str] = [
             str(self.binary),

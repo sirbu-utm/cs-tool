@@ -54,7 +54,7 @@ class GowitnessTool(BaseTool):
     def build_cmd(self, ctx: ToolContext) -> list[str]:
         targets = ctx.inputs if ctx.inputs else ([ctx.target] if ctx.target else [])
         if not targets:
-            raise ValueError("Gowitness needs at least one target URL.")
+            raise ToolNotFoundError("Gowitness needs at least one target URL.")
         chrome = _find_chrome()
         if chrome is None:
             raise ToolNotFoundError(
