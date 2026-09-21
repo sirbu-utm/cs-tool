@@ -8,6 +8,7 @@ console is theme-aware (auto-detect colour support and width).
 from __future__ import annotations
 
 import logging
+import sys
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
@@ -15,7 +16,7 @@ from rich.console import Console
 from rich.logging import RichHandler
 from rich.theme import Theme
 
-__all__ = ["console", "setup_logging", "get_logger"]
+__all__ = ["console", "ensure_utf8_stdio", "setup_logging", "get_logger"]
 
 #: Minimal, consistent palette for status messages — classic green/cyan
 #: terminal-tool look, matching the startup banner's block-art wordmark.
@@ -32,6 +33,27 @@ THEME = Theme(
 )
 
 console = Console(theme=THEME, highlight=False)
+
+
+def ensure_utf8_stdio() -> None:
+    """Re-encode redirected stdout/stderr as UTF-8 so Rich glyphs never raise.
+
+    Python uses UTF-8 for an interactive Windows console, but a pipe or file
+    gets the ANSI code page (cp1251/cp1252), which cannot encode the banner's
+    block art or the tick marks ``init`` prints — ``cyberfw status > out.txt``
+    then dies with ``UnicodeEncodeError`` (and ``init`` after its first tool).
+    The launcher sets ``PYTHONUTF8=1`` for the same reason; this covers the
+    bare ``cyberfw`` / ``python -m cyberfw.cli`` entry points.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        encoding = (getattr(stream, "encoding", None) or "").replace("-", "").lower()
+        if reconfigure is None or encoding == "utf8":
+            continue
+        try:
+            reconfigure(encoding="utf-8", errors="replace")
+        except (ValueError, OSError):  # pragma: no cover - closed/detached stream
+            pass
 
 
 def setup_logging(

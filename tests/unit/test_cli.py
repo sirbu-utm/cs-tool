@@ -374,3 +374,32 @@ class TestStatusCommand:
         result = runner.invoke(app, ["status"])
         assert result.exit_code == 0
         assert "not installed" in result.stdout
+
+
+class TestRedirectedOutput:
+    def test_status_survives_a_non_utf8_stdout(self, tmp_path: Path) -> None:
+        """``cyberfw status > out.txt`` on Windows hands Python a cp125x stdout; the banner's
+        block art (and init's tick marks) must not raise UnicodeEncodeError — init used to
+        abort after installing the first tool."""
+        import subprocess
+        import sys
+
+        repo_root = Path(__file__).resolve().parents[2]
+        env = {
+            **os.environ,
+            "PYTHONIOENCODING": "cp1252",
+            "PYTHONUTF8": "0",
+            "PYTHONPATH": str(repo_root),
+            "CYBERFW_LOG_TO_FILE": "false",
+        }
+        proc = subprocess.run(
+            [sys.executable, "-m", "cyberfw.cli", "status"],
+            cwd=tmp_path,
+            capture_output=True,
+            env=env,
+            timeout=120,
+            check=False,
+        )
+
+        assert proc.returncode == 0, proc.stderr.decode("utf-8", "replace")[-600:]
+        assert "▄▄▄▄" in proc.stdout.decode("utf-8")

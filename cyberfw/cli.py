@@ -33,7 +33,7 @@ from rich.text import Text
 
 from cyberfw.config import Settings, load_settings
 from cyberfw.exceptions import CyberfwError, RegistryError, ToolNotFoundError
-from cyberfw.logging import console, get_logger, setup_logging
+from cyberfw.logging import console, ensure_utf8_stdio, get_logger, setup_logging
 from cyberfw.manager import ToolManager, load_registry
 from cyberfw.pipeline.context import SessionContext
 from cyberfw.pipeline.engine import Node, NodeResult, PipelineEngine, PipelineResult
@@ -58,6 +58,7 @@ app = typer.Typer(
 @app.callback(invoke_without_command=True)
 def app_callback(ctx: typer.Context) -> None:
     """Open the interactive launcher when no subcommand was supplied."""
+    ensure_utf8_stdio()
     if ctx.invoked_subcommand is None:
         interactive_menu()
 
