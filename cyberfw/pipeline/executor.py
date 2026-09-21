@@ -1,0 +1,281 @@
+"""Executor — anyio wrapper over ``asyncio.create_subprocess_exec``.
+
+Spawns an external tool without a TTY, parses its stdout as JSONL line-by-line
+and its stderr separately (kept as a bounded tail for diagnostics), and on
+cancellation (Ctrl+C / SIGTERM) terminates the child with SIGTERM then SIGKILL
+so a long scan never orphans a process. A non-zero exit (including SIGSEGV /
+OOM kill by the OS) is surfaced as :class:`ExecutionError` carrying the last
+stderr lines; the pipeline engine catches it and does not crash the parent.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import collections
+import os
+import shutil
+import signal
+import subprocess
+from collections.abc import Awaitable, Callable
+from pathlib import Path
+
+from cyberfw.exceptions import ExecutionError, ParseError
+from cyberfw.logging import get_logger
+from cyberfw.pipeline.context import SessionContext
+from cyberfw.pipeline.schemas import ToolRecord, validate_record
+
+LOG = get_logger("executor")
+
+#: How many trailing stderr lines to keep for error reporting.
+_STDERR_KEEP = 25
+
+
+def _prepare_cmd(cmd: list[str]) -> list[str]:
+    """Make Windows shebang scripts runnable via bash when the target is a file.
+
+    Python's subprocess on Windows cannot directly execute a bare Unix shell
+    script without an executable extension. Many tool fixtures and some portable
+    wrappers are written as ``#!/usr/bin/env bash`` scripts in a project-local
+    ``tools_bin`` directory, so intercept them here and hand them to ``bash``.
+    """
+    if os.name != "nt" or not cmd:
+        return cmd
+
+    exe = cmd[0]
+    path = Path(exe)
+    if not path.is_file():
+        return cmd
+
+    suffix = path.suffix.lower()
+    if suffix in {".exe", ".bat", ".cmd", ".com", ".ps1"}:
+        return cmd
+
+    try:
+        with path.open("rb") as handle:
+            first = handle.readline(256)
+    except OSError:
+        return cmd
+
+    if not first.startswith(b"#!"):
+        return cmd
+
+    bash = shutil.which("bash")
+    if not bash:
+        return cmd
+
+    return [bash, _to_posix_path(path, bash), *cmd[1:]]
+
+
+def _to_posix_path(path: Path, bash: str) -> str:
+    """Convert a Windows path to the POSIX form the resolved ``bash`` expects.
+
+    MSYS2/Git Bash mounts drives at ``/c/...`` while WSL mounts them at
+    ``/mnt/c/...``; passing the wrong one makes bash report "No such file or
+    directory" even though the file exists. Git Bash and Cygwin ship a
+    ``cygpath`` helper next to ``bash.exe`` that performs the exact
+    conversion the running shell expects, so prefer it when present and fall
+    back to the WSL convention otherwise.
+    """
+    cygpath = Path(bash).with_name("cygpath.exe")
+    if cygpath.is_file():
+        try:
+            result = subprocess.run(
+                [str(cygpath), "-u", str(path)],
+                capture_output=True,
+                text=True,
+                timeout=5,
+                check=False,
+            )
+        except OSError:
+            result = None
+        if result is not None and result.returncode == 0:
+            converted = result.stdout.strip()
+            if converted:
+                return converted
+
+    posix_path = path.as_posix()
+    if len(posix_path) >= 3 and posix_path[1] == ":" and posix_path[2] == "/":
+        drive = posix_path[0].lower()
+        posix_path = "/mnt/" + drive + posix_path[2:]
+    return posix_path
+
+
+async def run_stage(
+    cmd: list[str],
+    *,
+    tool: str,
+    stage: str,
+    context: SessionContext | None,
+    on_record: Callable[[ToolRecord], Awaitable[None]] | None = None,
+    on_stderr: Callable[[str], Awaitable[None]] | None = None,
+    on_stdout_raw: Callable[[str], Awaitable[None]] | None = None,
+    parse: bool = True,
+    parse_line: Callable[[str, int], ToolRecord] | None = None,
+    parse_buffer: Callable[[str], list[ToolRecord]] | None = None,
+) -> list[ToolRecord]:
+    """Run ``cmd``, streaming + validating its stdout records.
+
+    Returns the list of validated records. Raises :class:`ExecutionError` if the
+    process exits non-zero or dies from a signal/OOM. ``on_record`` is awaited
+    per validated record (Rich live table), before persisting to ``context``.
+    ``on_stderr`` is awaited per stderr line as it arrives (e.g. ``--no-parse``
+    passthrough), independently of the bounded tail kept for error reporting.
+    ``parse_line`` may adapt a tool's non-JSON output format. ``parse_buffer``
+    is for tools that emit a single JSON document (not JSONL, e.g. gitleaks):
+    the whole stdout is collected and parsed once after the process exits.
+    """
+    logger = LOG
+    cmd = _prepare_cmd(cmd)
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdin=asyncio.subprocess.DEVNULL,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+    except OSError as exc:
+        raise ExecutionError(
+            f"{tool} could not start: {exc}. The installed binary may target another OS or architecture.",
+            stderr_tail=[str(exc)],
+        ) from exc
+    stderr_tail: collections.deque[str] = collections.deque(maxlen=_STDERR_KEEP)
+    records: list[ToolRecord] = []
+    parser = parse_line
+    buffered = parse and parse_buffer is not None
+    buffer_lines: list[str] = []
+
+    async def _drain_stderr() -> None:
+        assert proc.stderr is not None
+        while True:
+            raw = await proc.stderr.readline()
+            if not raw:
+                break
+            text = raw.decode("utf-8", errors="replace").rstrip("\r\n")
+            if text:
+                stderr_tail.append(text)
+                if on_stderr is not None:
+                    await on_stderr(text)
+
+    async def _drain_stdout() -> None:
+        assert proc.stdout is not None
+        lineno = 0
+        while True:
+            raw = await proc.stdout.readline()
+            if not raw:
+                break
+            lineno += 1
+            text = raw.decode("utf-8", errors="replace").rstrip("\r\n")
+            if on_stdout_raw is not None:
+                # Every stdout line verbatim, independent of parsing — lets a
+                # caller show exactly what the tool prints while records are
+                # still parsed under the hood (e.g. verbose pipeline view).
+                await on_stdout_raw(text)
+            if buffered:
+                # Whole-document tools: collect now, parse once after exit.
+                buffer_lines.append(text)
+                continue
+            if not text and parse:
+                continue
+            rec: ToolRecord | None
+            if not parse:
+                rec = ToolRecord(
+                    tool=tool,
+                    line_number=lineno,
+                    raw=text,
+                    target=text,
+                    kind="raw",
+                )
+                records.append(rec)
+                if on_record is not None:
+                    await on_record(rec)
+                if context is not None:
+                    context.append(stage, rec)
+                continue
+            try:
+                if parser is None:
+                    rec = validate_record(tool, text, lineno)
+                else:
+                    rec = parser(text, lineno)
+            except ParseError as exc:
+                logger.debug("%s", exc)
+                rec = None
+            if rec is not None:
+                records.append(rec)
+                if on_record is not None:
+                    await on_record(rec)
+                if context is not None:
+                    context.append(stage, rec)
+
+    try:
+        try:
+            probe, drain = await asyncio.gather(_drain_stdout(), _drain_stderr())
+            # gather returns both; we only need to wait for process exit afterwards.
+            del probe, drain  # pragma: no cover - keeps linters honest
+        except asyncio.CancelledError:
+            _terminate(proc)
+            raise
+        exit_code = await proc.wait()
+        if exit_code != 0:
+            raise ExecutionError(
+                f"{tool} exited with code {exit_code}",
+                exit_code=exit_code,
+                stderr_tail=list(stderr_tail),
+            )
+        if buffered and parse_buffer is not None:
+            for rec in parse_buffer("\n".join(buffer_lines)):
+                records.append(rec)
+                if on_record is not None:
+                    await on_record(rec)
+                if context is not None:
+                    context.append(stage, rec)
+        return records
+    finally:
+        # Release pipe transports while the loop is still alive, so their
+        # __del__ doesn't fire noisy ResourceWarnings at interpreter shutdown.
+        _close_transport(proc)
+
+
+def _close_transport(proc: asyncio.subprocess.Process) -> None:
+    """Close the child's pipe transports so they don't outlive the event loop.
+
+    On Windows the ProactorEventLoop otherwise leaves ``_ProactorBasePipeTransport``
+    objects for GC, whose ``__del__`` runs after the loop is closed and prints a
+    noisy ``unclosed transport`` / ``I/O operation on closed pipe`` ResourceWarning
+    at interpreter shutdown. Closing them here is best-effort and harmless once the
+    process has already been drained.
+    """
+    transport = getattr(proc, "_transport", None)
+    if transport is not None:
+        try:
+            transport.close()
+        except Exception:  # noqa: BLE001 - cleanup must never raise
+            pass
+
+
+def _terminate(proc: asyncio.subprocess.Process) -> None:
+    if proc.returncode is not None:
+        return
+    try:
+        proc.terminate()
+    except ProcessLookupError:  # pragma: no cover - already gone
+        pass
+    # Give it a short grace, then hard-kill.
+    asyncio.create_task(_kill_after(proc, 3.0))
+
+
+async def _kill_after(proc: asyncio.subprocess.Process, delay: float) -> None:
+    await asyncio.sleep(delay)
+    if proc.returncode is None:
+        try:
+            proc.kill()
+        except ProcessLookupError:  # pragma: no cover
+            pass
+
+
+def _describe_crash(exit_code: int) -> str:
+    if exit_code < 0:
+        signum = -exit_code
+        if signum in (signal.SIGSEGV,):
+            return "crashed with SIGSEGV"
+        return f"killed by signal {signum}"
+    return f"exited with code {exit_code}"  # pragma: no cover - defensive

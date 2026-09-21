@@ -1,0 +1,134 @@
+# registry.yaml — единственный декларативный источник истины по инструментам.
+#
+# Каждая запись описывает внешний прекомпилированный бинарь, который cyberfw
+# скачивает из GitHub Releases, распаковывает в tools_bin/ и запускает.
+#
+# Поля (см. cyberfw/manager/registry.py -> ToolSpec):
+#   repo            — "<owner>/<name>" на GitHub
+#   asset_patterns  — fnmatch-маски по полному имени ассета; объединяются с
+#                     масками из cyberfw/manager/platform_map.asset_patterns() с
+#                     приоритетом платформенных (пробуем сначала их).
+#   archive         — zip | tar | auto (auto = по расширению файла)
+#   binary          — имя исполняемого файла внутри архива (иначе угадывается)
+#   needs_checksum  — сверять скачанный архив с checksums.txt релиза (когда есть)
+#   check_deps      — внешние зависимости (например, nmap для RustScan)
+#   interactive_input — статические CLI-флаги, которые адаптер вставляет в argv
+#
+# ВАЖНО (PlatformDiscovery naming): ProjectDiscovery-инструменты используют
+# "_<os>_<arch>"; gitleaks использует "x64" вместо "amd64"; ffuf/rustscan
+# публикуют и tar.gz, и zip. Адаптеры (cyberfw/tools/*.py) уже зашивают свои
+# флаги вывода (-silent -jsonl / -json), поэтому interactive_input тут пустой.
+
+subfinder:
+  repo: projectdiscovery/subfinder
+  asset_patterns:
+    - "subfinder_*_linux_amd64.zip"
+    - "subfinder_*_linux_arm64.zip"
+    - "subfinder_*_darwin_amd64.zip"
+    - "subfinder_*_darwin_arm64.zip"
+    - "subfinder_*_windows_amd64.zip"
+  archive: zip
+  binary: subfinder
+  needs_checksum: true
+  interactive_input: {}
+
+naabu:
+  repo: projectdiscovery/naabu
+  asset_patterns:
+    - "naabu_*_linux_amd64.zip"
+    - "naabu_*_linux_arm64.zip"
+    - "naabu_*_darwin_amd64.zip"
+    - "naabu_*_darwin_arm64.zip"
+    - "naabu_*_windows_amd64.zip"
+  archive: zip
+  binary: naabu
+  needs_checksum: true
+  interactive_input: {}
+
+httpx:
+  repo: projectdiscovery/httpx
+  asset_patterns:
+    - "httpx_*_linux_amd64.zip"
+    - "httpx_*_linux_arm64.zip"
+    - "httpx_*_darwin_amd64.zip"
+    - "httpx_*_darwin_arm64.zip"
+    - "httpx_*_windows_amd64.zip"
+  archive: zip
+  binary: httpx
+  needs_checksum: true
+  interactive_input: {}
+
+nuclei:
+  repo: projectdiscovery/nuclei
+  asset_patterns:
+    - "nuclei_*_linux_amd64.zip"
+    - "nuclei_*_linux_arm64.zip"
+    - "nuclei_*_darwin_amd64.zip"
+    - "nuclei_*_darwin_arm64.zip"
+    - "nuclei_*_windows_amd64.zip"
+  archive: zip
+  binary: nuclei
+  needs_checksum: true
+  interactive_input: {}
+
+ffuf:
+  repo: ffuf/ffuf
+  asset_patterns:
+    - "ffuf_*_linux_amd64.zip"
+    - "ffuf_*_linux_amd64.tar.gz"
+    - "ffuf_*_linux_arm64.zip"
+    - "ffuf_*_darwin_amd64.zip"
+    - "ffuf_*_darwin_amd64.tar.gz"
+    - "ffuf_*_windows_amd64.zip"
+  archive: auto
+  binary: ffuf
+  needs_checksum: true
+  interactive_input: {}
+
+rustscan:
+  repo: RustScan/RustScan
+  # RustScan публикует zip-контейнеры с бинарниками для разных ОС/архитектур.
+  asset_patterns:
+    - "*x86_64*linux*rustscan*.zip"
+    - "*aarch64*linux*rustscan*.zip"
+    - "*x86_64*macos*rustscan*.zip"
+    - "*aarch64*macos*rustscan*.zip"
+    - "*x86_64*windows*rustscan*.zip"
+    - "*aarch64*windows*rustscan*.zip"
+  archive: auto
+  binary: rustscan
+  needs_checksum: false
+  # RustScan itself only discovers open ports; Nmap does service/version
+  # detection and is not run automatically. Missing nmap only produces a
+  # warning with install instructions (graceful degradation), never a hard
+  # failure — see PipelineEngine.build_tool.
+  check_deps: ["nmap"]
+  interactive_input: {}
+
+gitleaks:
+  repo: gitleaks/gitleaks
+  # ВНИМАНИЕ: gitleaks называет amd64 как "x64" (а не "amd64"), поэтому
+  # платформенная маска *linux*amd64* не сработает — нужны явные x64-маски.
+  asset_patterns:
+    - "gitleaks_*_linux_x64.zip"
+    - "gitleaks_*_linux_x64.tar.gz"
+    - "gitleaks_*_linux_arm64.zip"
+    - "gitleaks_*_darwin_x64.zip"
+    - "gitleaks_*_darwin_x64.tar.gz"
+    - "gitleaks_*_windows_x64.zip"
+  archive: auto
+  binary: gitleaks
+  needs_checksum: true
+  interactive_input: {}
+
+gowitness:
+  repo: sensepost/gowitness
+  # sensepost/gowitness publishes raw binaries (not archives).
+  asset_patterns:
+    - "gowitness-*-linux-amd64"
+    - "gowitness-*-darwin-amd64"
+    - "gowitness-*-windows-amd64.exe"
+  archive: raw
+  binary: gowitness
+  needs_checksum: false
+  interactive_input: {}
