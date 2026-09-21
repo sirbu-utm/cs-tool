@@ -239,19 +239,13 @@ def interactive_menu() -> None:
                 finally:
                     manager.close()
                 choice = _prompt_choice(names)
-                if choice in {"p", "l", "f"}:
+                if choice in _SETTINGS_KEYS:
                     _toggle_setting(choice, settings)
                     continue  # stay inside Live → in-place refresh
                 break
 
         try:
-            index = int(choice)
-            if 1 <= index <= len(names):
-                _interactive_run(names[index - 1])
-            elif index == 9:
-                _interactive_pipeline()
-            else:
-                console.print("[muted]Goodbye.[/muted]")
+            if not _dispatch_choice(choice, names):
                 return
         except typer.Exit:
             console.print("[warn]The operation failed. Returning to the launcher.[/warn]")
@@ -260,22 +254,47 @@ def interactive_menu() -> None:
             return
 
 
+#: Launcher hotkeys that are not tool numbers. Tools are ``1``..``len(names)``,
+#: so the pipeline and exit actions get letters rather than a number that a
+#: ninth registry entry would collide with.
+_PIPELINE_KEY = "r"
+_EXIT_KEYS = frozenset({"0", "q"})
+_SETTINGS_KEYS = frozenset({"p", "l", "f"})
+
+
+def _tool_range(names: list[str]) -> str:
+    """``1-8`` for eight tools, ``1`` for a single one."""
+    return "1" if len(names) == 1 else f"1-{len(names)}"
+
+
 def _prompt_choice(names: list[str]) -> str:
     """Prompt for a menu choice, with an on-brand hint on invalid input.
 
-    Returns a normalised token: a digit (tool / 9 / 0) or a settings hotkey
-    (``p``/``l``/``f``). Anything else re-prompts with a plain explanation
-    instead of Rich's generic "not a valid integer" loop.
+    Returns a normalised token: a tool number, the pipeline key, an exit key
+    or a settings hotkey (``p``/``l``/``f``). Anything else re-prompts with a
+    plain explanation instead of Rich's generic "not a valid integer" loop.
     """
-    valid = {str(index) for index in range(1, len(names) + 1)} | {"9", "0", "p", "l", "f"}
+    valid = {str(index) for index in range(1, len(names) + 1)} | {_PIPELINE_KEY} | _EXIT_KEYS | _SETTINGS_KEYS
     while True:
         raw = Prompt.ask("Select tool or action").strip().lower()
         if raw in valid:
             return raw
         console.print(
-            f"[warn]Type 1-{len(names)} for a tool, 9 pipeline, 0 exit, "
+            f"[warn]Type {_tool_range(names)} for a tool, {_PIPELINE_KEY} pipeline, 0 exit, "
             "or p/l/f to change settings.[/warn]"
         )
+
+
+def _dispatch_choice(choice: str, names: list[str]) -> bool:
+    """Run the action behind a validated launcher choice; False means "exit"."""
+    if choice in _EXIT_KEYS:
+        console.print("[muted]Goodbye.[/muted]")
+        return False
+    if choice == _PIPELINE_KEY:
+        _interactive_pipeline()
+    else:
+        _interactive_run(names[int(choice) - 1])
+    return True
 
 
 def _launcher_view(manager: ToolManager, settings: Settings) -> Table:
@@ -287,10 +306,11 @@ def _launcher_view(manager: ToolManager, settings: Settings) -> Table:
     def _flag(value: bool) -> tuple[str, str]:
         return ("on", "ok") if value else ("off", "warn")
 
+    names = manager.registry.names()
     sidebar = Table.grid(padding=(0, 0))
     sidebar.add_row(Text("SHORTCUTS", style="accent"))
-    sidebar.add_row(Text("  1-8  select tool", style="dim"))
-    sidebar.add_row(Text("  9    run pipeline", style="dim"))
+    sidebar.add_row(Text(f"  {_tool_range(names):<4} select tool", style="dim"))
+    sidebar.add_row(Text(f"  {_PIPELINE_KEY:<4} run pipeline", style="dim"))
     sidebar.add_row(Text("  0    exit", style="dim"))
     sidebar.add_row("")
     sidebar.add_row(Text("SETTINGS", style="accent"))
@@ -305,7 +325,7 @@ def _launcher_view(manager: ToolManager, settings: Settings) -> Table:
     content.add_column("tool", style="bold white")
     content.add_column("status")
     content.add_column("source", style="dim")
-    for index, name in enumerate(manager.registry.names(), start=1):
+    for index, name in enumerate(names, start=1):
         status = "[ok]ready[/ok]" if manager.is_installed(name) else "[warn]not installed[/warn]"
         content.add_row(str(index), name, status, manager.spec(name).repo)
 

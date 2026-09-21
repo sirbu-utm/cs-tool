@@ -403,3 +403,64 @@ class TestRedirectedOutput:
 
         assert proc.returncode == 0, proc.stderr.decode("utf-8", "replace")[-600:]
         assert "▄▄▄▄" in proc.stdout.decode("utf-8")
+
+
+class TestLauncherScalesWithRegistry:
+    """The launcher must not hard-code eight tools: a ninth entry in registry.yaml used
+    to collide with the pipeline shortcut (``9``) and the sidebar still said ``1-8``."""
+
+    NINE = [f"tool{i}" for i in range(1, 10)]
+
+    def test_ninth_tool_is_selectable_by_number(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from cyberfw.cli import _dispatch_choice
+
+        ran: list[str] = []
+        monkeypatch.setattr("cyberfw.cli._interactive_run", ran.append)
+        monkeypatch.setattr("cyberfw.cli._interactive_pipeline", lambda: ran.append("<pipeline>"))
+
+        assert _dispatch_choice("9", self.NINE) is True
+        assert ran == ["tool9"]
+
+    def test_pipeline_has_its_own_hotkey(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from cyberfw.cli import _dispatch_choice
+
+        ran: list[str] = []
+        monkeypatch.setattr("cyberfw.cli._interactive_run", ran.append)
+        monkeypatch.setattr("cyberfw.cli._interactive_pipeline", lambda: ran.append("<pipeline>"))
+
+        assert _dispatch_choice("r", self.NINE) is True
+        assert ran == ["<pipeline>"]
+
+    @pytest.mark.parametrize("key", ["0", "q"])
+    def test_exit_keys(self, key: str) -> None:
+        from cyberfw.cli import _dispatch_choice
+
+        assert _dispatch_choice(key, self.NINE) is False
+
+    def test_prompt_accepts_pipeline_hotkey(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        answers = iter(["r", "0"])
+        monkeypatch.setattr("cyberfw.cli.Prompt.ask", lambda *_a, **_k: next(answers))
+
+        assert _prompt_choice(["a", "b"]) == "r"
+
+    def test_sidebar_counts_the_registered_tools(self, tmp_path: Path) -> None:
+        from cyberfw.cli import _launcher_view
+        from cyberfw.config import Settings
+        from cyberfw.manager import ToolManager, load_registry
+
+        registry_path = tmp_path / "nine.yaml"
+        registry_path.write_text(
+            "".join(f"{name}:\n  repo: org/{name}\n  asset_patterns: []\n  binary: {name}\n" for name in self.NINE),
+            encoding="utf-8",
+        )
+        settings = Settings(root_dir=tmp_path)
+        manager = ToolManager(settings, load_registry(registry_path))
+        output = Console(theme=THEME, record=True, width=120)
+        try:
+            output.print(_launcher_view(manager, settings))
+        finally:
+            manager.close()
+        rendered = output.export_text()
+
+        assert "1-9  select tool" in rendered
+        assert "r    run pipeline" in rendered

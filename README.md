@@ -44,7 +44,7 @@ Launcher автоматически:
 ```text
 SHORTCUTS                TOOLS
   1-8  select tool        #  tool        status  source
-  9    run pipeline       1  ffuf         ready   ffuf/ffuf
+  r    run pipeline       1  ffuf         ready   ffuf/ffuf
   0    exit               2  gitleaks     ready   gitleaks/gitleaks
                           ...
 SETTINGS
@@ -53,7 +53,9 @@ SETTINGS
   f  log file   on
 ```
 
-В том же приглашении (где вводятся 1-9) доступны переключатели настроек:
+Диапазон номеров считается от `registry.yaml` (девятый инструмент получит
+номер `9`), pipeline запускается клавишей `r`, выход — `0` или `q`.
+В том же приглашении доступны переключатели настроек:
 
 - `p` — включить/выключить парсинг по схеме (выкл. = сырой stdout/stderr, как `--no-parse`);
 - `l` — циклически менять уровень логов (DEBUG → INFO → WARNING → ERROR);
