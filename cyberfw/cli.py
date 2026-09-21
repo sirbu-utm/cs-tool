@@ -42,6 +42,7 @@ from cyberfw.pipelines import PIPELINES, available_pipelines, build
 from cyberfw.report.html_report import generate_html_report
 from cyberfw.report.json_report import generate_json_report
 from cyberfw.report.run_info import RunInfo
+from cyberfw.resources import packaged_data
 from cyberfw.tools import adapter_class
 from cyberfw.tools.base import ToolContext
 from cyberfw.ui import banner, tool_guide
@@ -75,18 +76,28 @@ def _bootstrap() -> tuple[Settings, ToolManager]:
     return settings, manager
 
 
+def _registry_candidates() -> list[Path]:
+    """Where ``registry.yaml`` may live, most specific first.
+
+    The current directory (a workspace the user may have edited), then the
+    checkout root next to the package (running from a clone elsewhere), then
+    the copy the wheel ships as ``cyberfw/data/registry.yaml``.
+    """
+    candidates = [Path.cwd() / "registry.yaml", Path(__file__).resolve().parent.parent / "registry.yaml"]
+    packaged = packaged_data("registry.yaml")
+    if packaged is not None:
+        candidates.append(packaged)
+    return candidates
+
+
 def _registry_path() -> Path:
-    """Locate ``registry.yaml`` (repo root preferred, package-relative fallback)."""
-    cwd = Path.cwd() / "registry.yaml"
-    if cwd.exists():
-        return cwd
-    pkg_root = Path(__file__).resolve().parent.parent
-    fallback = pkg_root / "registry.yaml"
-    if fallback.exists():
-        return fallback
-    raise RegistryError(
-        f"registry.yaml not found near {cwd}. Run cyberfw from the project root."
-    )
+    """Locate ``registry.yaml`` or raise a :class:`RegistryError` naming the places tried."""
+    candidates = _registry_candidates()
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate
+    tried = ", ".join(str(path) for path in candidates)
+    raise RegistryError(f"registry.yaml not found (tried: {tried}). Run cyberfw from the project root.")
 
 
 def _read_hosts(path: Path) -> list[str]:

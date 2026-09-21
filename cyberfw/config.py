@@ -16,6 +16,8 @@ import yaml
 from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from cyberfw.resources import user_data_dir, workspace_root
+
 __all__ = ["Settings", "load_settings"]
 
 
@@ -105,11 +107,17 @@ class Settings(BaseSettings):
 def load_settings(root_dir: Path | None = None, local_file: Path | None = None) -> Settings:
     """Build settings, merging an optional ``config.local.yaml`` override.
 
+    The root — where ``config.local.yaml`` is read and relative directories
+    resolve — is ``root_dir``, else ``CYBERFW_ROOT_DIR``, else the current
+    directory when it is a workspace (has ``registry.yaml``), else the per-user
+    data directory, so an installed ``cyberfw`` never litters an unrelated CWD.
+
     YAML fields are injected as extra kwargs so pydantic-settings treats them
     with the same precedence as their ``CYBERFW_*`` alternatives — YAML beats
     code defaults, environment beats YAML.
     """
-    cwd = root_dir or Path.cwd()
+    env_root = os.environ.get("CYBERFW_ROOT_DIR")
+    cwd = root_dir or (Path(env_root) if env_root else None) or workspace_root() or user_data_dir()
     candidate = local_file or cwd / "config.local.yaml"
     if candidate.exists():
         try:

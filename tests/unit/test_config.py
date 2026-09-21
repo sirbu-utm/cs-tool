@@ -116,3 +116,49 @@ class TestSettingsEnv:
 
     def test_pipelines_dir_resolves_against_root(self, tmp_path: Path) -> None:
         assert Settings(root_dir=tmp_path).pipelines_dir == (tmp_path / "pipelines").resolve()
+
+
+class TestRootDirDiscovery:
+    """``load_settings()`` without an explicit root: the current directory when it is a
+    workspace (has registry.yaml), otherwise the per-user data directory — so an
+    installed ``cyberfw`` run from an arbitrary folder does not litter it."""
+
+    def test_workspace_cwd_is_the_root(self, tmp_path: Path, monkeypatch) -> None:
+        (tmp_path / "registry.yaml").write_text("{}\n", encoding="utf-8")
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.delenv("CYBERFW_ROOT_DIR", raising=False)
+
+        settings = load_settings()
+
+        assert settings.root_dir == tmp_path
+        assert settings.tools_dir == (tmp_path / "tools_bin").resolve()
+
+    def test_non_workspace_cwd_falls_back_to_the_user_data_dir(self, tmp_path: Path, monkeypatch) -> None:
+        cwd = tmp_path / "somewhere-else"
+        cwd.mkdir()
+        monkeypatch.chdir(cwd)
+        monkeypatch.delenv("CYBERFW_ROOT_DIR", raising=False)
+        monkeypatch.setattr("cyberfw.config.user_data_dir", lambda: tmp_path / "data")
+
+        settings = load_settings()
+
+        assert settings.root_dir == tmp_path / "data"
+        assert settings.tools_dir == (tmp_path / "data" / "tools_bin").resolve()
+        assert not any(cwd.iterdir()), "nothing may be created in an unrelated working directory"
+
+    def test_env_root_dir_wins(self, tmp_path: Path, monkeypatch) -> None:
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("CYBERFW_ROOT_DIR", str(tmp_path / "custom"))
+
+        assert load_settings().root_dir == tmp_path / "custom"
+
+    def test_config_file_is_read_from_the_root(self, tmp_path: Path, monkeypatch) -> None:
+        data = tmp_path / "data"
+        data.mkdir()
+        (data / "config.local.yaml").write_text("concurrency: 9\n", encoding="utf-8")
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.delenv("CYBERFW_ROOT_DIR", raising=False)
+        monkeypatch.delenv("CYBERFW_CONCURRENCY", raising=False)
+        monkeypatch.setattr("cyberfw.config.user_data_dir", lambda: data)
+
+        assert load_settings().concurrency == 9

@@ -133,3 +133,27 @@ class TestShippedPipelineFiles:
             for node in load_pipeline_file(path):
                 assert node.tool in registry, f"{name}: {node.tool} is not in registry.yaml"
                 assert node.tool in ADAPTERS, f"{name}: {node.tool} has no adapter"
+
+
+class TestPackagedPipelines:
+    """The wheel carries pipelines/ as cyberfw/data/pipelines; an installed cyberfw run
+    outside the checkout must still know ports-to-vuln, and a user file of the same
+    name in Settings.pipelines_dir wins."""
+
+    def test_packaged_pipelines_are_available(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        packaged = tmp_path / "site" / "pipelines"
+        packaged.mkdir(parents=True)
+        (packaged / "shipped.yaml").write_text("nodes:\n  - tool: httpx\n    stage: live\n", encoding="utf-8")
+        monkeypatch.setattr("cyberfw.pipelines.packaged_data", lambda *parts: packaged)
+
+        assert "shipped" in available_pipelines(tmp_path / "no-such-dir")
+        assert [n.tool for n in build("shipped", pipelines_dir=tmp_path / "no-such-dir")] == ["httpx"]
+
+    def test_user_file_shadows_the_packaged_one(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        packaged = tmp_path / "site" / "pipelines"
+        packaged.mkdir(parents=True)
+        (packaged / "dup.yaml").write_text("nodes:\n  - tool: httpx\n    stage: live\n", encoding="utf-8")
+        monkeypatch.setattr("cyberfw.pipelines.packaged_data", lambda *parts: packaged)
+        _write(tmp_path, "dup", "nodes:\n  - tool: nuclei\n    stage: mine\n")
+
+        assert [n.tool for n in build("dup", pipelines_dir=tmp_path / "pipelines")] == ["nuclei"]

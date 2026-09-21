@@ -37,6 +37,13 @@ build-backend = "hatchling.build"
 [tool.hatch.build.targets.wheel]
 packages = ["cyberfw"]
 
+# The registry and the shipped pipelines live at the repo root for the
+# workspace layout; the wheel carries the same files as package data so an
+# installed `cyberfw` works from any directory (see cyberfw/resources.py).
+[tool.hatch.build.targets.wheel.force-include]
+"registry.yaml" = "cyberfw/data/registry.yaml"
+"pipelines" = "cyberfw/data/pipelines"
+
 [tool.ruff]
 line-length = 100
 target-version = "py310"

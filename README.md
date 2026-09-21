@@ -36,6 +36,18 @@ Launcher автоматически:
 `cstool.bat`. В PowerShell используй `./cstool.bat`, либо добавь корень
 репозитория в `PATH`, чтобы команда `cstool` была доступна из любой папки.
 
+### Установка как пакета
+
+Запускать из клона не обязательно: `uv tool install .` (или `pip install .`)
+даёт команду `cyberfw`, которая работает из любого каталога. В wheel входят
+`registry.yaml` и `pipelines/` (как `cyberfw/data/`), а `tools_bin/`,
+`reports/` и `logs/` создаются в пользовательском каталоге данных —
+`%LOCALAPPDATA%\cyberfw` на Windows, `~/Library/Application Support/cyberfw`
+на macOS, `$XDG_DATA_HOME/cyberfw` (по умолчанию `~/.local/share/cyberfw`) на
+Linux — а не в текущей папке. Каталог с `registry.yaml` считается workspace:
+из него всё по-прежнему кладётся рядом. Корень можно задать явно:
+`CYBERFW_ROOT_DIR=/path`.
+
 ## Интерактивное меню
 
 После автоматической подготовки отображается рабочая панель: слева —
@@ -405,9 +417,10 @@ cyberfw/
   pipelines/             встроенные pipeline и загрузчик YAML-описаний
   tools/                 адаптеры восьми внешних инструментов
   report/                JSON и HTML отчёты
+  resources.py           данные пакета и пользовательские каталоги (workspace / installed)
 tests/                   unit и integration тесты
-registry.yaml            декларативный реестр релизов
-pipelines/               свои pipeline в YAML (пример: ports-to-vuln.yaml)
+registry.yaml            декларативный реестр релизов (в wheel — cyberfw/data/)
+pipelines/               свои pipeline в YAML (пример: ports-to-vuln.yaml; в wheel — cyberfw/data/)
 cstool.bat               Windows launcher (bootstrap + CLI)
 cstool / start.sh        Linux/macOS launcher (bootstrap + CLI)
 ```

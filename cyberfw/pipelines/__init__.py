@@ -16,6 +16,7 @@ from cyberfw.logging import get_logger
 from cyberfw.pipeline.engine import Node
 from cyberfw.pipelines.loader import discover_pipelines, load_pipeline_file
 from cyberfw.pipelines.recon_to_vuln import ReconToVulnOptions, build_recon_to_vuln
+from cyberfw.resources import packaged_data
 
 __all__ = ["build_recon_to_vuln", "build", "available_pipelines", "PIPELINES"]
 
@@ -26,9 +27,16 @@ PIPELINES: dict[str, Callable[[ReconToVulnOptions | None], list[Node]]] = {
 }
 
 
+def _pipeline_files(pipelines_dir: Path | None) -> dict[str, Path]:
+    """YAML pipelines by name: the packaged ones, overridden by the user's directory."""
+    files = discover_pipelines(packaged_data("pipelines"))
+    files.update(discover_pipelines(pipelines_dir))
+    return files
+
+
 def available_pipelines(pipelines_dir: Path | None = None) -> list[str]:
     """Sorted names of every runnable pipeline: built-in plus YAML files."""
-    return sorted({*PIPELINES, *discover_pipelines(pipelines_dir)})
+    return sorted({*PIPELINES, *_pipeline_files(pipelines_dir)})
 
 
 def build(name: str, *, pipelines_dir: Path | None = None, **options: object) -> list[Node]:
@@ -43,7 +51,7 @@ def build(name: str, *, pipelines_dir: Path | None = None, **options: object) ->
     if builder is not None:
         return builder(builder_options_from(options))
 
-    files = discover_pipelines(pipelines_dir)
+    files = _pipeline_files(pipelines_dir)
     path = files.get(name)
     if path is None:
         known = ", ".join(available_pipelines(pipelines_dir))

@@ -677,3 +677,36 @@ class TestReportProvenance:
         assert set(run["tool_versions"]) == {"subfinder", "httpx", "nuclei"}
         assert run["duration_s"] is not None and run["duration_s"] >= 0
         assert "/" in run["platform"]
+
+
+class TestRegistryLookup:
+    def test_candidates_prefer_cwd_then_checkout_root_then_packaged_copy(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from cyberfw.cli import _registry_candidates
+
+        monkeypatch.setattr("cyberfw.cli.packaged_data", lambda *parts: tmp_path / "site" / "registry.yaml")
+        candidates = _registry_candidates()
+
+        assert candidates[0] == Path.cwd() / "registry.yaml"
+        assert candidates[1] == Path(__file__).resolve().parents[2] / "registry.yaml"
+        assert candidates[-1] == tmp_path / "site" / "registry.yaml"
+
+    def test_first_existing_candidate_wins(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        from cyberfw.cli import _registry_path
+
+        packaged = tmp_path / "site" / "registry.yaml"
+        packaged.parent.mkdir()
+        packaged.write_text("{}\n", encoding="utf-8")
+        monkeypatch.setattr("cyberfw.cli._registry_candidates", lambda: [tmp_path / "missing.yaml", packaged])
+
+        assert _registry_path() == packaged
+
+    def test_no_registry_anywhere_is_a_registry_error(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        from cyberfw.cli import _registry_path
+        from cyberfw.exceptions import RegistryError
+
+        monkeypatch.setattr("cyberfw.cli._registry_candidates", lambda: [tmp_path / "missing.yaml"])
+
+        with pytest.raises(RegistryError, match="registry.yaml"):
+            _registry_path()
