@@ -504,3 +504,26 @@ class TestContextStoreLifecycle:
         engine.context.close()
 
         assert opens == 1, "the stage file was still open after the run"
+
+
+class TestStageTimeout:
+    async def test_a_hung_tool_is_a_clean_stage_failure(self, tmp_path: Path) -> None:
+        """Without a limit a stuck scanner blocks the whole pipeline until Ctrl+C;
+        with ``stage_timeout`` it becomes an ordinary failed NodeResult."""
+        registry_path = tmp_path / "registry.yaml"
+        registry_path.write_text(
+            "subfinder:\n  repo: org/subfinder\n  asset_patterns: []\n  binary: hang.py\n",
+            encoding="utf-8",
+        )
+        engine = _make_engine(tmp_path, registry_path)
+        engine.settings.stage_timeout = 0.3
+        script = tmp_path / "hang.py"
+        script.write_text("import time\ntime.sleep(30)\n", encoding="utf-8")
+        stub = _StubTool(engine.tool_manager.spec("subfinder"), script)
+        engine.build_tool = lambda name: stub  # type: ignore[method-assign]
+
+        result = await engine.run([Node(tool="subfinder", stage="sub")], seed="x")
+
+        assert not result.succeeded()
+        assert result.nodes[0].error is not None
+        assert "timed out" in result.nodes[0].error

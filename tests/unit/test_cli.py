@@ -355,6 +355,7 @@ class TestStatusCommand:
         assert "External dependencies" in result.stdout
         assert "Effective settings" in result.stdout
         assert "log_level" in result.stdout
+        assert "stage_timeout" in result.stdout
 
     def test_doctor_is_an_alias_for_status(self) -> None:
         assert runner.invoke(app, ["doctor"]).exit_code == 0

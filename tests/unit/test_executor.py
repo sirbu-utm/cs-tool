@@ -402,6 +402,46 @@ class TestCancellation:
         assert marker.read_text() == "terminated cleanly"
 
 
+class TestTimeout:
+    async def test_child_exceeding_timeout_is_killed_and_reported(self, tmp_path: Path) -> None:
+        marker = tmp_path / "still_alive"
+        script = _write_script(
+            tmp_path,
+            "import pathlib, sys, time\n"
+            "sys.stderr.write('resolving example.com\\n'); sys.stderr.flush()\n"
+            "time.sleep(1.0)\n"
+            f"pathlib.Path({str(marker)!r}).write_text('alive')\n",
+        )
+
+        with pytest.raises(ExecutionError, match="timed out after 0.3s") as exc_info:
+            await run_stage([sys.executable, str(script)], tool="httpx", stage="s", context=None, timeout=0.3)
+
+        # Diagnostics gathered before the deadline survive into the error.
+        assert exc_info.value.stderr_tail == ["resolving example.com"]
+        await asyncio.sleep(1.2)
+        assert not marker.exists(), "child process outlived the timeout"
+
+    async def test_records_streamed_before_the_deadline_reach_the_store(self, tmp_path: Path) -> None:
+        from cyberfw.pipeline.context import SessionContext
+
+        script = _write_script(
+            tmp_path,
+            "import json, time\n"
+            "print(json.dumps({'host': 'early.example.com'}), flush=True)\n"
+            "time.sleep(30)\n",
+        )
+        with SessionContext(root_dir=tmp_path, session_id="sess") as context:
+            with pytest.raises(ExecutionError, match="timed out"):
+                await run_stage(
+                    [sys.executable, str(script)], tool="subfinder", stage="sub", context=context, timeout=0.5
+                )
+            assert context.targets("sub") == ["early.example.com"]
+
+    async def test_no_timeout_by_default(self, tmp_path: Path) -> None:
+        script = _write_script(tmp_path, "import time\ntime.sleep(0.6)\n")
+        assert await run_stage([sys.executable, str(script)], tool="x", stage="s", context=None) == []
+
+
 class TestCrashDescription:
     @pytest.mark.parametrize(
         ("exit_code", "expected"),

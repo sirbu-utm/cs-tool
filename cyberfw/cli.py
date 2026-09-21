@@ -475,6 +475,10 @@ def status_cmd() -> None:
         cfg.add_row("log_level", settings.log_level)
         cfg.add_row("log_to_file", "on" if settings.log_to_file else "off")
         cfg.add_row("concurrency", str(settings.concurrency))
+        cfg.add_row(
+            "stage_timeout",
+            f"{settings.stage_timeout:g}s" if settings.stage_timeout else "[muted]unlimited[/muted]",
+        )
         cfg.add_row("wordlist", settings.wordlist or "[muted](unset — needed for ffuf)[/muted]")
         cfg.add_row("github_token", "[ok]set[/ok]" if settings.github_token else "[muted]unset (60 req/h)[/muted]")
         cfg.add_row("reports_dir", str(settings.reports_dir))

@@ -102,3 +102,14 @@ class TestSettingsEnv:
         """A zero limit would reject every archive — misconfiguration, not a valid choice."""
         with pytest.raises(ValidationError):
             Settings(root_dir=tmp_path, max_archive_size=0)
+
+    def test_stage_timeout_defaults_to_unlimited(self, tmp_path: Path) -> None:
+        assert Settings(root_dir=tmp_path).stage_timeout is None
+
+    def test_stage_timeout_via_env(self, tmp_path: Path, monkeypatch) -> None:
+        monkeypatch.setenv("CYBERFW_STAGE_TIMEOUT", "900")
+        assert Settings(root_dir=tmp_path).stage_timeout == 900.0
+
+    def test_zero_stage_timeout_rejected(self, tmp_path: Path) -> None:
+        with pytest.raises(ValidationError):
+            Settings(root_dir=tmp_path, stage_timeout=0)

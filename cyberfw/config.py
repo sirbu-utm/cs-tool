@@ -53,6 +53,12 @@ class Settings(BaseSettings):
         description="Network timeout (seconds) for GitHub API calls and asset downloads. Applies to each "
         "connect/read/write operation, not to the whole transfer, so a slow-but-alive download is not cut off.",
     )
+    stage_timeout: float | None = Field(
+        default=None,
+        gt=0,
+        description="Max seconds one tool process may run before it is stopped and the stage "
+        "fails (each fan-out target is its own process). Unset = no limit.",
+    )
     wordlist: str | None = Field(default=None, description="Custom fuzz wordlist path for Ffuf.")
     parse: bool = Field(
         default=True,

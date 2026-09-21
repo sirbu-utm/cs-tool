@@ -153,11 +153,14 @@ async def run_stage(
     parse: bool = True,
     parse_line: Callable[[str, int], ToolRecord] | None = None,
     parse_buffer: Callable[[str], list[ToolRecord]] | None = None,
+    timeout: float | None = None,
 ) -> list[ToolRecord]:
     """Run ``cmd``, streaming + validating its stdout records.
 
     Returns the list of validated records. Raises :class:`ExecutionError` if the
-    process exits non-zero or dies from a signal/OOM. ``on_record`` is awaited
+    process exits non-zero, dies from a signal/OOM, or is still running after
+    ``timeout`` seconds (it is then stopped like on cancellation; records already
+    streamed stay in the context store). ``on_record`` is awaited
     per validated record (Rich live table), before persisting to ``context``.
     ``on_stderr`` is awaited per stderr line as it arrives (e.g. ``--no-parse``
     passthrough), independently of the bounded tail kept for error reporting.
@@ -252,10 +255,16 @@ async def run_stage(
 
     try:
         try:
-            await asyncio.gather(_drain_stdout(), _drain_stderr())
+            await asyncio.wait_for(asyncio.gather(_drain_stdout(), _drain_stderr()), timeout)
         except asyncio.CancelledError:
             await _stop(proc)
             raise
+        except asyncio.TimeoutError:
+            await _stop(proc)
+            raise ExecutionError(
+                f"{tool} timed out after {timeout:g}s",
+                stderr_tail=list(stderr_tail),
+            ) from None
         exit_code = await proc.wait()
         if exit_code != 0:
             raise ExecutionError(

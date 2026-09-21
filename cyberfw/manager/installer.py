@@ -244,12 +244,14 @@ class ToolInstaller:
     def _remove_existing_binary(self, spec: ToolSpec) -> None:
         """Remove stale copies of the binary anywhere under ``tools_dir``.
 
-        Covers the pre-per-tool-directory layout, where binaries sat at the top level.
+        Covers the pre-per-tool-directory layout, where binaries sat at the top
+        level. The ``.exe`` variant is stale on every OS (a checkout shared between
+        Windows and WSL otherwise keeps both ``httpx`` and ``httpx.exe`` forever).
         """
         if spec.binary is None:
             return
         names = {spec.binary}
-        if os.name == "nt" and not spec.binary.lower().endswith(".exe"):
+        if not spec.binary.lower().endswith(".exe"):
             names.add(spec.binary + ".exe")
         wanted = {name.lower() for name in names}
         for path in list(self.tools_dir.rglob("*")):

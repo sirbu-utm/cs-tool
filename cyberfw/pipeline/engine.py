@@ -268,6 +268,7 @@ class PipelineEngine:
             parse_line=adapter.parse_line,
             parse_buffer=adapter.parse_output if adapter.buffered else None,
             parse=parse,
+            timeout=self.settings.stage_timeout,
         )
 
     async def _fan_out(
@@ -292,6 +293,7 @@ class PipelineEngine:
                         parse_line=adapter.parse_line,
                         parse_buffer=adapter.parse_output if adapter.buffered else None,
                         parse=parse,
+                        timeout=self.settings.stage_timeout,
                     )
                 except ExecutionError as exc:
                     # One unreachable host must not throw away every other
