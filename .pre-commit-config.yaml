@@ -1,0 +1,18 @@
+# Install once with `uvx pre-commit install`; the same three gates CI runs
+# then execute on every commit (ruff and mypy) — pytest stays a manual step.
+repos:
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.16.7  # keep in step with the ruff pinned in uv.lock
+    hooks:
+      - id: ruff
+        args: ["--fix"]
+
+  - repo: local
+    hooks:
+      - id: mypy
+        name: mypy --strict (cyberfw)
+        entry: uv run python -m mypy cyberfw
+        language: system
+        types: [python]
+        files: ^cyberfw/
+        pass_filenames: false

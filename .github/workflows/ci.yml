@@ -7,11 +7,22 @@ on:
 
 jobs:
   lint-type-test:
-    runs-on: ubuntu-latest
+    name: ${{ matrix.os }} / py${{ matrix.python-version }}
+    runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.10", "3.11", "3.12"]
+        # Every supported interpreter on Linux; the other two platforms on one
+        # interpreter each, because the OS-specific code (Git Bash lookup and
+        # PE checks on Windows, exec bits and signals on POSIX) is what they
+        # need to exercise, not the Python version.
+        os: [ubuntu-latest]
+        python-version: ["3.10", "3.11", "3.12", "3.13", "3.14"]
+        include:
+          - os: windows-latest
+            python-version: "3.12"
+          - os: macos-latest
+            python-version: "3.12"
     steps:
       - uses: actions/checkout@v4
 
@@ -28,11 +39,13 @@ jobs:
       - name: Install dependencies
         run: uv sync --all-extras
 
+      # `python -m` rather than the console-script shims: the shims go through
+      # uv's trampoline, which has tripped over MSYS-style paths on Windows.
       - name: Lint (ruff)
-        run: uv run ruff check .
+        run: uv run python -m ruff check .
 
       - name: Type check (mypy --strict)
-        run: uv run mypy cyberfw
+        run: uv run python -m mypy cyberfw
 
       - name: Test (pytest + coverage)
-        run: uv run pytest tests/ --cov=cyberfw --cov-report=term-missing --cov-fail-under=55
+        run: uv run python -m pytest tests/ --cov=cyberfw --cov-report=term-missing --cov-fail-under=80

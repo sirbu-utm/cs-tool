@@ -369,13 +369,18 @@ gowitness:
 ```bash
 uv sync --extra dev
 uv run pytest -q                              # быстрый набор (без реальных бинарей и сети)
-uv run pytest --cov=cyberfw --cov-fail-under=55
+uv run pytest --cov=cyberfw --cov-fail-under=80
 uv run ruff check .
 uv run mypy cyberfw
 ```
 
 Быстрый набор не скачивает инструменты и использует фиктивные бинарники, поэтому
-он детерминированный и подходит для CI.
+он детерминированный и подходит для CI. CI (`.github/workflows/ci.yml`) гоняет
+его на ubuntu для Python 3.10–3.14 и дополнительно на windows и macos — код,
+зависящий от ОС (поиск Git Bash и PE-сигнатуры на Windows, exec-биты и сигналы
+на POSIX), проверяется на своей платформе. Те же ruff и mypy можно повесить на
+коммит: `uvx pre-commit install` (конфиг — `.pre-commit-config.yaml`).
+Dependabot раз в неделю обновляет `uv.lock` и версии actions.
 
 Отдельный **опт-ин слой** гоняет *настоящие* бинарники из `tools_bin/` против
 `localhost`/`example.com` и ловит расхождения адаптеров с реальными CLI-флагами
