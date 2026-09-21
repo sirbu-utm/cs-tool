@@ -432,3 +432,7 @@ cstool / start.sh        Linux/macOS launcher (bootstrap + CLI)
 - URL скачивания валидируются;
 - бинарники проверяются по формату текущей ОС;
 - токены читаются из окружения и не сохраняются в Git.
+
+## Лицензия
+
+MIT — см. [LICENSE](LICENSE).

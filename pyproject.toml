@@ -3,6 +3,8 @@ name = "cyberfw"
 version = "1.0.0"
 description = "Integrated Cybersecurity Framework in Python"
 readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
 requires-python = ">=3.10"
 dependencies = [
     "typer>=0.12.0",
