@@ -16,6 +16,7 @@ from rich.panel import Panel
 from rich.text import Text
 
 from cyberfw import __version__
+from cyberfw.pipeline.schemas import ToolRecord
 
 CS_TOOL_LOGO = "\x1b[0m" """\x1b[0;37m  \x1b[0;90m▄\x1b[0;37m▄\x1b[0;97m▄▄▄▄▄\x1b[0;37m▄\x1b[0;90m▄\x1b[0;37m   \x1b[0;90m▄\x1b[0;37m▄\x1b[0;97m▄▄▄▄▄\x1b[0;37m▄      \x1b[0;97m▄▄▄▄▄▄▄▄▄▄▄\x1b[0;37m   \x1b[0;90m▄\x1b[0;37m▄\x1b[0;97m▄▄▄▄\x1b[0;37m▄\x1b[0;90m▄\x1b[0;37m     \x1b[0;90m▄\x1b[0;37m▄\x1b[0;97m▄▄▄▄\x1b[0;37m▄\x1b[0;90m▄\x1b[0;37m   \x1b[0;97m▄▄▄▄▄\x1b[0;37m      \x1b[0m
 \x1b[0;37m \x1b[0;97;47m▄\x1b[0;97;46m▀▀\x1b[0;36m█████\x1b[0;97;46m▀\x1b[0;97;47m▄\x1b[0;37m \x1b[0;90;47m▀\x1b[0;97;47m▄\x1b[0;97;46m▀▀\x1b[0;36m█████\x1b[0;97;47m░\x1b[0;37m      \x1b[0;97m█\x1b[0;36m█████████\x1b[0;97m▓\x1b[0;37m \x1b[0;90m▄\x1b[0;97;47m▄\x1b[0;97;46m▀▀\x1b[0;36m████\x1b[0;97;46m▀▀\x1b[0;97;47m▄\x1b[0;90m▄\x1b[0;37m \x1b[0;90m▄\x1b[0;97;47m▄\x1b[0;97;46m▀▀\x1b[0;36m████\x1b[0;97;46m▀▀\x1b[0;97;47m▄\x1b[0;90m▄\x1b[0;37m \x1b[0;97m▓\x1b[0;36m███\x1b[0;97m▓\x1b[0;37m      \x1b[0m
@@ -121,3 +122,68 @@ def banner(tool_count: int | None = None) -> RenderableType:
         Text(""),
         Text(status, style="accent"),
     )
+
+
+#: How a finding's severity reads at a glance. Unlisted values (including
+#: nuclei's "unknown") fall through to the neutral style — an unfamiliar
+#: severity must not be dressed up as critical.
+SEVERITY_STYLES: dict[str, str] = {
+    "critical": "bold red",
+    "high": "red",
+    "medium": "yellow",
+    "low": "dim cyan",
+    "info": "dim cyan",
+}
+
+#: HTTP status classes, by leading digit.
+STATUS_STYLES: dict[int, str] = {
+    2: "green",
+    3: "cyan",
+    4: "yellow",
+    5: "bold red",
+}
+
+#: Neutral style for a record that carries neither signal.
+NEUTRAL_STYLE = "white"
+
+#: Per-tool fields worth surfacing as a one-line "detail", in priority order.
+#: Checked with ``getattr``: each is absent on the other tools' record types,
+#: so one list serves every schema in ``pipeline/schemas.py``.
+_DETAIL_FIELDS: tuple[str, ...] = (
+    "severity",     # nuclei
+    "ports_list",   # rustscan
+    "rule_id",      # gitleaks
+    "description",  # gitleaks
+    "title",        # httpx / gowitness
+    "status_code",  # httpx / gowitness
+    "status",       # ffuf
+    "length",       # ffuf
+    "source",       # subfinder
+    "protocol",     # naabu
+)
+
+
+def record_style(record: ToolRecord) -> str:
+    """Rich style for one finding: severity first, then HTTP status, else neutral.
+
+    Severity outranks the status code because a finding is about the finding,
+    not about the page it was found on.
+    """
+    severity = str(getattr(record, "severity", "") or "").lower()
+    if severity in SEVERITY_STYLES:
+        return SEVERITY_STYLES[severity]
+    status = getattr(record, "status_code", 0) or getattr(record, "status", 0)
+    try:
+        leading = int(status) // 100
+    except (TypeError, ValueError):  # pragma: no cover - defensive
+        leading = 0
+    return STATUS_STYLES.get(leading, NEUTRAL_STYLE)
+
+
+def record_detail(record: ToolRecord) -> str:
+    """Short human detail for a records table (severity / ports / title / ...)."""
+    for key in _DETAIL_FIELDS:
+        value = getattr(record, key, None)
+        if value:
+            return str(value)
+    return ""
