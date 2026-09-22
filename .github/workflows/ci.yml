@@ -47,5 +47,17 @@ jobs:
       - name: Type check (mypy --strict)
         run: uv run python -m mypy cyberfw
 
+      # bash on all three runners (Git Bash on Windows), so one script serves
+      # them. Failures are echoed back as ::error:: annotations: a red run then
+      # names the tests on the commit itself, instead of only inside the log.
       - name: Test (pytest + coverage)
-        run: uv run python -m pytest tests/ --cov=cyberfw --cov-report=term-missing --cov-fail-under=80
+        shell: bash
+        run: |
+          set -o pipefail
+          if ! uv run python -m pytest tests/ --cov=cyberfw --cov-report=term-missing \
+               --cov-fail-under=80 -rf --tb=short | tee pytest-output.txt; then
+            grep -E '^(FAILED|ERROR)' pytest-output.txt | while IFS= read -r line; do
+              echo "::error::${line}"
+            done
+            exit 1
+          fi
