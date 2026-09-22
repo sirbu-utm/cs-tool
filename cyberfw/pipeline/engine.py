@@ -34,7 +34,7 @@ from cyberfw.tools.base import BaseTool, ToolContext
 
 LOG = get_logger("engine")
 
-__all__ = ["Node", "NodeResult", "PipelineResult", "PipelineEngine", "StageEvent"]
+__all__ = ["Node", "NodeResult", "PipelineResult", "PipelineEngine", "StageEvent", "dependency_hint"]
 
 #: Native package-manager hints for external dependencies declared in
 #: ``registry.yaml`` (e.g. ``nmap`` for RustScan's service/version detection).
@@ -49,7 +49,7 @@ _DEP_INSTALL_HINTS: dict[str, dict[str, str]] = {
 }
 
 
-def _dependency_hint(dep: str) -> str:
+def dependency_hint(dep: str) -> str:
     """Return an install command for ``dep`` on the current platform."""
     hints = _DEP_INSTALL_HINTS.get(dep)
     if not hints:
@@ -144,10 +144,16 @@ class PipelineEngine:
         settings: Settings,
         tool_manager: ToolManager,
         context: SessionContext | None = None,
+        *,
+        report_missing_deps: bool = True,
     ) -> None:
         self.settings = settings
         self.tool_manager = tool_manager
         self.context = context
+        #: False when the caller has already told the user about missing optional
+        #: dependencies (the CLI's pipeline pre-flight), so the same sentence is
+        #: not repeated as each stage starts — where the live region buries it.
+        self.report_missing_deps = report_missing_deps
         self._on_record: Any = None
         self._on_stderr: Any = None
         self._on_stdout_raw: Any = None
@@ -182,13 +188,13 @@ class PipelineEngine:
         from cyberfw.tools import adapter_for
 
         spec = self.tool_manager.spec(name)
-        for dep in spec.check_deps:
+        for dep in spec.check_deps if self.report_missing_deps else ():
             if shutil.which(dep) is None:
                 LOG.warning(
                     "%s works best with `%s`, which was not found on PATH — %s.",
                     name,
                     dep,
-                    _dependency_hint(dep),
+                    dependency_hint(dep),
                 )
         binary = self.tool_manager.binary_path(name)
         return adapter_for(spec, binary)

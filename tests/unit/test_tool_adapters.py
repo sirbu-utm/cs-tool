@@ -320,3 +320,45 @@ class TestPortScannersGetHostsNotUrls:
 
         assert hostname_of("") == ""
         assert hostname_of("not a url at all") == "not a url at all"
+
+
+class TestExternalRequirements:
+    """A tool that cannot work without something outside tools_bin says so itself, so
+    the pipeline can ask before a scan rather than fail a stage minutes in."""
+
+    def test_gowitness_needs_chrome(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from cyberfw.tools.gowitness import GowitnessTool
+
+        monkeypatch.setattr("cyberfw.tools.gowitness._find_chrome", lambda: None)
+        message = GowitnessTool.missing_requirement()
+
+        assert message is not None
+        assert "Chrome" in message
+        assert "install" in message.lower(), "the message says how to fix it"
+
+    def test_gowitness_is_satisfied_when_chrome_is_there(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from cyberfw.tools.gowitness import GowitnessTool
+
+        monkeypatch.setattr("cyberfw.tools.gowitness._find_chrome", lambda: "/usr/bin/chromium")
+
+        assert GowitnessTool.missing_requirement() is None
+
+    def test_build_cmd_raises_exactly_what_the_check_reports(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """One message, one place: the pre-flight and the stage failure must agree."""
+        from cyberfw.tools.gowitness import GowitnessTool
+
+        monkeypatch.setattr("cyberfw.tools.gowitness._find_chrome", lambda: None)
+        expected = GowitnessTool.missing_requirement()
+
+        with pytest.raises(ToolNotFoundError) as excinfo:
+            _adapter("gowitness").build_cmd(ToolContext(target="https://example.com"))  # type: ignore[attr-defined]
+
+        assert str(excinfo.value) == expected
+
+    def test_tools_without_an_external_requirement_report_none(self) -> None:
+        from cyberfw.tools.httpx_tool import HttpxTool
+        from cyberfw.tools.rustscan import RustscanTool
+
+        assert HttpxTool.missing_requirement() is None
+        # nmap is optional for rustscan: it loses version detection, not the scan.
+        assert RustscanTool.missing_requirement() is None

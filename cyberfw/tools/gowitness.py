@@ -48,8 +48,20 @@ def _find_chrome() -> str | None:
     return None
 
 
+#: Said once, by both the pre-flight and the stage that would fail.
+_NO_CHROME = (
+    "Gowitness needs a headless Chrome/Chromium, which was not found. "
+    "Install Google Chrome (winget install Google.Chrome / brew install --cask "
+    "google-chrome / apt install chromium) and run again."
+)
+
+
 class GowitnessTool(BaseTool):
     per_target = True
+
+    @classmethod
+    def missing_requirement(cls) -> str | None:
+        return None if _find_chrome() is not None else _NO_CHROME
 
     def build_cmd(self, ctx: ToolContext) -> list[str]:
         targets = ctx.inputs if ctx.inputs else ([ctx.target] if ctx.target else [])
@@ -57,11 +69,7 @@ class GowitnessTool(BaseTool):
             raise ToolNotFoundError("Gowitness needs at least one target URL.")
         chrome = _find_chrome()
         if chrome is None:
-            raise ToolNotFoundError(
-                "Gowitness needs a headless Chrome/Chromium, which was not found. "
-                "Install Google Chrome (winget install Google.Chrome / brew install --cask "
-                "google-chrome / apt install chromium) and run again."
-            )
+            raise ToolNotFoundError(_NO_CHROME)
         base = targets[0]
         if not base.startswith(("http://", "https://")):
             base = f"https://{base}"

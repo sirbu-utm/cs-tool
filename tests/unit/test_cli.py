@@ -1110,3 +1110,109 @@ class TestSavePrompt:
 
         assert result.exit_code == 0
         assert asked == []
+
+
+class TestPreFlightExternalDependencies:
+    """tools_bin is not the whole story: gowitness needs a Chrome it cannot ship, and
+    rustscan wants an Nmap it can do without."""
+
+    @staticmethod
+    def _add_tool(tmp_path: Path, name: str, payload: str = "{}") -> None:
+        binary = tmp_path / "tools_bin" / name
+        binary.write_text(f"#!/usr/bin/env bash\nprintf '%s' '{payload}'\n", encoding="utf-8")
+        binary.chmod(binary.stat().st_mode | stat.S_IEXEC)
+        with (tmp_path / "registry.yaml").open("a", encoding="utf-8") as handle:
+            handle.write(f"{name}:\n  repo: org/{name}\n  asset_patterns: []\n  binary: {name}\n")
+
+    def _needs_nmap(self, tmp_path: Path) -> None:
+        """A registered rustscan whose registry entry declares the optional nmap."""
+        self._add_tool(tmp_path, "rustscan", payload="a.example.com -> [80,443]")
+        with (tmp_path / "registry.yaml").open("a", encoding="utf-8") as handle:
+            handle.write('  check_deps: ["nmap"]\n')
+
+    @staticmethod
+    def _pipeline_file(tmp_path: Path, name: str, body: str) -> None:
+        (tmp_path / "pipelines").mkdir(exist_ok=True)
+        (tmp_path / "pipelines" / f"{name}.yaml").write_text(body, encoding="utf-8")
+
+    def test_a_missing_chrome_stops_a_gowitness_run_before_it_starts(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._add_tool(tmp_path, "gowitness")
+        monkeypatch.setattr("cyberfw.tools.gowitness._find_chrome", lambda: None)
+
+        result = runner.invoke(app, ["pipeline", "recon-to-vuln", "-t", "example.com", "--gowitness"])
+
+        assert result.exit_code == 2
+        assert "gowitness" in result.stdout and "Chrome" in result.stdout
+        assert not list((tmp_path / "reports").rglob("report.json"))
+
+    def test_force_start_runs_without_chrome(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        self._add_tool(tmp_path, "gowitness")
+        monkeypatch.setattr("cyberfw.tools.gowitness._find_chrome", lambda: None)
+
+        result = runner.invoke(
+            app,
+            ["pipeline", "recon-to-vuln", "-t", "example.com", "--gowitness", "--force-start", "--no-report"],
+        )
+
+        assert result.exit_code == 1, "the screenshots stage fails, the rest still runs"
+        assert "sub.example.com" in result.stdout
+
+    def test_chrome_present_is_not_mentioned(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        self._add_tool(tmp_path, "gowitness")
+        monkeypatch.setattr("cyberfw.tools.gowitness._find_chrome", lambda: "/usr/bin/chromium")
+
+        result = runner.invoke(
+            app, ["pipeline", "recon-to-vuln", "-t", "example.com", "--gowitness", "--no-report"]
+        )
+
+        assert "Chrome" not in result.stdout
+
+    def test_a_missing_nmap_only_warns(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Graceful degradation: rustscan still finds open ports without Nmap."""
+        self._add_tool(tmp_path, "rustscan", payload="a.example.com -> [80,443]")
+        with (tmp_path / "registry.yaml").open("a", encoding="utf-8") as handle:
+            handle.write("  check_deps: [\"nmap\"]\n")
+        self._pipeline_file(tmp_path, "ports", "nodes:\n  - tool: rustscan\n    stage: scan\n")
+        monkeypatch.setattr("cyberfw.cli.shutil.which", lambda _dep: None)
+
+        result = runner.invoke(app, ["pipeline", "ports", "-t", "example.com", "--no-report"])
+
+        assert result.exit_code == 0, result.stdout
+        assert "nmap" in result.stdout
+        assert "a.example.com" in result.stdout, "the scan ran anyway"
+
+    def test_the_same_dependency_is_reported_once(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The pre-flight says it before the run; the engine must not say it again as the
+        stage starts, where the live region would bury it anyway."""
+        self._needs_nmap(tmp_path)
+        self._pipeline_file(tmp_path, "ports", "nodes:\n  - tool: rustscan\n    stage: scan\n")
+        monkeypatch.setattr("cyberfw.cli.shutil.which", lambda _dep: None)
+        monkeypatch.setattr("cyberfw.pipeline.engine.shutil.which", lambda _dep: None)
+
+        result = runner.invoke(app, ["pipeline", "ports", "-t", "example.com", "--no-report"])
+
+        # The install hint itself names Nmap, so count the warning, not the word.
+        assert result.stdout.count("works best with") == 1
+
+    def test_a_single_run_still_hears_about_it(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """`run` has no pre-flight, so the engine's own warning is what tells the user."""
+        self._needs_nmap(tmp_path)
+        monkeypatch.setattr("cyberfw.pipeline.engine.shutil.which", lambda _dep: None)
+
+        result = runner.invoke(app, ["run", "rustscan", "-t", "example.com", "--no-save"])
+
+        assert "nmap" in result.stdout.lower()
+
+    def test_a_present_nmap_says_nothing(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        self._add_tool(tmp_path, "rustscan", payload="a.example.com -> [80,443]")
+        with (tmp_path / "registry.yaml").open("a", encoding="utf-8") as handle:
+            handle.write("  check_deps: [\"nmap\"]\n")
+        self._pipeline_file(tmp_path, "ports", "nodes:\n  - tool: rustscan\n    stage: scan\n")
+        monkeypatch.setattr("cyberfw.cli.shutil.which", lambda _dep: "/usr/bin/nmap")
+
+        result = runner.invoke(app, ["pipeline", "ports", "-t", "example.com", "--no-report"])
+
+        assert result.exit_code == 0
+        assert "nmap" not in result.stdout

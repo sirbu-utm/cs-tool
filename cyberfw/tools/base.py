@@ -72,6 +72,19 @@ class BaseTool(ABC):
         self.spec: ToolSpec = spec
         self.binary: Path = binary
 
+    @classmethod
+    def missing_requirement(cls) -> str | None:
+        """Why this tool cannot run at all right now, or ``None`` when it can.
+
+        For something the framework cannot ship and the tool cannot work
+        without — gowitness's headless Chrome. Returned as a finished,
+        user-facing sentence so the pre-flight can print it before a scan and
+        the adapter can raise the same words if it gets that far. A *soft*
+        dependency (RustScan's Nmap, which only adds version detection) belongs
+        in ``check_deps`` in registry.yaml instead: it warns, it never blocks.
+        """
+        return None
+
     @classmethod  # noqa: B027 - intentional no-op default, not an abstract method
     def validate_target(cls, target: str) -> None:
         """Reject a target this tool cannot use, with a user-facing message.

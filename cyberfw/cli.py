@@ -39,7 +39,14 @@ from cyberfw.live_view import PipelineLiveView
 from cyberfw.logging import console, ensure_utf8_stdio, get_logger, setup_logging
 from cyberfw.manager import ToolManager, load_registry
 from cyberfw.pipeline.context import SessionContext
-from cyberfw.pipeline.engine import Node, NodeResult, PipelineEngine, PipelineResult, StageEvent
+from cyberfw.pipeline.engine import (
+    Node,
+    NodeResult,
+    PipelineEngine,
+    PipelineResult,
+    StageEvent,
+    dependency_hint,
+)
 from cyberfw.pipeline.schemas import ToolRecord
 from cyberfw.pipelines import PIPELINES, available_pipelines, build
 from cyberfw.report.html_report import generate_html_report
@@ -216,20 +223,36 @@ def _run_info(manager: ToolManager, *, name: str, seed: str | None, session_id: 
     )
 
 
-def _unavailable_tools(
+def _preflight(
     manager: ToolManager, nodes: list[Node], tools_dir: Path
-) -> list[tuple[str, str, str]]:
-    """``(stage, tool, state)`` for every node whose binary cannot run, in plan order."""
+) -> tuple[list[tuple[str, str, str]], list[str]]:
+    """What stands between this plan and a useful run, in plan order.
+
+    Returns ``(blocking, warnings)``. Blocking: a binary that cannot run, or a
+    hard external requirement the adapter reports missing (gowitness without
+    Chrome) — the stage could only fail. Warnings: a ``check_deps`` entry that
+    is not on PATH (RustScan's Nmap), which costs capability, not the run.
+    """
+    blocking: list[tuple[str, str, str]] = []
+    warnings: list[str] = []
     seen: set[str] = set()
-    missing: list[tuple[str, str, str]] = []
     for node in nodes:
         if node.tool in seen:
             continue
         seen.add(node.tool)
         state = _tool_state(manager, node.tool, tools_dir)
         if state != "ready":
-            missing.append((node.stage, node.tool, state))
-    return missing
+            blocking.append((node.stage, node.tool, state))
+            continue
+        requirement = adapter_class(node.tool).missing_requirement()
+        if requirement is not None:
+            blocking.append((node.stage, node.tool, requirement))
+        for dep in manager.spec(node.tool).check_deps:
+            if shutil.which(dep) is None:
+                warnings.append(
+                    f"{node.tool} works best with `{dep}`, which is not on PATH — {dependency_hint(dep)}"
+                )
+    return blocking, warnings
 
 
 def _run_summary(
@@ -871,14 +894,16 @@ def pipeline_cmd(
         raise typer.Exit(2) from exc
 
     # Whether the run can happen at all is knowable now, and a scan takes
-    # minutes: report the unavailable tools up front instead of spending the
+    # minutes: report what is unavailable up front instead of spending the
     # time only to say that a stage never ran.
-    unavailable = _unavailable_tools(manager, nodes, settings.tools_dir)
-    if unavailable and not force_start:
-        for stage, tool, state in unavailable:
-            console.print(f"[err]{tool}[/err] ({stage}) is [err]{state}[/err]")
+    blocking, dep_warnings = _preflight(manager, nodes, settings.tools_dir)
+    for warning in dep_warnings:
+        console.print(f"[warn]{warning}[/warn]")
+    if blocking and not force_start:
+        for stage, tool, reason in blocking:
+            console.print(f"[err]{tool}[/err] ({stage}): [err]{reason}[/err]")
         console.print(
-            "[warn]Run `cyberfw init` (and `cyberfw status` to see why), "
+            "[warn]Fix the above (`cyberfw init`, `cyberfw status`), "
             "or pass --force-start to run the stages that can.[/warn]"
         )
         manager.close()
@@ -896,7 +921,8 @@ def pipeline_cmd(
     session_dir = settings.reports_dir / session_id
     session_is_new = not session_dir.exists()
     context = SessionContext(settings.reports_dir, session_id)
-    engine = PipelineEngine(settings, manager, context=context)
+    # The pre-flight above already reported any missing optional dependency.
+    engine = PipelineEngine(settings, manager, context=context, report_missing_deps=False)
 
     # Verbose view when parsing is disabled (config parse=false or --no-parse):
     # stream each stage's raw stdout/stderr live instead of the quiet spinner.
