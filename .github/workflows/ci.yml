@@ -47,17 +47,28 @@ jobs:
       - name: Type check (mypy --strict)
         run: uv run python -m mypy cyberfw
 
-      # bash on all three runners (Git Bash on Windows), so one script serves
-      # them. Failures are echoed back as ::error:: annotations: a red run then
-      # names the tests on the commit itself, instead of only inside the log.
+      # Deliberately the runner's own default shell (pwsh on Windows): what
+      # bash the executor finds depends on PATH order, and running everything
+      # from Git Bash hid a Windows-only failure for seven runs.
       - name: Test (pytest + coverage)
+        run: >
+          uv run python -m pytest tests/ --cov=cyberfw --cov-report=term-missing
+          --cov-fail-under=80 -rf --tb=short --junitxml=pytest-report.xml
+
+      # Actions logs need an authenticated request to read, annotations do not:
+      # a red run names the failing tests on the commit itself.
+      - name: Annotate failures
+        if: failure()
         shell: bash
         run: |
-          set -o pipefail
-          if ! uv run python -m pytest tests/ --cov=cyberfw --cov-report=term-missing \
-               --cov-fail-under=80 -rf --tb=short | tee pytest-output.txt; then
-            grep -E '^(FAILED|ERROR)' pytest-output.txt | while IFS= read -r line; do
-              echo "::error::${line}"
-            done
-            exit 1
-          fi
+          python - <<'PY'
+          import pathlib, xml.etree.ElementTree as ET
+          report = pathlib.Path("pytest-report.xml")
+          if not report.is_file():
+              raise SystemExit(0)
+          for case in ET.parse(report).getroot().iter("testcase"):
+              for problem in list(case.findall("failure")) + list(case.findall("error")):
+                  where = f"{case.get('classname', '')}::{case.get('name', '')}"
+                  detail = " ".join((problem.get("message") or "").split())[:400]
+                  print(f"::error::{where} — {detail}")
+          PY
