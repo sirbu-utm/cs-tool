@@ -45,6 +45,13 @@ def _write_fake_binaries(tools_dir: Path) -> None:
         binary.chmod(binary.stat().st_mode | stat.S_IEXEC)
 
 
+def _silence_tool(root: Path, tool: str) -> None:
+    """Replace a workspace binary with one that succeeds but prints nothing."""
+    binary = root / "tools_bin" / tool
+    binary.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+    binary.chmod(binary.stat().st_mode | stat.S_IEXEC)
+
+
 def _break_tool(root: Path, tool: str, exit_code: int = 7) -> None:
     """Replace a workspace binary with one that exits non-zero."""
     binary = root / "tools_bin" / tool
@@ -973,3 +980,133 @@ class TestPipelinePreFlight:
         result = runner.invoke(app, ["pipeline", "recon-to-vuln", "-t", "example.com", "--no-report"])
 
         assert result.exit_code == 0
+
+
+class TestSavePrompt:
+    """Saving is the user's call: after the results are on screen, the command asks.
+    Explicit flags answer it in advance, and a non-interactive session never blocks.
+    """
+
+    @staticmethod
+    def _answer(monkeypatch: pytest.MonkeyPatch, reply: bool) -> list[str]:
+        """Make the session look interactive and answer the confirmation with ``reply``."""
+        asked: list[str] = []
+
+        def fake_confirm(prompt: str, *_a, **_k) -> bool:
+            asked.append(prompt)
+            return reply
+
+        monkeypatch.setattr("cyberfw.cli._is_interactive", lambda: True)
+        monkeypatch.setattr("cyberfw.cli.Confirm.ask", fake_confirm)
+        return asked
+
+    @staticmethod
+    def _never_asks(monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr("cyberfw.cli._is_interactive", lambda: True)
+        monkeypatch.setattr(
+            "cyberfw.cli.Confirm.ask", lambda *_a, **_k: pytest.fail("an explicit flag must not be re-asked")
+        )
+
+    # -- pipeline ------------------------------------------------------------
+    def test_pipeline_asks_and_saves_on_yes(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        asked = self._answer(monkeypatch, True)
+
+        result = runner.invoke(app, ["pipeline", "recon-to-vuln", "-t", "example.com", "--session", "yes"])
+
+        assert result.exit_code == 0, result.stdout
+        assert asked, "the user was asked"
+        assert (tmp_path / "reports" / "yes" / "report.json").is_file()
+        assert (tmp_path / "reports" / "yes" / "report.html").is_file()
+
+    def test_pipeline_leaves_nothing_behind_on_no(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Declining means declining: the per-stage JSONL the run wrote goes too."""
+        self._answer(monkeypatch, False)
+
+        result = runner.invoke(app, ["pipeline", "recon-to-vuln", "-t", "example.com", "--session", "no"])
+
+        assert result.exit_code == 0, result.stdout
+        assert not (tmp_path / "reports" / "no").exists()
+        assert "not saved" in result.stdout
+
+    def test_no_report_flag_answers_the_question(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        self._never_asks(monkeypatch)
+
+        result = runner.invoke(
+            app, ["pipeline", "recon-to-vuln", "-t", "example.com", "--session", "flag", "--no-report"]
+        )
+
+        assert result.exit_code == 0
+        assert not (tmp_path / "reports" / "flag").exists()
+
+    def test_report_flag_answers_it_too(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        self._never_asks(monkeypatch)
+
+        result = runner.invoke(
+            app, ["pipeline", "recon-to-vuln", "-t", "example.com", "--session", "flag", "--report"]
+        )
+
+        assert result.exit_code == 0
+        assert (tmp_path / "reports" / "flag" / "report.json").is_file()
+
+    def test_a_non_interactive_run_saves_without_asking(self, tmp_path: Path) -> None:
+        """Scripts and CI cannot answer a prompt, and must keep getting their reports."""
+        result = runner.invoke(app, ["pipeline", "recon-to-vuln", "-t", "example.com", "--session", "ci"])
+
+        assert result.exit_code == 0
+        assert (tmp_path / "reports" / "ci" / "report.json").is_file()
+
+    def test_a_session_directory_that_already_existed_is_never_removed(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """--session can point at an earlier run's folder; "no" must not delete its data."""
+        earlier = tmp_path / "reports" / "reused"
+        earlier.mkdir(parents=True)
+        (earlier / "earlier.jsonl").write_text("kept\n", encoding="utf-8")
+        self._answer(monkeypatch, False)
+
+        runner.invoke(app, ["pipeline", "recon-to-vuln", "-t", "example.com", "--session", "reused"])
+
+        assert (earlier / "earlier.jsonl").read_text(encoding="utf-8") == "kept\n"
+
+    # -- run -----------------------------------------------------------------
+    def test_run_asks_and_writes_a_report_on_yes(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        asked = self._answer(monkeypatch, True)
+
+        result = runner.invoke(app, ["run", "subfinder", "-t", "example.com", "--session", "single"])
+
+        assert result.exit_code == 0, result.stdout
+        assert asked
+        session = tmp_path / "reports" / "single"
+        assert (session / "report.json").is_file()
+        assert (session / "subfinder.jsonl").is_file(), "the records themselves are archived too"
+
+    def test_run_writes_nothing_on_no(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        self._answer(monkeypatch, False)
+
+        runner.invoke(app, ["run", "subfinder", "-t", "example.com", "--session", "single"])
+
+        assert not (tmp_path / "reports" / "single").exists()
+
+    def test_run_save_flag_still_skips_the_question(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        self._never_asks(monkeypatch)
+
+        result = runner.invoke(app, ["run", "subfinder", "-t", "example.com", "--session", "s", "--save"])
+
+        assert result.exit_code == 0
+        assert (tmp_path / "reports" / "s" / "subfinder.jsonl").is_file()
+
+    def test_a_non_interactive_run_of_a_tool_saves_nothing(self, tmp_path: Path) -> None:
+        result = runner.invoke(app, ["run", "subfinder", "-t", "example.com"])
+
+        assert result.exit_code == 0
+        assert not list((tmp_path / "reports").glob("run-*"))
+
+    def test_an_empty_result_is_not_worth_asking_about(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Nothing was found, so there is nothing to save — do not make the user answer."""
+        _silence_tool(tmp_path, "subfinder")
+        asked = self._answer(monkeypatch, True)
+
+        result = runner.invoke(app, ["run", "subfinder", "-t", "example.com"])
+
+        assert result.exit_code == 0
+        assert asked == []

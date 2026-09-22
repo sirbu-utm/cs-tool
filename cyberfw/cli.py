@@ -18,6 +18,7 @@ from __future__ import annotations
 import functools
 import os
 import shutil
+from datetime import datetime, timezone
 from pathlib import Path
 from time import strftime
 from typing import Annotated
@@ -168,6 +169,51 @@ def _node_table(result: PipelineResult) -> Table:
             node_result.error or "",
         )
     return table
+
+
+def _is_interactive() -> bool:
+    """True when there is a user at the keyboard to answer a prompt.
+
+    A pipe, a CI job or a `< /dev/null` run must never block on a question.
+    """
+    return bool(console.is_interactive)
+
+
+def _wants_to_save(decided: bool | None, *, default: bool, what: str) -> bool:
+    """Whether to keep this run's artefacts: the flag if given, else ask, else default."""
+    if decided is not None:
+        return decided
+    if not _is_interactive():
+        return default
+    return bool(Confirm.ask(f"Save the {what} report?", default=default))
+
+
+def _discard_session(session_dir: Path, *, created: bool) -> None:
+    """Remove a session directory this run created; never touch a pre-existing one."""
+    if not created:
+        console.print(f"[muted]report not saved; {session_dir} was left as it was[/muted]")
+        return
+    shutil.rmtree(session_dir, ignore_errors=True)
+    console.print("[muted]report not saved[/muted]")
+
+
+def _write_reports(
+    result: PipelineResult, *, session_id: str, settings: Settings, run: RunInfo
+) -> list[tuple[str, Path]]:
+    """Render both reports into the session directory; returns ``(label, path)`` pairs."""
+    json_path = generate_json_report(result, session_id=session_id, reports_dir=settings.reports_dir, run=run)
+    html_path = generate_html_report(result, session_id=session_id, reports_dir=settings.reports_dir, run=run)
+    return [("json", json_path), ("html", html_path)]
+
+
+def _run_info(manager: ToolManager, *, name: str, seed: str | None, session_id: str, tools: set[str]) -> RunInfo:
+    return RunInfo(
+        pipeline=name,
+        seed=seed,
+        session_id=session_id,
+        platform=f"{manager.mapping.os_name}/{manager.mapping.arch}",
+        tool_versions={tool: (manager.install_state(tool) or {}).get("version") for tool in sorted(tools)},
+    )
 
 
 def _unavailable_tools(
@@ -650,12 +696,13 @@ def run_cmd(
         ),
     ] = False,
     save: Annotated[
-        bool,
+        bool | None,
         typer.Option(
-            "--save",
-            help="Archive this run's records to reports/<session>/. Off by default — results only print to screen.",
+            "--save/--no-save",
+            help="Archive this run's records and reports to reports/<session>/. "
+            "Omit both to be asked once the results are on screen.",
         ),
-    ] = False,
+    ] = None,
 ) -> None:
     """Run a single registered tool and print its records to the screen."""
     if target is None and list_file is None:
@@ -686,8 +733,9 @@ def run_cmd(
         raise typer.Exit(1) from exc
 
     session_id = session or _session_tag("run", tool)
-    # No reports/<session>/ directory is created unless --save is given: an
-    # ad-hoc `run` should not litter the filesystem with empty session folders.
+    # Only --save streams into reports/<session>/ as records arrive (crash-safe).
+    # Undecided runs write nothing until the user has answered, so an ad-hoc
+    # `run` never litters the filesystem with a folder nobody asked for.
     context = SessionContext(settings.reports_dir, session_id) if save else None
     engine = PipelineEngine(settings, manager, context=context)
 
@@ -741,8 +789,30 @@ def run_cmd(
         else:
             console.print("[muted]No records found.[/muted]")
 
+    if context is not None:
+        context.close()
     if save:
         console.print(f"[ok]saved:[/ok] {settings.reports_dir / session_id}")
+    elif records and _wants_to_save(save, default=False, what=tool):
+        # Nothing was streamed, so archive the records now and report on them.
+        result = PipelineResult(
+            nodes=[node_result],
+            records=records,
+            started_at=datetime.now(timezone.utc),
+            finished_at=datetime.now(timezone.utc),
+        )
+        with SessionContext(settings.reports_dir, session_id) as store:
+            for record in records:
+                store.append(tool, record)
+        written = _write_reports(
+            result,
+            session_id=session_id,
+            settings=settings,
+            run=_run_info(manager, name=tool, seed=target, session_id=session_id, tools={tool}),
+        )
+        console.print(f"[ok]saved:[/ok] {settings.reports_dir / session_id}")
+        for label, path in written:
+            console.print(f"[ok]{label}:[/ok] {path}")
 
     if not node_result.ok:
         console.print(f"[err]{node_result.error or 'stage failed'}[/err]")
@@ -758,7 +828,13 @@ def pipeline_cmd(
     max_httpx: Annotated[int, typer.Option("--max-httpx", min=0, help="Cap live hosts passed onward (0 = all).")] = 0,
     wordlist: Annotated[str | None, typer.Option("--wordlist", "-w", help="Wordlist for the Ffuf stage (required with --ffuf).")] = None,
     session: Annotated[str | None, typer.Option("--session", help="Session id for the context store.")] = None,
-    no_report: Annotated[bool, typer.Option("--no-report", help="Skip HTML/JSON report generation.")] = False,
+    report: Annotated[
+        bool | None,
+        typer.Option(
+            "--report/--no-report",
+            help="Keep this run's reports/<session>/ directory. Omit both to be asked when the run ends.",
+        ),
+    ] = None,
     no_parse: Annotated[
         bool,
         typer.Option(
@@ -815,6 +891,10 @@ def pipeline_cmd(
             "Re-run with --wordlist <path> to enable it.[/warn]"
         )
     session_id = session or _session_tag("pipeline", name)
+    # Remember whether the directory is ours: declining to save may remove it,
+    # and a --session pointing at an earlier run must never be deleted.
+    session_dir = settings.reports_dir / session_id
+    session_is_new = not session_dir.exists()
     context = SessionContext(settings.reports_dir, session_id)
     engine = PipelineEngine(settings, manager, context=context)
 
@@ -871,28 +951,27 @@ def pipeline_cmd(
     if verbose:
         console.print(_node_table(result))
 
+    context.close()
     written: list[tuple[str, Path]] = []
-    if not no_report:
-        run = RunInfo(
-            pipeline=name,
-            seed=target,
-            session_id=session_id,
-            platform=f"{manager.mapping.os_name}/{manager.mapping.arch}",
-            tool_versions={
-                tool: (manager.install_state(tool) or {}).get("version") for tool in sorted({n.tool for n in nodes})
-            },
-        )
+    if _wants_to_save(report, default=True, what=name):
         try:
-            json_path = generate_json_report(
-                result, session_id=session_id, reports_dir=settings.reports_dir, run=run
-            )
-            html_path = generate_html_report(
-                result, session_id=session_id, reports_dir=settings.reports_dir, run=run
+            written = _write_reports(
+                result,
+                session_id=session_id,
+                settings=settings,
+                run=_run_info(
+                    manager,
+                    name=name,
+                    seed=target,
+                    session_id=session_id,
+                    tools={n.tool for n in nodes},
+                ),
             )
         except CyberfwError as exc:
             console.print(f"[err]report failed:[/err] {exc}")
             return
-        written = [("json", json_path), ("html", html_path)]
+    else:
+        _discard_session(session_dir, created=session_is_new)
 
     # A blank line: Live's last frame ends without one, so the panel would
     # otherwise start on the same line as the table's bottom edge.
