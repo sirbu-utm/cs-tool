@@ -121,11 +121,12 @@ class PipelineLiveView:
 
     def _stage_table(self) -> Table:
         now = self._clock()
+        # Not expanded: the stage table is narrow, and stretching it to the
+        # terminal width scatters "records/targets/time" across the screen.
         table = Table(
             title=self._title or "Pipeline",
             title_style="accent",
             box=box.SIMPLE_HEAD,
-            expand=True,
             pad_edge=False,
         )
         table.add_column("#", style="muted", justify="right", width=2)

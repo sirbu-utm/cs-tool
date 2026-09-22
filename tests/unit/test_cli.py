@@ -710,3 +710,88 @@ class TestRegistryLookup:
 
         with pytest.raises(RegistryError, match="registry.yaml"):
             _registry_path()
+
+
+class TestLiveProgress:
+    """The pipeline and single runs show a live stage table plus the latest findings."""
+
+    def test_pipeline_shows_every_stage_with_its_outcome(self) -> None:
+        result = runner.invoke(app, ["pipeline", "recon-to-vuln", "-t", "example.com", "--no-report"])
+
+        assert result.exit_code == 0, result.stdout
+        for stage in ("subdomains", "live_http", "vulns"):
+            assert stage in result.stdout
+        assert "ok" in result.stdout
+        assert "pending" not in result.stdout, "every stage has finished by the time the run returns"
+
+    def test_pipeline_shows_the_findings_as_they_arrive(self) -> None:
+        result = runner.invoke(app, ["pipeline", "recon-to-vuln", "-t", "example.com", "--no-report"])
+
+        assert "Latest findings" in result.stdout
+        assert "sub.example.com" in result.stdout
+
+    def test_pipeline_stage_table_is_not_printed_twice(self) -> None:
+        """The live table IS the stage table; repeating it after the run is noise."""
+        result = runner.invoke(app, ["pipeline", "recon-to-vuln", "-t", "example.com", "--no-report"])
+
+        assert result.stdout.count("subdomains") == 1
+
+    def test_failed_stage_is_visible_in_the_live_table(self, tmp_path: Path) -> None:
+        crash = tmp_path / "tools_bin" / "nuclei"
+        crash.write_text("#!/usr/bin/env bash\nexit 7\n", encoding="utf-8")
+        crash.chmod(crash.stat().st_mode | stat.S_IEXEC)
+
+        result = runner.invoke(app, ["pipeline", "recon-to-vuln", "-t", "example.com", "--no-report"])
+
+        assert result.exit_code == 1
+        assert "failed" in result.stdout
+        assert "code 7" in result.stdout
+
+    def test_redirected_output_gets_one_frame_not_a_flipbook(self) -> None:
+        """A pipe or a CI log is not a terminal: repainting there would dump the whole
+        table once per update instead of updating it in place."""
+        result = runner.invoke(app, ["pipeline", "recon-to-vuln", "-t", "example.com", "--no-report"])
+
+        assert result.stdout.count("Latest findings") == 1
+
+    def test_run_shows_the_live_view_too(self) -> None:
+        result = runner.invoke(app, ["run", "subfinder", "-t", "example.com"])
+
+        assert result.exit_code == 0
+        assert "Latest findings" in result.stdout
+        assert "sub.example.com" in result.stdout
+
+    def test_verbose_mode_keeps_the_raw_stream(self, tmp_path: Path) -> None:
+        """--no-parse is for watching the tools themselves; a Live region would fight it."""
+        result = runner.invoke(
+            app, ["pipeline", "recon-to-vuln", "-t", "example.com", "--no-parse", "--no-report"]
+        )
+
+        assert "Latest findings" not in result.stdout
+        assert '{"host": "sub.example.com"' in result.stdout
+
+
+class TestRunSummary:
+    def test_summary_panel_reports_status_totals_and_reports(self, tmp_path: Path) -> None:
+        result = runner.invoke(app, ["pipeline", "recon-to-vuln", "-t", "example.com", "--session", "sumry"])
+
+        assert result.exit_code == 0, result.stdout
+        assert "success" in result.stdout
+        assert "subfinder" in result.stdout and "httpx" in result.stdout
+        assert "sumry" in result.stdout
+        assert "report.html" in result.stdout and "report.json" in result.stdout
+
+    def test_summary_marks_a_failed_run(self, tmp_path: Path) -> None:
+        crash = tmp_path / "tools_bin" / "nuclei"
+        crash.write_text("#!/usr/bin/env bash\nexit 7\n", encoding="utf-8")
+        crash.chmod(crash.stat().st_mode | stat.S_IEXEC)
+
+        result = runner.invoke(app, ["pipeline", "recon-to-vuln", "-t", "example.com", "--no-report"])
+
+        assert "failed" in result.stdout
+        assert "success" not in result.stdout
+
+    def test_duration_is_reported(self) -> None:
+        result = runner.invoke(app, ["pipeline", "recon-to-vuln", "-t", "example.com", "--no-report"])
+
+        assert "elapsed" in result.stdout

@@ -25,6 +25,7 @@ from typing import Annotated
 import anyio
 import typer
 from rich import box
+from rich.console import Group
 from rich.live import Live
 from rich.panel import Panel
 from rich.prompt import Confirm, Prompt
@@ -33,10 +34,11 @@ from rich.text import Text
 
 from cyberfw.config import Settings, load_settings
 from cyberfw.exceptions import CyberfwError, RegistryError, ToolNotFoundError
+from cyberfw.live_view import PipelineLiveView
 from cyberfw.logging import console, ensure_utf8_stdio, get_logger, setup_logging
 from cyberfw.manager import ToolManager, load_registry
 from cyberfw.pipeline.context import SessionContext
-from cyberfw.pipeline.engine import Node, NodeResult, PipelineEngine, PipelineResult
+from cyberfw.pipeline.engine import Node, NodeResult, PipelineEngine, PipelineResult, StageEvent
 from cyberfw.pipeline.schemas import ToolRecord
 from cyberfw.pipelines import PIPELINES, available_pipelines, build
 from cyberfw.report.html_report import generate_html_report
@@ -45,7 +47,7 @@ from cyberfw.report.run_info import RunInfo
 from cyberfw.resources import packaged_data
 from cyberfw.tools import adapter_class
 from cyberfw.tools.base import ToolContext
-from cyberfw.ui import banner, tool_guide
+from cyberfw.ui import banner, record_detail, record_style, tool_guide
 
 LOG = get_logger("cli")
 
@@ -110,32 +112,6 @@ def _read_hosts(path: Path) -> list[str]:
     return hosts
 
 
-#: Per-tool fields worth surfacing as the table's one-line "detail", checked
-#: in priority order via ``getattr`` (missing on other tools' record types,
-#: so this is safe across every schema in ``pipeline/schemas.py``).
-_DETAIL_FIELDS: tuple[str, ...] = (
-    "severity",     # nuclei
-    "ports_list",   # rustscan
-    "rule_id",      # gitleaks
-    "description",  # gitleaks
-    "title",        # httpx / gowitness
-    "status_code",  # httpx / gowitness
-    "status",       # ffuf
-    "length",       # ffuf
-    "source",       # subfinder
-    "protocol",     # naabu
-)
-
-
-def _record_note(record: ToolRecord) -> str:
-    """Short human detail for the records table (severity/ports/title/etc.)."""
-    for key in _DETAIL_FIELDS:
-        value = getattr(record, key, None)
-        if value:
-            return str(value)
-    return ""
-
-
 def _sorted_ports(ports_list: str) -> list[str]:
     """Numeric-sort a comma-joined port list, tolerating stray whitespace."""
     ports = {p.strip() for p in ports_list.split(",") if p.strip()}
@@ -149,22 +125,28 @@ def _record_table(records: list[ToolRecord]) -> Table:
     is expanded into one row per port — otherwise a dozen open ports collapse
     into an unreadable comma blob crammed into a single "detail" cell.
     """
-    table = Table(title="Validated records", box=box.SIMPLE_HEAD)
-    table.add_column("#", style="dim", justify="right")
+    table = Table(title="Validated records", title_style="accent", box=box.SIMPLE_HEAD)
+    table.add_column("#", style="muted", justify="right")
     table.add_column("target", overflow="fold")
-    table.add_column("kind")
+    table.add_column("kind", style="muted")
     table.add_column("detail", overflow="fold")
     index = 0
     for record in records:
+        style = record_style(record)
         ports_list = getattr(record, "ports_list", "")
         if ports_list:
             state = getattr(record, "port_state", "open")
             for port in _sorted_ports(ports_list):
                 index += 1
-                table.add_row(str(index), f"{record.target}:{port}", "port", state)
+                table.add_row(str(index), Text(f"{record.target}:{port}", style=style), "port", state)
             continue
         index += 1
-        table.add_row(str(index), record.target, record.kind, _record_note(record))
+        table.add_row(
+            str(index),
+            Text(record.target, style=style),
+            record.kind,
+            Text(record_detail(record), style=style),
+        )
     return table
 
 
@@ -186,6 +168,34 @@ def _node_table(result: PipelineResult) -> Table:
             node_result.error or "",
         )
     return table
+
+
+def _run_summary(
+    result: PipelineResult, *, name: str, session_id: str, reports: list[tuple[str, Path]]
+) -> Panel:
+    """Closing panel: did it work, what came out of it, where the artefacts are."""
+    ok = result.succeeded()
+    totals = "  ".join(f"{tool} [accent]{count}[/accent]" for tool, count in result.totals_by_tool.items())
+    lines = [
+        Text.assemble(
+            ("success" if ok else "failed", "ok" if ok else "err"),
+            ("  ·  ", "muted"),
+            (f"{len(result.records)} record(s)", "white"),
+            ("  ·  ", "muted"),
+            (f"elapsed {result.duration_s:.1f}s" if result.duration_s is not None else "elapsed n/a", "white"),
+        ),
+        Text.from_markup(totals or "[muted]no records[/muted]"),
+        Text.assemble(("session  ", "muted"), (session_id, "white")),
+    ]
+    lines += [Text.assemble((f"{label:<8} ", "muted"), (str(path), "white")) for label, path in reports]
+    return Panel(
+        Group(*lines),
+        title=f"[bold]{name}[/bold]",
+        border_style="ok" if ok else "err",
+        box=box.ROUNDED,
+        padding=(1, 2),
+        expand=False,
+    )
 
 
 def _session_tag(kind: str, name: str) -> str:
@@ -622,19 +632,24 @@ def run_cmd(
             manager.close()
         console.print(f"[info]{len(records)} line(s) captured[/info]")
     else:
-        with console.status(f"[tool]{tool}[/tool] running...", spinner="dots") as status:
-            seen = 0
+        view = PipelineLiveView([Node(tool=tool, stage=tool)], title=f"{tool} · {target_label}")
+        with Live(view.render(), console=console, refresh_per_second=4, transient=False) as live:
 
-            async def _bump(record: ToolRecord) -> None:
-                nonlocal seen
-                seen += 1
-                status.update(f"[tool]{tool}[/tool] running...  {seen} record(s)")
+            async def _on_record(record: ToolRecord) -> None:
+                view.on_record(record)
+                live.update(view.render())
 
-            engine.set_record_callback(_bump)
+            async def _on_stage(event: StageEvent) -> None:
+                view.on_stage(event)
+                live.update(view.render())
+
+            engine.set_record_callback(_on_record)
+            engine.set_stage_callback(_on_stage)
             try:
                 node_result, records = anyio.run(_run_single, engine, ctx, tool, True)
             finally:
                 manager.close()
+                live.update(view.render())
         if records:
             console.print(_record_table(records))
         else:
@@ -723,15 +738,22 @@ def pipeline_cmd(
         finally:
             manager.close()
     else:
-        with console.status(f"running pipeline [tool]{name}[/tool]...", spinner="dots") as status:
-            seen = 0
+        # The live table IS the stage table, so it is not reprinted afterwards:
+        # Live leaves its last frame on screen. On a non-TTY (CI, a pipe) Rich
+        # prints that final frame once instead of redrawing.
+        view = PipelineLiveView(nodes, title=f"pipeline {name} · {target}")
+        with Live(view.render(), console=console, refresh_per_second=4, transient=False) as live:
 
-            async def _bump(record: ToolRecord) -> None:
-                nonlocal seen
-                seen += 1
-                status.update(f"running pipeline [tool]{name}[/tool]...  {seen} record(s)  ·  last: {record.tool}")
+            async def _on_record(record: ToolRecord) -> None:
+                view.on_record(record)
+                live.update(view.render())
 
-            engine.set_record_callback(_bump)
+            async def _on_stage(event: StageEvent) -> None:
+                view.on_stage(event)
+                live.update(view.render())
+
+            engine.set_record_callback(_on_record)
+            engine.set_stage_callback(_on_stage)
             try:
                 result = anyio.run(run_engine, nodes, target)
             except CyberfwError as exc:
@@ -739,10 +761,12 @@ def pipeline_cmd(
                 raise typer.Exit(1) from exc
             finally:
                 manager.close()
+                live.update(view.render())
 
-    console.print(_node_table(result))
-    console.print(f"[info]session:[/info] {session_id}  [info]records:[/info] {len(result.records)}")
+    if verbose:
+        console.print(_node_table(result))
 
+    written: list[tuple[str, Path]] = []
     if not no_report:
         run = RunInfo(
             pipeline=name,
@@ -763,7 +787,12 @@ def pipeline_cmd(
         except CyberfwError as exc:
             console.print(f"[err]report failed:[/err] {exc}")
             return
-        console.print(f"[ok]json:[/ok] {json_path}\n[ok]html:[/ok] {html_path}")
+        written = [("json", json_path), ("html", html_path)]
+
+    # A blank line: Live's last frame ends without one, so the panel would
+    # otherwise start on the same line as the table's bottom edge.
+    console.print()
+    console.print(_run_summary(result, name=name, session_id=session_id, reports=written))
 
     if not result.succeeded():
         raise typer.Exit(1)
