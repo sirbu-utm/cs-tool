@@ -136,6 +136,24 @@ class TestStageTable:
         assert "failed" in text
         assert "timed out" in text
 
+    def test_a_skipped_stage_reads_as_skipped_not_failed(self) -> None:
+        """"Skipped" tells the user to look upstream; "failed" would send them hunting
+        for a fault in a tool that never ran."""
+        view = PipelineLiveView([_node("httpx", "live_http")])
+        view.on_stage(
+            StageEvent(
+                kind="done",
+                stage="live_http",
+                tool="httpx",
+                result=NodeResult(node=_node("httpx", "live_http"), ok=False, skipped=True),
+            )
+        )
+
+        text = _render(view)
+
+        assert "skipped" in text
+        assert "failed" not in text
+
     def test_a_stage_not_in_the_plan_is_added_on_the_fly(self) -> None:
         """`run <tool>` drives a single node the view was not constructed with."""
         view = PipelineLiveView([])

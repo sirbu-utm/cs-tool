@@ -567,12 +567,14 @@ class TestMissingBinaryIsAStageFailure:
         engine.build_tool = lambda name: stub if name == "subfinder" else real_build_tool(name)  # type: ignore[method-assign]
 
         result = await engine.run(
-            [Node(tool="gowitness", stage="shots"), Node(tool="subfinder", stage="sub")], seed="seed.example.com"
+            [Node(tool="subfinder", stage="sub"), Node(tool="gowitness", stage="shots", input_from="sub")],
+            seed="seed.example.com",
         )
 
-        assert result.nodes[0].ok is False
-        assert "not installed" in (result.nodes[0].error or "")
-        assert result.nodes[1].ok is True
+        assert result.nodes[0].ok is True
+        assert result.nodes[1].ok is False
+        assert "not installed" in (result.nodes[1].error or "")
+        # the failure does not discard what the stage before it found
         assert [r.target for r in result.records] == ["seed.example.com"]
 
 
@@ -691,3 +693,130 @@ class TestStageEvents:
         event = StageEvent(kind="start", stage="sub", tool="subfinder", done=0, total=1)
         assert event == StageEvent(kind="start", stage="sub", tool="subfinder", done=0, total=1)
         assert event.result is None
+
+
+class TestFailedSourceIsNotSilentlyReplacedByTheSeed:
+    """A stage exists to scan what the stage before it found. If that stage failed,
+    running anyway against the bare seed quietly changes what the pipeline means:
+    `ports-to-vuln` with a blocked naabu probed the seed URL instead of open ports.
+    """
+
+    @staticmethod
+    def _engine(tmp_path: Path):
+        registry_path = tmp_path / "registry.yaml"
+        registry_path.write_text(
+            "naabu:\n  repo: org/naabu\n  asset_patterns: []\n  binary: stub_probe.py\n"
+            "httpx:\n  repo: org/httpx\n  asset_patterns: []\n  binary: stub_probe.py\n"
+            "nuclei:\n  repo: org/nuclei\n  asset_patterns: []\n  binary: stub_probe.py\n",
+            encoding="utf-8",
+        )
+        return _make_engine(tmp_path, registry_path)
+
+    @staticmethod
+    def _tools(engine, tmp_path: Path, crashing: set[str]):
+        crash = tmp_path / "crash.py"
+        crash.write_text("import sys\nsys.exit(4)\n", encoding="utf-8")
+        probe = _stub_binary(tmp_path)
+
+        def build(name: str):
+            spec = engine.tool_manager.spec(name)
+            return _StubTool(spec, crash if name in crashing else probe)
+
+        engine.build_tool = build  # type: ignore[method-assign]
+
+    async def test_next_stage_is_skipped_when_its_source_failed(self, tmp_path: Path) -> None:
+        engine = self._engine(tmp_path)
+        self._tools(engine, tmp_path, crashing={"naabu"})
+
+        result = await engine.run(
+            [Node(tool="naabu", stage="ports"), Node(tool="httpx", stage="live_http")],
+            seed="https://example.com",
+        )
+
+        assert result.nodes[0].ok is False
+        assert result.nodes[1].ok is False
+        assert result.nodes[1].skipped is True
+        assert "ports" in (result.nodes[1].error or "")
+        assert result.records == []
+
+    async def test_skip_propagates_down_the_chain(self, tmp_path: Path) -> None:
+        engine = self._engine(tmp_path)
+        self._tools(engine, tmp_path, crashing={"naabu"})
+
+        result = await engine.run(
+            [
+                Node(tool="naabu", stage="ports"),
+                Node(tool="httpx", stage="live_http"),
+                Node(tool="nuclei", stage="vulns", input_from="live_http"),
+            ],
+            seed="https://example.com",
+        )
+
+        assert [n.skipped for n in result.nodes] == [False, True, True]
+        assert all(not n.ok for n in result.nodes)
+
+    async def test_a_named_source_that_ran_fine_is_unaffected(self, tmp_path: Path) -> None:
+        """Only the stage that reads the failed one is skipped; a sibling reading an
+        earlier, healthy stage still runs."""
+        engine = self._engine(tmp_path)
+        self._tools(engine, tmp_path, crashing={"httpx"})
+
+        result = await engine.run(
+            [
+                Node(tool="naabu", stage="ports"),
+                Node(tool="httpx", stage="live_http"),
+                Node(tool="nuclei", stage="vulns", input_from="ports"),
+            ],
+            seed="https://example.com",
+        )
+
+        by_stage = {n.node.stage: n for n in result.nodes}
+        assert by_stage["live_http"].ok is False and by_stage["live_http"].skipped is False
+        assert by_stage["vulns"].ok is True, "reads `ports`, which succeeded"
+
+    async def test_an_empty_but_successful_source_still_runs_the_next_stage(self, tmp_path: Path) -> None:
+        """Finding nothing is a result, not a failure: the next tool decides what to do
+        with an empty list (it simply has no targets)."""
+        engine = self._engine(tmp_path)
+        silent = tmp_path / "silent.py"
+        silent.write_text("pass\n", encoding="utf-8")
+        probe = _stub_binary(tmp_path)
+        engine.build_tool = lambda name: _StubTool(  # type: ignore[method-assign]
+            engine.tool_manager.spec(name), silent if name == "naabu" else probe
+        )
+
+        result = await engine.run(
+            [Node(tool="naabu", stage="ports"), Node(tool="httpx", stage="live_http")],
+            seed="https://example.com",
+        )
+
+        assert result.nodes[0].ok is True and result.nodes[0].count == 0
+        assert result.nodes[1].skipped is False
+
+    async def test_the_first_stage_still_uses_the_seed(self, tmp_path: Path) -> None:
+        engine = self._engine(tmp_path)
+        self._tools(engine, tmp_path, crashing=set())
+
+        result = await engine.run([Node(tool="naabu", stage="ports")], seed="seed.example.com")
+
+        assert result.succeeded()
+        # naabu's schema normalises a record to host:port; the stub prints no port.
+        assert [r.target for r in result.records] == ["seed.example.com:0"]
+
+    async def test_a_skipped_stage_reports_done_so_the_view_stays_in_sync(self, tmp_path: Path) -> None:
+        engine = self._engine(tmp_path)
+        self._tools(engine, tmp_path, crashing={"naabu"})
+        events: list[StageEvent] = []
+
+        async def on_stage(event: StageEvent) -> None:
+            events.append(event)
+
+        engine.set_stage_callback(on_stage)
+        await engine.run(
+            [Node(tool="naabu", stage="ports"), Node(tool="httpx", stage="live_http")],
+            seed="https://example.com",
+        )
+
+        skipped = [e for e in events if e.stage == "live_http"]
+        assert [e.kind for e in skipped] == ["done"], "a skipped stage never starts"
+        assert skipped[0].result is not None and skipped[0].result.skipped is True

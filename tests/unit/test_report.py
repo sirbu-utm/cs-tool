@@ -60,7 +60,27 @@ class TestJsonReport:
         """Each stage entry must expose the *run* outcome (ok/count/error), not only the Node config."""
         path = json_report_gen(_failed_result(), output_path=tmp_path / "r.json")
         stage = json.loads(path.read_text(encoding="utf-8"))["stages"][0]
-        assert stage == {"tool": "subfinder", "stage": "subfinder", "ok": False, "count": 0, "error": "boom"}
+        assert stage == {
+            "tool": "subfinder",
+            "stage": "subfinder",
+            "ok": False,
+            "skipped": False,
+            "count": 0,
+            "error": "boom",
+        }
+
+    def test_skipped_stages_are_marked_as_such(self, tmp_path: Path) -> None:
+        """A consumer reading the report must be able to tell "this tool found nothing"
+        from "this stage never ran because its source failed"."""
+        nodes = [
+            NodeResult(node=Node(tool="naabu", stage="ports"), ok=False, error="not installed"),
+            NodeResult(node=Node(tool="httpx", stage="live_http"), ok=False, skipped=True, error="skipped: ..."),
+        ]
+        path = json_report_gen(PipelineResult(nodes=nodes, records=[]), output_path=tmp_path / "r.json")
+
+        stages = json.loads(path.read_text(encoding="utf-8"))["stages"]
+        assert stages[0]["skipped"] is False
+        assert stages[1]["skipped"] is True
 
     def test_explicit_output_path_wins(self, tmp_path: Path) -> None:
         out = tmp_path / "custom" / "r.json"

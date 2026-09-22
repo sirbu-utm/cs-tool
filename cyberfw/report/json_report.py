@@ -44,6 +44,7 @@ def generate_json_report(
                 "tool": nr.node.tool,
                 "stage": nr.node.stage,
                 "ok": nr.ok,
+                "skipped": nr.skipped,
                 "count": nr.count,
                 "error": nr.error,
             }

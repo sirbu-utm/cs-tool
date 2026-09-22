@@ -86,6 +86,8 @@ class NodeResult:
     ok: bool = True
     count: int = 0
     error: str | None = None
+    #: True when the node never ran because the stage it reads had failed.
+    skipped: bool = False
 
 
 @dataclass
@@ -204,18 +206,40 @@ class PipelineEngine:
         self._validate_wiring(nodes)
         result = PipelineResult(started_at=datetime.now(timezone.utc))
         outputs: dict[str, list[str]] = {}  # stage -> targets it produced
+        failed: set[str] = set()  # stages that failed, so their consumers cannot run
         inputs: list[str] = []
+        previous: str | None = None
         try:
             for node in nodes:
+                source = node.input_from if node.input_from is not None else previous
                 if node.input_from is not None:
                     inputs = outputs[node.input_from]
-                node_result, step_records = await self._run_node(
-                    node, seed, inputs, extra_input=extra_input
-                )
+                if source in failed:
+                    # Running anyway would fall back to the seed and quietly change
+                    # what this stage means (probe the seed, not what the previous
+                    # stage found), so the failure would look like a thin result.
+                    node_result = NodeResult(
+                        node=node,
+                        ok=False,
+                        skipped=True,
+                        error=f"skipped: stage {source!r} failed, so it produced no targets",
+                    )
+                    await self._emit(
+                        StageEvent(kind="done", stage=node.stage, tool=node.tool, result=node_result)
+                    )
+                    step_records: list[ToolRecord] = []
+                    LOG.warning("stage %s skipped: source stage %s failed", node.stage, source)
+                else:
+                    node_result, step_records = await self._run_node(
+                        node, seed, inputs, extra_input=extra_input
+                    )
+                if not node_result.ok:
+                    failed.add(node.stage)
                 result.nodes.append(node_result)
                 result.records.extend(step_records)
                 inputs = [r.target for r in step_records]
                 outputs[node.stage] = inputs
+                previous = node.stage
         finally:
             result.finished_at = datetime.now(timezone.utc)
         return result

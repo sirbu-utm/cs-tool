@@ -32,7 +32,14 @@ __all__ = ["PipelineLiveView"]
 #: How many of the most recent findings to keep on screen.
 DEFAULT_TAIL = 8
 
-_STATUS_STYLES = {"pending": "muted", "running": "info", "ok": "ok", "failed": "err"}
+_STATUS_STYLES = {
+    "pending": "muted",
+    "running": "info",
+    "ok": "ok",
+    "failed": "err",
+    # Not a fault of this tool: its source stage failed, so it never ran.
+    "skipped": "warn",
+}
 
 
 @dataclass
@@ -93,7 +100,10 @@ class PipelineLiveView:
         elif event.kind == "done":
             stage.finished = self._clock()
             result = event.result
-            stage.status = "ok" if result is None or result.ok else "failed"
+            if result is None or result.ok:
+                stage.status = "ok"
+            else:
+                stage.status = "skipped" if result.skipped else "failed"
             if result is not None:
                 stage.count = result.count
                 stage.note = result.error or ""
