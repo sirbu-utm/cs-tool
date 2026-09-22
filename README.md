@@ -55,15 +55,24 @@ Linux — а не в текущей папке. Каталог с `registry.yaml
 
 ```text
 SHORTCUTS                TOOLS
-  1-8  select tool        #  tool        status  source
-  r    run pipeline       1  ffuf         ready   ffuf/ffuf
-  0    exit               2  gitleaks     ready   gitleaks/gitleaks
-                          ...
-SETTINGS
+  1-8  select tool        #  tool        version   state    source
+  r    run pipeline       1  ffuf        2.3.0     ready    ffuf/ffuf
+  0    exit               2  gitleaks    8.30.1    ready    gitleaks/gitleaks
+                          3  gowitness   —         blocked  sensepost/gowitness
+SETTINGS                  ...
   p  parse      on
   l  log level  INFO
   f  log file   on
+STATUS
+  7/8 ready
 ```
+
+`state` отвечает на вопрос «запустится ли»: `ready` — бинарь на месте и
+исполняется, `blocked` — файл скачан, но не читается (обычно карантин
+антивируса), `not installed` — не скачан. `version` берётся из install-записи
+`tools_bin/.<tool>.install.json`; прочерк значит, что инструмент работоспособен,
+но записи о его установке нет. Та же таблица и та же сводка `N/M ready`
+показываются в `cyberfw status`.
 
 Диапазон номеров считается от `registry.yaml` (девятый инструмент получит
 номер `9`), pipeline запускается клавишей `r`, выход — `0` или `q`.
@@ -167,15 +176,45 @@ JSONL. Launcher-файлы (`cstool.bat` для Windows, `cstool`/`start.sh` д�
 Linux/macOS) передают аргументы командному режиму без изменений.
 
 Для `pipeline` флаг `--no-parse` (или `parse: false` / тумблер `p` в меню)
-включает «подробный» режим: вместо тихого спиннера в реальном времени
+включает «подробный» режим: вместо живой таблицы в реальном времени
 показывается сырой stdout/stderr каждого этапа — всё, что делают утилиты под
 капотом. При этом записи всё равно парсятся внутри, чтобы результат одного
 этапа передавался следующему (Subfinder → Httpx → Nuclei), так что конвейер
 продолжает работать.
 
-Пока запущенный инструмент работает (в обычном режиме или в pipeline),
-консоль показывает анимированный спиннер со счётчиком найденных записей —
-обратная связь не ждёт завершения процесса.
+### Живая картина прогона
+
+В обычном режиме `pipeline` и `run` показывают таблицу, которая обновляется
+на месте: состояние каждого этапа (`pending` → `running` → `ok`/`failed`),
+число записей, для fan-out-этапов (ffuf, gowitness) — сколько целей из скольких
+обработано, время этапа (идёт, пока этап работает, и замирает на итоговом
+значении) и причину падения. Под ней — последние найденные записи по мере
+поступления; цвет отражает серьёзность: severity nuclei (`critical`/`high` —
+красный, `medium` — жёлтый, `low`/`info` — приглушённый) и класс HTTP-кода
+(2xx зелёный, 3xx голубой, 4xx жёлтый, 5xx красный).
+
+```text
+                  pipeline recon-to-vuln · example.com
+
+  #   tool        stage        status    records   targets   time    note
+ ────────────────────────────────────────────────────────────────────────
+  1   subfinder   subdomains   ok              3             1.2s
+  2   httpx       live_http    ok              3             1.3s
+  3   nuclei      vulns        running         1             4.7s
+  4   gowitness   screenshots  pending
+
+                            Latest findings
+
+ tool     kind   target                   detail
+ ────────────────────────────────────────────────────────────────────────
+ httpx    http   https://a.example.com/   Home
+ nuclei   vuln   https://a.example.com/   critical
+```
+
+По завершении последний кадр остаётся на экране, а под ним печатается сводка:
+статус, число записей, длительность, записи по инструментам, идентификатор
+сессии и пути к отчётам. Если вывод перенаправлен в файл или идёт в лог CI,
+таблица печатается один раз в финальном виде, а не мелькает кадрами.
 
 `cyberfw run` по умолчанию ничего не пишет на диск: результат выводится
 только на экран, а `reports/<session>/` не создаётся (это перестало быть

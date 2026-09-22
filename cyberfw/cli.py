@@ -202,16 +202,68 @@ def _session_tag(kind: str, name: str) -> str:
     return f"{kind}-{name}-{strftime('%Y%m%d-%H%M%S')}"
 
 
+#: How each inventory state reads. ``blocked`` means the file is on disk but
+#: cannot be read or run — an antivirus quarantine, not a missing download.
+_STATE_STYLES = {"ready": "ok", "blocked": "err", "not installed": "warn"}
+
+
+def _tool_state(manager: ToolManager, name: str, tools_dir: Path) -> str:
+    """``ready`` / ``blocked`` / ``not installed`` for one registered tool.
+
+    Readiness is "can this run", so a binary that resolves is ready even
+    without an install record (the record only carries the version, shown in
+    its own column). ``blocked`` is the narrow case the user must act on: the
+    file is on disk but cannot be read or executed — typically an antivirus
+    quarantine.
+    """
+    try:
+        manager.binary_path(name)
+    except CyberfwError:
+        return "blocked" if _binary_on_disk(tools_dir, name, manager.spec(name).binary) else "not installed"
+    return "ready"
+
+
+def _tool_version(manager: ToolManager, name: str) -> str:
+    return str((manager.install_state(name) or {}).get("version", ""))
+
+
+def _readiness(states: list[str]) -> Text:
+    """``3/8 ready`` — the one number that answers "can I run a pipeline?"."""
+    ready = sum(1 for state in states if state == "ready")
+    style = "ok" if ready == len(states) else ("warn" if ready else "err")
+    return Text.assemble((f"{ready}/{len(states)} ready", style))
+
+
+def _inventory_table(manager: ToolManager, tools_dir: Path, *, numbered: bool = False) -> tuple[Table, list[str]]:
+    """The tool inventory shared by the launcher and ``status``.
+
+    Returns the table and the per-tool states, so the caller can render the
+    readiness summary without computing them twice.
+    """
+    table = Table(title="TOOLS", title_style="accent", box=box.SIMPLE_HEAD, expand=True, pad_edge=False)
+    if numbered:
+        table.add_column("#", style="accent", justify="right", width=2)
+    table.add_column("tool", style="tool", no_wrap=True)
+    table.add_column("version", style="muted", no_wrap=True)
+    table.add_column("state", no_wrap=True)
+    table.add_column("source", style="muted", overflow="ellipsis", no_wrap=True)
+    states: list[str] = []
+    for index, name in enumerate(manager.registry.names(), start=1):
+        state = _tool_state(manager, name, tools_dir)
+        states.append(state)
+        row: list[str | Text] = [
+            name,
+            _tool_version(manager, name) or "—",
+            Text(state, style=_STATE_STYLES[state]),
+            manager.spec(name).repo,
+        ]
+        table.add_row(*([str(index), *row] if numbered else row))
+    return table, states
+
+
 def _tool_menu(manager: ToolManager) -> Table:
     """Render the registry with installation status for the launcher."""
-    table = Table(title="Tool inventory", box=box.SIMPLE_HEAD)
-    table.add_column("#", justify="right", style="accent")
-    table.add_column("tool", style="tool")
-    table.add_column("status")
-    table.add_column("repository", style="muted")
-    for index, name in enumerate(manager.registry.names(), start=1):
-        status = "[ok]ready[/ok]" if manager.is_installed(name) else "[warn]not installed[/warn]"
-        table.add_row(str(index), name, status, manager.spec(name).repo)
+    table, _states = _inventory_table(manager, manager.settings.tools_dir, numbered=True)
     return table
 
 
@@ -343,14 +395,10 @@ def _launcher_view(manager: ToolManager, settings: Settings) -> Table:
     file_text, file_style = _flag(settings.log_to_file)
     sidebar.add_row(Text.assemble(("  f  log file   ", "dim"), (file_text, file_style)))
 
-    content = Table(title="TOOLS", title_style="bold white", box=box.SIMPLE_HEAD, expand=True)
-    content.add_column("#", style="accent", justify="right")
-    content.add_column("tool", style="bold white")
-    content.add_column("status")
-    content.add_column("source", style="dim")
-    for index, name in enumerate(names, start=1):
-        status = "[ok]ready[/ok]" if manager.is_installed(name) else "[warn]not installed[/warn]"
-        content.add_row(str(index), name, status, manager.spec(name).repo)
+    content, states = _inventory_table(manager, settings.tools_dir, numbered=True)
+    sidebar.add_row("")
+    sidebar.add_row(Text("STATUS", style="accent"))
+    sidebar.add_row(Text.assemble(("  ", ""), _readiness(states)))
 
     table.add_row(Panel(sidebar, border_style="accent", padding=(1, 1), box=box.ROUNDED), content)
     return table
@@ -433,31 +481,54 @@ def init_cmd(
         manager = ToolManager(settings, manager.registry, manager.mapping)
 
     targets = tools or manager.registry.names()
-    console.print(f"[info]Installing {len(targets)} tool(s) into [tool]{settings.tools_dir}[/tool]...")
+    console.print(
+        Text.assemble(
+            (f"Installing {len(targets)} tool(s) into ", "info"), (str(settings.tools_dir), "tool")
+        )
+    )
+    # Not expanded, and the detail is relative to tools_dir: an absolute
+    # Windows path is ~90 characters and squeezes every other column away.
+    table = Table(box=box.SIMPLE_HEAD, pad_edge=False)
+    table.add_column("tool", style="tool", no_wrap=True)
+    table.add_column("version", style="muted", no_wrap=True)
+    table.add_column("state", no_wrap=True)
+    table.add_column("detail", style="muted", overflow="ellipsis")
     ok, failed = 0, 0
     try:
-        for name in targets:
-            spec = manager.spec(name)
-            wanted = spec.version if spec.version != "latest" else "latest release"
-            console.print(f"[info]checking[/info] {name} ({spec.repo}, {wanted}) ...")
-            try:
-                result = manager.install(name, force=force)
-            except CyberfwError as exc:
-                failed += 1
-                console.print(f"[err]  ✗ {name}:[/err] {exc}")
-                continue
-            ok += 1
-            if result.up_to_date:
-                console.print(f"[muted]  = {name} v{result.version} up to date[/muted]")
-            else:
-                console.print(f"[ok]  ✓ {name} v{result.version}[/ok] -> {result.binary}")
+        with console.status("", spinner="dots") as spinner:
+            for name in targets:
+                spec = manager.spec(name)
+                wanted = spec.version if spec.version != "latest" else "latest release"
+                spinner.update(f"[info]checking[/info] {name} ({spec.repo}, {wanted}) ...")
+                try:
+                    result = manager.install(name, force=force)
+                except CyberfwError as exc:
+                    failed += 1
+                    table.add_row(name, "—", Text("failed", style="err"), str(exc))
+                    continue
+                ok += 1
+                state = (
+                    Text("up to date", style="muted")
+                    if result.up_to_date
+                    else Text("installed", style="ok")
+                )
+                table.add_row(name, result.version, state, _relative_to(result.binary, settings.tools_dir))
     finally:
         manager.close()
 
+    console.print(table)
     if failed:
-        console.print(f"[warn]{ok} installed, {failed} failed.[/warn]")
+        console.print(f"[warn]{ok} ready, {failed} failed.[/warn]")
         raise typer.Exit(1)
     console.print(f"[ok]Done: {ok} tool(s) ready.[/ok]")
+
+
+def _relative_to(path: Path, root: Path) -> str:
+    """``subfinder/subfinder.exe`` instead of the full absolute path."""
+    try:
+        return str(path.relative_to(root))
+    except ValueError:  # pragma: no cover - a tool installed outside tools_dir
+        return str(path)
 
 
 def _dep_row(label: str, found: str | None, needed_by: str) -> tuple[str, str, str]:
@@ -496,29 +567,18 @@ def status_cmd() -> None:
     settings, manager = _bootstrap()
     try:
         console.print(banner(len(manager.registry.names())))
+        tools, states = _inventory_table(manager, settings.tools_dir)
         console.print(
-            f"[info]platform:[/info] {manager.mapping.os_name}/{manager.mapping.arch}  "
-            f"[info]tools dir:[/info] {settings.tools_dir}"
+            Text.assemble(
+                ("platform  ", "muted"),
+                (f"{manager.mapping.os_name}/{manager.mapping.arch}", "white"),
+                ("   ", ""),
+                _readiness(states),
+                ("   ", ""),
+                ("tools dir  ", "muted"),
+                (str(settings.tools_dir), "white"),
+            )
         )
-
-        tools = Table(title="Tools", box=box.SIMPLE_HEAD, expand=True)
-        tools.add_column("tool", style="tool")
-        tools.add_column("state")
-        tools.add_column("version", style="muted")
-        tools.add_column("repository", style="muted")
-        for name in manager.registry.names():
-            spec = manager.spec(name)
-            version = (manager.install_state(name) or {}).get("version", "")
-            try:
-                manager.binary_path(name)  # resolves only if the binary is runnable
-                state = "[ok]ready[/ok]"
-            except CyberfwError:
-                # Not runnable: present-but-unreadable (blocked) vs never fetched.
-                if _binary_on_disk(settings.tools_dir, name, spec.binary):
-                    state = "[err]blocked[/err]"
-                else:
-                    state = "[warn]not installed[/warn]"
-            tools.add_row(name, state, version, spec.repo)
         console.print(tools)
 
         deps = Table(title="External dependencies", box=box.SIMPLE_HEAD, expand=True)

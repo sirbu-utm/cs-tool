@@ -60,6 +60,51 @@ def _workspace(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.chdir(tmp_path)
 
 
+@pytest.fixture
+def fake_github(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> object:
+    """Serve one release of ``pinme`` without the network by swapping ToolManager.client."""
+    import io
+    import zipfile
+
+    from cyberfw.manager import ToolManager
+    from cyberfw.manager.github_client import GitHubRelease, ReleaseAsset
+
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as zf:
+        zf.writestr("pinme", "#!/usr/bin/env bash\necho hi\n")
+    archive = buffer.getvalue()
+
+    class FakeClient:
+        downloads = 0
+
+        def release(self, owner: str, repo: str, tag: str) -> GitHubRelease:
+            return GitHubRelease(
+                tag="v1.2.3",
+                assets=[ReleaseAsset("pinme_1.2.3_windows_amd64.zip", "http://x", len(archive)),
+                        ReleaseAsset("pinme_1.2.3_linux_amd64.zip", "http://x", len(archive)),
+                        ReleaseAsset("pinme_1.2.3_darwin_amd64.zip", "http://x", len(archive)),
+                        ReleaseAsset("pinme_1.2.3_darwin_arm64.zip", "http://x", len(archive)),
+                        ReleaseAsset("pinme_1.2.3_linux_arm64.zip", "http://x", len(archive))],
+                checksums_url=None,
+            )
+
+        def download(self, url: str, destination: Path, *, expected_size: int | None = None) -> None:
+            FakeClient.downloads += 1
+            destination.write_bytes(archive)
+
+        def fetch_text(self, url: str) -> str:
+            return ""
+
+        def close(self) -> None:
+            pass
+
+    fake = FakeClient()
+    monkeypatch.setattr(ToolManager, "client", property(lambda self: fake))
+    with (tmp_path / "registry.yaml").open("a", encoding="utf-8") as handle:
+        handle.write("pinme:\n  repo: org/pinme\n  asset_patterns: ['pinme_*']\n  binary: pinme\n  needs_checksum: false\n")
+    return FakeClient
+
+
 class TestHelpAndUnknown:
     def test_root_help(self) -> None:
         result = runner.invoke(app, ["--help"])
@@ -347,55 +392,12 @@ class TestInitCommand:
         assert result.exit_code == 0
         assert "0 tool" in result.stdout
 
-    @pytest.fixture
-    def fake_github(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> object:
-        """Serve one release of ``pinme`` without the network by swapping ToolManager.client."""
-        import io
-        import zipfile
-
-        from cyberfw.manager import ToolManager
-        from cyberfw.manager.github_client import GitHubRelease, ReleaseAsset
-
-        buffer = io.BytesIO()
-        with zipfile.ZipFile(buffer, "w") as zf:
-            zf.writestr("pinme", "#!/usr/bin/env bash\necho hi\n")
-        archive = buffer.getvalue()
-
-        class FakeClient:
-            downloads = 0
-
-            def release(self, owner: str, repo: str, tag: str) -> GitHubRelease:
-                return GitHubRelease(
-                    tag="v1.2.3",
-                    assets=[ReleaseAsset("pinme_1.2.3_windows_amd64.zip", "http://x", len(archive)),
-                            ReleaseAsset("pinme_1.2.3_linux_amd64.zip", "http://x", len(archive)),
-                            ReleaseAsset("pinme_1.2.3_darwin_amd64.zip", "http://x", len(archive)),
-                            ReleaseAsset("pinme_1.2.3_darwin_arm64.zip", "http://x", len(archive)),
-                            ReleaseAsset("pinme_1.2.3_linux_arm64.zip", "http://x", len(archive))],
-                    checksums_url=None,
-                )
-
-            def download(self, url: str, destination: Path, *, expected_size: int | None = None) -> None:
-                FakeClient.downloads += 1
-                destination.write_bytes(archive)
-
-            def fetch_text(self, url: str) -> str:
-                return ""
-
-            def close(self) -> None:
-                pass
-
-        fake = FakeClient()
-        monkeypatch.setattr(ToolManager, "client", property(lambda self: fake))
-        with (tmp_path / "registry.yaml").open("a", encoding="utf-8") as handle:
-            handle.write("pinme:\n  repo: org/pinme\n  asset_patterns: ['pinme_*']\n  binary: pinme\n  needs_checksum: false\n")
-        return FakeClient
-
     def test_second_init_reports_up_to_date_and_skips_the_download(self, fake_github: object) -> None:
         first = runner.invoke(app, ["init", "pinme"])
         second = runner.invoke(app, ["init", "pinme"])
 
-        assert first.exit_code == 0 and "pinme v1.2.3" in first.stdout
+        # Presentation is a table now: tool and version are separate cells.
+        assert first.exit_code == 0 and "pinme" in first.stdout and "1.2.3" in first.stdout
         assert second.exit_code == 0
         assert "up to date" in second.stdout
         assert fake_github.downloads == 1  # type: ignore[attr-defined]
@@ -795,3 +797,100 @@ class TestRunSummary:
         result = runner.invoke(app, ["pipeline", "recon-to-vuln", "-t", "example.com", "--no-report"])
 
         assert "elapsed" in result.stdout
+
+
+class TestInventoryPresentation:
+    """The launcher and `status` answer the same question — what is ready to run — so
+    they show the same inventory: version, state, and a one-line readiness summary."""
+
+    def _install_state(self, tmp_path: Path, tool: str, version: str) -> None:
+        binary = (tmp_path / "tools_bin" / tool).resolve()
+        (tmp_path / "tools_bin" / f".{tool}.install.json").write_text(
+            json.dumps({"binary": str(binary), "version": version, "os": "linux", "arch": "amd64"}),
+            encoding="utf-8",
+        )
+
+    def test_a_runnable_binary_without_an_install_record_is_ready_not_blocked(self, tmp_path: Path) -> None:
+        """A checkout whose tools_bin was copied from elsewhere has binaries but no
+        records; calling those "blocked" would send the user hunting an antivirus."""
+        from cyberfw.cli import _tool_state
+        from cyberfw.config import Settings
+        from cyberfw.manager import ToolManager, load_registry
+
+        settings = Settings(root_dir=tmp_path)
+        manager = ToolManager(settings, load_registry(tmp_path / "registry.yaml"))
+        try:
+            assert manager.install_state("subfinder") is None
+            assert _tool_state(manager, "subfinder", settings.tools_dir) == "ready"
+        finally:
+            manager.close()
+
+    def test_launcher_lists_installed_versions(self, tmp_path: Path) -> None:
+        from cyberfw.cli import _launcher_view
+        from cyberfw.config import Settings
+        from cyberfw.manager import ToolManager, load_registry
+        from cyberfw.manager.platform_map import Mapping
+
+        self._install_state(tmp_path, "subfinder", "2.6.6")
+        settings = Settings(root_dir=tmp_path)
+        manager = ToolManager(settings, load_registry(tmp_path / "registry.yaml"), Mapping("linux", "amd64"))
+        output = Console(theme=THEME, record=True, width=120)
+        try:
+            output.print(_launcher_view(manager, settings))
+        finally:
+            manager.close()
+        rendered = output.export_text()
+
+        assert "2.6.6" in rendered
+        assert "4/4 ready" in rendered
+
+    def test_status_opens_with_the_readiness_summary(self) -> None:
+        """All four workspace binaries are runnable, so all four are ready — an install
+        record is bookkeeping for the version, not a precondition for running."""
+        result = runner.invoke(app, ["status"])
+
+        assert result.exit_code == 0
+        assert "4/4 ready" in result.stdout
+
+    def test_status_shows_the_recorded_version_per_tool(self, tmp_path: Path) -> None:
+        from cyberfw.manager.platform_map import get_target
+
+        mapping = get_target()
+        for tool in ("subfinder", "httpx"):
+            binary = (tmp_path / "tools_bin" / tool).resolve()
+            (tmp_path / "tools_bin" / f".{tool}.install.json").write_text(
+                json.dumps(
+                    {"binary": str(binary), "version": "9.9.9", "os": mapping.os_name, "arch": mapping.arch}
+                ),
+                encoding="utf-8",
+            )
+
+        result = runner.invoke(app, ["status"])
+
+        assert "9.9.9" in result.stdout
+        assert "—" in result.stdout, "a tool with no install record shows no version"
+
+
+class TestInitPresentation:
+    def test_results_are_listed_as_a_table(self, fake_github: object) -> None:
+        result = runner.invoke(app, ["init", "pinme"])
+
+        assert result.exit_code == 0
+        assert "version" in result.stdout and "state" in result.stdout
+        assert "1.2.3" in result.stdout
+        assert "installed" in result.stdout
+
+    def test_up_to_date_and_failed_rows_are_distinguishable(self, fake_github: object) -> None:
+        runner.invoke(app, ["init", "pinme"])
+        result = runner.invoke(app, ["init", "pinme"])
+
+        assert "up to date" in result.stdout
+
+    def test_a_failure_is_shown_in_the_table_and_exits_1(self, tmp_path: Path) -> None:
+        with (tmp_path / "registry.yaml").open("a", encoding="utf-8") as handle:
+            handle.write("broken:\n  repo: org/broken\n  asset_patterns: []\n  binary: broken\n")
+
+        result = runner.invoke(app, ["init", "broken"])
+
+        assert result.exit_code == 1
+        assert "failed" in result.stdout
