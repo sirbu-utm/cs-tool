@@ -34,7 +34,7 @@ from cyberfw.tools.base import BaseTool, ToolContext
 
 LOG = get_logger("engine")
 
-__all__ = ["Node", "NodeResult", "PipelineResult", "PipelineEngine"]
+__all__ = ["Node", "NodeResult", "PipelineResult", "PipelineEngine", "StageEvent"]
 
 #: Native package-manager hints for external dependencies declared in
 #: ``registry.yaml`` (e.g. ``nmap`` for RustScan's service/version detection).
@@ -89,6 +89,25 @@ class NodeResult:
 
 
 @dataclass
+class StageEvent:
+    """Lifecycle notification for one stage — what a live progress view subscribes to.
+
+    ``start`` is sent once the amount of work is known (``total`` targets for a
+    fan-out stage, 1 for a single process), ``progress`` after each fan-out
+    target finishes (successfully or not), ``done`` with the final
+    :class:`NodeResult` — also for a stage that failed before it could start,
+    in which case no ``start`` precedes it.
+    """
+
+    kind: str  # "start" | "progress" | "done"
+    stage: str
+    tool: str
+    done: int = 0
+    total: int = 0
+    result: NodeResult | None = None
+
+
+@dataclass
 class PipelineResult:
     """Aggregate of a whole pipeline run."""
 
@@ -130,6 +149,7 @@ class PipelineEngine:
         self._on_record: Any = None
         self._on_stderr: Any = None
         self._on_stdout_raw: Any = None
+        self._on_stage: Callable[[StageEvent], Awaitable[None]] | None = None
 
     # -- public --------------------------------------------------------------
     def set_record_callback(self, callback: Callable[[ToolRecord], Awaitable[None]]) -> None:
@@ -139,6 +159,14 @@ class PipelineEngine:
     def set_stderr_callback(self, callback: Callable[[str], Awaitable[None]]) -> None:
         """Register an ``async (line) -> None`` hook for live stderr passthrough."""
         self._on_stderr = callback
+
+    def set_stage_callback(self, callback: Callable[[StageEvent], Awaitable[None]]) -> None:
+        """Register an ``async (StageEvent) -> None`` hook for stage start/progress/done."""
+        self._on_stage = callback
+
+    async def _emit(self, event: StageEvent) -> None:
+        if self._on_stage is not None:
+            await self._on_stage(event)
 
     def set_stdout_raw_callback(self, callback: Callable[[str], Awaitable[None]]) -> None:
         """Register an ``async (line) -> None`` hook for live raw-stdout passthrough.
@@ -232,6 +260,14 @@ class PipelineEngine:
             extra_input=extra_input if extra_input is not None else self.settings.wordlist,
         )
 
+        node_result, records = await self._attempt(node, ctx, parse=parse)
+        await self._emit(StageEvent(kind="done", stage=node.stage, tool=node.tool, result=node_result))
+        return node_result, records
+
+    async def _attempt(
+        self, node: Node, ctx: ToolContext, *, parse: bool
+    ) -> tuple[NodeResult, list[ToolRecord]]:
+        """Run the node and fold every failure mode into a ``NodeResult``."""
         try:
             # Inside the try: a registered-but-uninstalled tool is a failed
             # stage like any other, not the end of the run (and its report).
@@ -284,6 +320,7 @@ class PipelineEngine:
             extra_input=ctx.extra_input,
         )
         cmd = adapter.build_cmd(run_ctx)
+        await self._emit(StageEvent(kind="start", stage=node.stage, tool=node.tool, done=0, total=1))
         return await run_stage(
             cmd,
             tool=node.tool,
@@ -304,6 +341,15 @@ class PipelineEngine:
         targets = ctx.inputs or ([ctx.target] if ctx.target else [])
         semaphore = asyncio.Semaphore(self.settings.concurrency)
         failures: list[tuple[str, ExecutionError]] = []
+        finished = 0
+        await self._emit(StageEvent(kind="start", stage=node.stage, tool=node.tool, done=0, total=len(targets)))
+
+        async def report_progress() -> None:
+            nonlocal finished
+            finished += 1
+            await self._emit(
+                StageEvent(kind="progress", stage=node.stage, tool=node.tool, done=finished, total=len(targets))
+            )
 
         async def run_target(target: str) -> list[ToolRecord]:
             async with semaphore:
@@ -330,6 +376,8 @@ class PipelineEngine:
                     )
                     failures.append((target, exc))
                     return []
+                finally:
+                    await report_progress()
 
         batches = await asyncio.gather(*(run_target(target) for target in targets))
         if targets and len(failures) == len(targets):

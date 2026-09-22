@@ -17,7 +17,7 @@ from cyberfw.exceptions import ExecutionError
 from cyberfw.manager import ToolManager
 from cyberfw.manager.registry import load_registry
 from cyberfw.pipeline.context import SessionContext
-from cyberfw.pipeline.engine import Node, PipelineEngine
+from cyberfw.pipeline.engine import Node, PipelineEngine, StageEvent
 from cyberfw.pipeline.schemas import ToolRecord
 from cyberfw.tools.base import BaseTool, ToolContext
 
@@ -596,3 +596,98 @@ class TestRunTiming:
         assert result.started_at.tzinfo is not None, "timestamps must be timezone-aware (UTC)"
         assert before <= result.started_at <= result.finished_at <= datetime.now(timezone.utc)
         assert result.duration_s is not None and result.duration_s >= 0
+
+
+# -- stage lifecycle events (what a live progress view subscribes to) -----------------
+_REGISTRY = "subfinder:\n  repo: org/subfinder\n  asset_patterns: []\n  binary: stub_probe.py\n"
+
+
+def _engine_with(tmp_path: Path, adapter_factory) -> tuple[PipelineEngine, list[StageEvent]]:
+    registry_path = tmp_path / "registry.yaml"
+    registry_path.write_text(_REGISTRY, encoding="utf-8")
+    engine = _make_engine(tmp_path, registry_path)
+    adapter: BaseTool = adapter_factory(engine)
+    engine.build_tool = lambda name: adapter  # type: ignore[method-assign]
+    events: list[StageEvent] = []
+
+    async def on_stage(event: StageEvent) -> None:
+        events.append(event)
+
+    engine.set_stage_callback(on_stage)
+    return engine, events
+
+
+class TestStageEvents:
+    async def test_single_process_stage_emits_start_then_done(self, tmp_path: Path) -> None:
+        engine, events = _engine_with(
+            tmp_path, lambda e: _StubTool(e.tool_manager.spec("subfinder"), _stub_binary(tmp_path))
+        )
+
+        result = await engine.run([Node(tool="subfinder", stage="sub")], seed="seed.example.com")
+
+        assert [(e.kind, e.stage, e.tool) for e in events] == [("start", "sub", "subfinder"), ("done", "sub", "subfinder")]
+        assert events[0].result is None
+        assert events[1].result is result.nodes[0]
+        assert events[1].result is not None and events[1].result.ok
+
+    async def test_fan_out_reports_progress_per_target(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        engine, events = _engine_with(
+            tmp_path, lambda e: _PerTargetTool(e.tool_manager.spec("subfinder"), tmp_path / "stub_probe.py")
+        )
+
+        async def fake_run_stage(command, **kwargs):
+            return [ToolRecord(tool="subfinder", target=command[0], kind="host")]
+
+        monkeypatch.setattr("cyberfw.pipeline.engine.run_stage", fake_run_stage)
+        await engine.run_single(
+            Node(tool="subfinder", stage="shots"), ToolContext(inputs=["host-0", "host-1", "host-2"])
+        )
+
+        kinds = [e.kind for e in events]
+        assert kinds == ["start", "progress", "progress", "progress", "done"]
+        assert [(e.done, e.total) for e in events if e.kind == "progress"] == [(1, 3), (2, 3), (3, 3)]
+        assert (events[0].done, events[0].total) == (0, 3), "start announces how many targets there are"
+
+    async def test_progress_counts_failed_targets_too(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A host that errors out is still a finished unit of work — the bar must reach total."""
+        engine, events = _engine_with(
+            tmp_path, lambda e: _PerTargetTool(e.tool_manager.spec("subfinder"), tmp_path / "stub_probe.py")
+        )
+
+        async def flaky_run_stage(command, **kwargs):
+            if command[0] == "host-1":
+                raise ExecutionError("exited with code 1", exit_code=1, stderr_tail=[])
+            return [ToolRecord(tool="subfinder", target=command[0], kind="host")]
+
+        monkeypatch.setattr("cyberfw.pipeline.engine.run_stage", flaky_run_stage)
+        await engine.run_single(Node(tool="subfinder", stage="shots"), ToolContext(inputs=["host-0", "host-1"]))
+
+        assert [(e.done, e.total) for e in events if e.kind == "progress"] == [(1, 2), (2, 2)]
+
+    async def test_failed_stage_emits_done_carrying_the_failure(self, tmp_path: Path) -> None:
+        script = tmp_path / "crash.py"
+        script.write_text("import sys\nsys.exit(9)\n", encoding="utf-8")
+        engine, events = _engine_with(tmp_path, lambda e: _StubTool(e.tool_manager.spec("subfinder"), script))
+
+        await engine.run([Node(tool="subfinder", stage="sub")], seed="x")
+
+        done = events[-1]
+        assert done.kind == "done"
+        assert done.result is not None and done.result.ok is False
+        assert "code 9" in (done.result.error or "")
+
+    async def test_no_subscriber_is_fine(self, tmp_path: Path) -> None:
+        registry_path = tmp_path / "registry.yaml"
+        registry_path.write_text(_REGISTRY, encoding="utf-8")
+        engine = _make_engine(tmp_path, registry_path)
+        stub = _StubTool(engine.tool_manager.spec("subfinder"), _stub_binary(tmp_path))
+        engine.build_tool = lambda name: stub  # type: ignore[method-assign]
+
+        result = await engine.run([Node(tool="subfinder", stage="sub")], seed="x")
+
+        assert result.succeeded()
+
+    def test_event_is_a_plain_value(self) -> None:
+        event = StageEvent(kind="start", stage="sub", tool="subfinder", done=0, total=1)
+        assert event == StageEvent(kind="start", stage="sub", tool="subfinder", done=0, total=1)
+        assert event.result is None
