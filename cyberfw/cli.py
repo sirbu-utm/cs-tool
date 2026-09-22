@@ -170,6 +170,22 @@ def _node_table(result: PipelineResult) -> Table:
     return table
 
 
+def _unavailable_tools(
+    manager: ToolManager, nodes: list[Node], tools_dir: Path
+) -> list[tuple[str, str, str]]:
+    """``(stage, tool, state)`` for every node whose binary cannot run, in plan order."""
+    seen: set[str] = set()
+    missing: list[tuple[str, str, str]] = []
+    for node in nodes:
+        if node.tool in seen:
+            continue
+        seen.add(node.tool)
+        state = _tool_state(manager, node.tool, tools_dir)
+        if state != "ready":
+            missing.append((node.stage, node.tool, state))
+    return missing
+
+
 def _run_summary(
     result: PipelineResult, *, name: str, session_id: str, reports: list[tuple[str, Path]]
 ) -> Panel:
@@ -751,6 +767,10 @@ def pipeline_cmd(
             "(records are still parsed under the hood to thread stages).",
         ),
     ] = False,
+    force_start: Annotated[
+        bool,
+        typer.Option("--force-start", help="Start even when a tool this pipeline needs is unavailable."),
+    ] = False,
 ) -> None:
     """Run a ready-made pipeline and render HTML/JSON reports."""
     if target is None:
@@ -773,6 +793,21 @@ def pipeline_cmd(
         console.print(f"[err]{exc}[/err]")
         manager.close()
         raise typer.Exit(2) from exc
+
+    # Whether the run can happen at all is knowable now, and a scan takes
+    # minutes: report the unavailable tools up front instead of spending the
+    # time only to say that a stage never ran.
+    unavailable = _unavailable_tools(manager, nodes, settings.tools_dir)
+    if unavailable and not force_start:
+        for stage, tool, state in unavailable:
+            console.print(f"[err]{tool}[/err] ({stage}) is [err]{state}[/err]")
+        console.print(
+            "[warn]Run `cyberfw init` (and `cyberfw status` to see why), "
+            "or pass --force-start to run the stages that can.[/warn]"
+        )
+        manager.close()
+        raise typer.Exit(2)
+
     wordlist = wordlist or settings.wordlist
     if ffuf and not wordlist:
         console.print(

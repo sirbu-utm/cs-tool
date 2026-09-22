@@ -925,3 +925,51 @@ class TestInitPresentation:
 
         assert result.exit_code == 1
         assert "failed" in result.stdout
+
+
+class TestPipelinePreFlight:
+    """Whether a pipeline can run at all is knowable before the first byte is scanned:
+    a real ports-to-vuln run spent 4.5 minutes to report that naabu — blocked by
+    Defender before the run even started — never ran."""
+
+    def test_a_missing_tool_stops_the_run_before_it_starts(self, tmp_path: Path) -> None:
+        (tmp_path / "tools_bin" / "nuclei").unlink()
+
+        result = runner.invoke(app, ["pipeline", "recon-to-vuln", "-t", "example.com"])
+
+        assert result.exit_code == 2
+        assert "nuclei" in result.stdout
+        assert "cyberfw init" in result.stdout, "the message says how to fix it"
+        assert not list((tmp_path / "reports").rglob("report.json")), "nothing ran"
+
+    def test_the_stage_is_named_alongside_the_tool(self, tmp_path: Path) -> None:
+        (tmp_path / "tools_bin" / "httpx").unlink()
+
+        result = runner.invoke(app, ["pipeline", "recon-to-vuln", "-t", "example.com"])
+
+        assert "live_http" in result.stdout
+
+    def test_force_start_runs_anyway(self, tmp_path: Path) -> None:
+        """The check is a courtesy, not a gate: a user who knows better can proceed."""
+        (tmp_path / "tools_bin" / "nuclei").unlink()
+
+        result = runner.invoke(
+            app, ["pipeline", "recon-to-vuln", "-t", "example.com", "--force-start", "--no-report"]
+        )
+
+        assert result.exit_code == 1, "the nuclei stage still fails, but the run happened"
+        assert "subdomains" in result.stdout and "sub.example.com" in result.stdout
+
+    def test_a_ready_workspace_is_not_bothered(self) -> None:
+        result = runner.invoke(app, ["pipeline", "recon-to-vuln", "-t", "example.com", "--no-report"])
+
+        assert result.exit_code == 0
+        assert "cyberfw init" not in result.stdout
+
+    def test_only_the_tools_this_pipeline_uses_are_required(self, tmp_path: Path) -> None:
+        """recon-to-vuln without --ffuf does not need ffuf installed."""
+        (tmp_path / "tools_bin" / "ffuf").unlink()
+
+        result = runner.invoke(app, ["pipeline", "recon-to-vuln", "-t", "example.com", "--no-report"])
+
+        assert result.exit_code == 0
