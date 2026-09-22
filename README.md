@@ -32,26 +32,40 @@ Launcher автоматически:
 ### Как вызывать команды
 
 `uv sync` ставит команды `cstool`, `cs-tool` и `cyberfw` **внутрь окружения
-проекта** (`.venv\Scripts` / `.venv/bin`). Само по себе это не кладёт их в
-`PATH`, поэтому просто `cyberfw status` в новой сессии PowerShell даёт
-«имя не распознано». Рабочие способы:
+проекта** (`.venv\Scripts` / `.venv/bin`). Этот каталог не в `PATH`, поэтому
+просто `cyberfw status` в PowerShell отвечает «имя не распознано».
 
-| Откуда | Windows | Linux / macOS |
+Чтобы команда работала как обычная, один раз выполни:
+
+```bash
+uv tool install --editable .
+```
+
+uv положит `cyberfw`, `cstool` и `cs-tool` в свой каталог команд
+(`~/.local/bin`) и предупредит, если тот не в `PATH` — тогда добавить его
+поможет `uv tool update-shell` (и новая сессия терминала). `--editable`
+означает, что команда запускает код из этого репозитория: правки применяются
+сразу, переустанавливать после каждого изменения не нужно. Убрать —
+`uv tool uninstall cyberfw`.
+
+Без установки работают и такие вызовы из корня репозитория:
+
+| Вызов | Windows | Linux / macOS |
 |---|---|---|
-| Из корня репозитория | `.\cstool.bat status` | `./cstool status` |
-| Из корня репозитория | `uv run cyberfw status` | `uv run cyberfw status` |
-| Из любого каталога | `uv tool install .`, затем `cyberfw status` | то же |
+| Launcher (сам готовит окружение) | `.\cstool.bat status` | `./cstool status` |
+| Через uv | `uv run cyberfw status` | `uv run cyberfw status` |
 
-Launcher (`cstool.bat` / `cstool`) передаёт аргументы дальше без изменений,
-поэтому `.\cstool.bat status` — это тот же `cyberfw status`, но с
-автоматической подготовкой окружения.
-
-После `uv tool install .` uv сам предупредит, если его каталог с командами не
-в `PATH`; добавить туда — `uv tool update-shell` (новая сессия терминала).
-
-Голое `cstool` без `.\` в `cmd.exe` работает только там, где cmd ищет команды
+Launcher передаёт аргументы дальше без изменений, поэтому `.\cstool.bat status`
+— это тот же `cyberfw status`, но с автоматической подготовкой окружения.
+Голое `cstool` без `.\` в `cmd.exe` находится только там, где cmd ищет команды
 в текущем каталоге; при `NoDefaultCurrentDirectoryInExePath=1` (частая
-настройка безопасности) не находит. `.\cstool.bat` работает всегда.
+настройка безопасности) — нет. `.\cstool.bat` работает всегда.
+
+Важно, **откуда** запускать: каталог с `registry.yaml` — это workspace, и
+инструменты берутся из его `tools_bin/`. Из постороннего каталога `cyberfw`
+работает, но смотрит в пользовательский каталог данных, где инструментов ещё
+нет (`0/8 ready`). Нужен конкретный workspace из любого места —
+`CYBERFW_ROOT_DIR=C:\path\to\CS-TOOL_main`.
 
 ### Установка как пакета
 
