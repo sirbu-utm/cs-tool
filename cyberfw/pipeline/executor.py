@@ -108,18 +108,38 @@ def _find_bash() -> str | None:
     return shim
 
 
+def _find_cygpath(bash: str) -> Path | None:
+    """Locate the ``cygpath`` that belongs to ``bash``.
+
+    Git for Windows ships two bashes and one cygpath: ``Git\\usr\\bin`` has
+    both, ``Git\\bin`` has only bash. Looking solely next to bash therefore
+    finds nothing exactly when PATH offered ``Git\\bin`` first — which is what
+    PowerShell and the GitHub Windows runner do.
+    """
+    bash_dir = Path(bash).parent
+    for candidate in (
+        bash_dir / "cygpath.exe",
+        bash_dir.parent / "usr" / "bin" / "cygpath.exe",
+        bash_dir.parent.parent / "usr" / "bin" / "cygpath.exe",
+    ):
+        if candidate.is_file():
+            return candidate
+    return None
+
+
 def _to_posix_path(path: Path, bash: str) -> str:
     """Convert a Windows path to the POSIX form the resolved ``bash`` expects.
 
     MSYS2/Git Bash mounts drives at ``/c/...`` while WSL mounts them at
     ``/mnt/c/...``; passing the wrong one makes bash report "No such file or
-    directory" even though the file exists. Git Bash and Cygwin ship a
-    ``cygpath`` helper next to ``bash.exe`` that performs the exact
-    conversion the running shell expects, so prefer it when present and fall
-    back to the WSL convention otherwise.
+    directory" even though the file exists. ``cygpath`` performs the exact
+    conversion the running shell expects, so prefer it; without it, guess from
+    *which* bash was resolved — the WSL layout only for the WSL shim, the MSYS
+    one for everything else. (Guessing WSL unconditionally is how a Git Bash
+    launched from `Git\\bin` was handed /mnt/c/... and exited 127.)
     """
-    cygpath = Path(bash).with_name("cygpath.exe")
-    if cygpath.is_file():
+    cygpath = _find_cygpath(bash)
+    if cygpath is not None:
         try:
             result = subprocess.run(
                 [str(cygpath), "-u", str(path)],
@@ -138,7 +158,9 @@ def _to_posix_path(path: Path, bash: str) -> str:
     posix_path = path.as_posix()
     if len(posix_path) >= 3 and posix_path[1] == ":" and posix_path[2] == "/":
         drive = posix_path[0].lower()
-        posix_path = "/mnt/" + drive + posix_path[2:]
+        is_wsl = any(marker in bash.lower().replace("/", "\\") for marker in _WSL_SHIM_DIRS)
+        prefix = "/mnt/" if is_wsl else "/"
+        posix_path = prefix + drive + posix_path[2:]
     return posix_path
 
 

@@ -58,6 +58,12 @@
   файла) логируется как `not verified` вместо молчаливого успеха.
 
 ### Fixed
+- Windows: инструменты-скрипты с shebang не запускались, если bash находился
+  как `Gitinash.exe` (так его видят PowerShell и раннер GitHub) — путь
+  конвертировался по WSL-схеме `/mnt/c/...`, и Git Bash отвечал
+  `No such file or directory` (exit 127). Теперь `cygpath` ищется и в соседнем
+  `usrin`, а без него схема выбирается по тому, какой bash найден:
+  `/mnt/c/...` только для WSL-шима, `/c/...` для MSYS/Git.
 - naabu получал URL целиком (`-host https://999.md`) и падал с `no valid ipv4
   or ipv6 targets were found`; теперь и seed, и цели предыдущего этапа
   приводятся к имени хоста — общий `cyberfw/tools/targets.hostname_of`,

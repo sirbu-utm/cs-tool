@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import os
 import sys
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 
 import pytest
 
@@ -470,3 +470,108 @@ class TestCrashDescription:
         script = _write_script(tmp_path, "import os\nos._exit(0xC0000005 - 2**32)\n")
         with pytest.raises(ExecutionError, match="access violation"):
             await run_stage([sys.executable, str(script)], tool="nuclei", stage="s", context=None)
+
+
+class TestPosixPathConversion:
+    """Git for Windows keeps bash in two places and cygpath in only one of them:
+    ``Git\\bin\\bash.exe`` has no cygpath sibling, ``Git\\usr\\bin`` does. Guessing the
+    WSL layout (/mnt/c/...) when cygpath is not found next to bash made Git Bash
+    answer "No such file or directory" and every fake-tool test exited 127 —
+    but only when PATH offered bin before usr/bin, which is how PowerShell and
+    the GitHub Windows runner see it.
+    """
+
+    @staticmethod
+    def _git_layout(tmp_path: Path, *, with_cygpath: bool = True) -> Path:
+        """A Git-for-Windows tree: bin/bash.exe, and cygpath over in usr/bin."""
+        root = tmp_path / "Git"
+        (root / "bin").mkdir(parents=True)
+        (root / "usr" / "bin").mkdir(parents=True)
+        bash = root / "bin" / "bash.exe"
+        bash.write_bytes(b"MZ")
+        if with_cygpath:
+            (root / "usr" / "bin" / "cygpath.exe").write_bytes(b"MZ")
+        return bash
+
+    def test_msys_layout_is_used_even_when_cygpath_is_not_a_sibling(self, tmp_path: Path) -> None:
+        from cyberfw.pipeline.executor import _to_posix_path
+
+        bash = self._git_layout(tmp_path, with_cygpath=False)
+
+        # PureWindowsPath so the conversion is exercised on every platform:
+        # to Path() on Linux a Windows path is just an odd file name.
+        converted = _to_posix_path(PureWindowsPath(r"C:\tools_bin\subfinder"), str(bash))
+
+        assert converted == "/c/tools_bin/subfinder"
+        assert "/mnt/" not in converted, "that is the WSL layout, not Git Bash's"
+
+    def test_the_wsl_shim_still_gets_the_wsl_layout(self, tmp_path: Path) -> None:
+        from cyberfw.pipeline.executor import _to_posix_path
+
+        shim = tmp_path / "Windows" / "System32" / "bash.exe"
+        shim.parent.mkdir(parents=True)
+        shim.write_bytes(b"MZ")
+
+        assert (
+            _to_posix_path(PureWindowsPath(r"C:\tools_bin\subfinder"), str(shim))
+            == "/mnt/c/tools_bin/subfinder"
+        )
+
+    def test_cygpath_next_to_bash_is_still_preferred(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        from cyberfw.pipeline import executor
+
+        bash = tmp_path / "bin" / "bash.exe"
+        bash.parent.mkdir(parents=True)
+        bash.write_bytes(b"MZ")
+        (tmp_path / "bin" / "cygpath.exe").write_bytes(b"MZ")
+        asked: list[str] = []
+
+        class _Result:
+            returncode = 0
+            stdout = "/from/cygpath\n"
+
+        def fake_run(cmd, **_kwargs):
+            asked.append(cmd[0])
+            return _Result()
+
+        monkeypatch.setattr(executor.subprocess, "run", fake_run)
+
+        assert executor._to_posix_path(Path(r"C:\x"), str(bash)) == "/from/cygpath"
+        assert asked and asked[0].endswith("cygpath.exe")
+
+    def test_cygpath_found_in_the_sibling_usr_bin(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        from cyberfw.pipeline import executor
+
+        bash = self._git_layout(tmp_path)
+        used: list[str] = []
+
+        class _Result:
+            returncode = 0
+            stdout = "/c/x\n"
+
+        def fake_run(cmd, **_kwargs):
+            used.append(cmd[0])
+            return _Result()
+
+        monkeypatch.setattr(executor.subprocess, "run", fake_run)
+        executor._to_posix_path(Path(r"C:\x"), str(bash))
+
+        assert used and used[0].endswith(str(Path("usr") / "bin" / "cygpath.exe"))
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows shebang handling")
+async def test_a_shebang_tool_runs_under_git_bin_bash(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """End to end with the bash PowerShell and the CI runner pick first: the script
+    must actually execute, not exit 127 on a path it cannot read."""
+    from cyberfw.pipeline import executor
+
+    git_bin_bash = Path(r"C:\Program Files\Git\bin\bash.exe")
+    if not git_bin_bash.is_file():
+        pytest.skip("Git for Windows is not installed in its default location")
+    monkeypatch.setattr(executor, "_find_bash", lambda: str(git_bin_bash))
+    script = tmp_path / "faketool"
+    script.write_text('#!/usr/bin/env bash\necho \'{"host": "a.example.com"}\'\n', encoding="utf-8")
+
+    records = await run_stage([str(script)], tool="subfinder", stage="s", context=None)
+
+    assert [r.target for r in records] == ["a.example.com"]
