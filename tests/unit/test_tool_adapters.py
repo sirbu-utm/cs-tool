@@ -10,7 +10,7 @@ from cyberfw.exceptions import ToolNotFoundError
 from cyberfw.manager.registry import ToolSpec
 from cyberfw.tools import adapter_for
 from cyberfw.tools.base import ToolContext
-from cyberfw.tools.rustscan import _hostname
+from cyberfw.tools.targets import hostname_of
 
 
 def _adapter(name: str) -> object:
@@ -144,16 +144,16 @@ def test_ffuf_rejects_nonexistent_wordlist_path() -> None:
         )
 
 
-def test_rustscan_normalizes_url_to_hostname() -> None:
-    assert _hostname("https://utm.md/path") == "utm.md"
-    assert _hostname("192.0.2.10") == "192.0.2.10"
+def test_rustscan_normalizes_url_tohostname_of() -> None:
+    assert hostname_of("https://utm.md/path") == "utm.md"
+    assert hostname_of("192.0.2.10") == "192.0.2.10"
 
 
 def test_rustscan_strips_port_from_naabu_style_host_port() -> None:
     """``--addresses`` takes hosts only; a ``host:port`` record from naabu must lose its port."""
-    assert _hostname("192.168.1.50:8080") == "192.168.1.50"
-    assert _hostname("api.example.com:443") == "api.example.com"
-    assert _hostname("[::1]:8080") == "::1"
+    assert hostname_of("192.168.1.50:8080") == "192.168.1.50"
+    assert hostname_of("api.example.com:443") == "api.example.com"
+    assert hostname_of("[::1]:8080") == "::1"
 
 
 def test_rustscan_passes_a_host_list_file_instead_of_a_giant_argv(tmp_path: Path) -> None:
@@ -276,3 +276,47 @@ class TestTargetKnowledgeLivesInTheAdapter:
         assert adapter_class("gitleaks") is GitleaksTool
         with pytest.raises(RegistryError, match="bogus"):
             adapter_class("bogus")
+
+
+class TestPortScannersGetHostsNotUrls:
+    """naabu and rustscan scan hosts. Handing them the URL the user typed makes naabu
+    exit 1 with "no valid ipv4 or ipv6 targets were found" — a real `ports-to-vuln
+    --target https://999.md` run died on its first stage for exactly this reason.
+    """
+
+    def test_naabu_strips_the_scheme_from_a_url_target(self) -> None:
+        command = _adapter("naabu").build_cmd(ToolContext(target="https://999.md"))  # type: ignore[attr-defined]
+
+        assert command[command.index("-host") + 1] == "999.md"
+
+    def test_naabu_strips_path_and_port_too(self) -> None:
+        command = _adapter("naabu").build_cmd(ToolContext(target="https://999.md:8443/admin"))  # type: ignore[attr-defined]
+
+        assert command[command.index("-host") + 1] == "999.md"
+
+    @pytest.mark.parametrize("target", ["999.md", "192.0.2.10", "sub.example.com"])
+    def test_a_bare_host_is_passed_through(self, target: str) -> None:
+        command = _adapter("naabu").build_cmd(ToolContext(target=target))  # type: ignore[attr-defined]
+
+        assert command[command.index("-host") + 1] == target
+
+    def test_naabu_normalises_upstream_urls_before_the_list_file(self) -> None:
+        """Fed httpx's live hosts (URLs), the -iL file must still hold bare hosts."""
+        adapter = _adapter("naabu")
+
+        assert adapter.prepare_inputs(  # type: ignore[attr-defined]
+            ["https://a.example.com/", "http://b.example.com:8080/x", "c.example.com"]
+        ) == ["a.example.com", "b.example.com", "c.example.com"]
+
+    def test_rustscan_uses_the_same_normalisation(self) -> None:
+        from cyberfw.tools.targets import hostname_of
+
+        assert hostname_of("https://utm.md/path") == "utm.md"
+        assert _adapter("rustscan").prepare_inputs(["https://utm.md/path"]) == ["utm.md"]  # type: ignore[attr-defined]
+
+    def test_an_unparseable_target_is_left_alone(self) -> None:
+        """Better to let the tool reject it with its own message than to mangle it."""
+        from cyberfw.tools.targets import hostname_of
+
+        assert hostname_of("") == ""
+        assert hostname_of("not a url at all") == "not a url at all"

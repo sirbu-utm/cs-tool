@@ -47,6 +47,12 @@
   файла) логируется как `not verified` вместо молчаливого успеха.
 
 ### Fixed
+- naabu получал URL целиком (`-host https://999.md`) и падал с `no valid ipv4
+  or ipv6 targets were found`; теперь и seed, и цели предыдущего этапа
+  приводятся к имени хоста — общий `cyberfw/tools/targets.hostname_of`,
+  которым пользуется и rustscan.
+- Этап, чей источник упал, больше не подставляет seed вместо результатов
+  этого источника (httpx сканировал сам seed и рапортовал успех).
 - `Settings.max_archive_size` не доходил до установщика (читался приватный
   `CYBERFW_MAX_ARCHIVE`).
 - `UnicodeEncodeError` при перенаправлении вывода на Windows (`status > out.txt`,

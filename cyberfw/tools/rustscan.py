@@ -8,11 +8,11 @@ Nmap as a separate, explicitly configured stage.
 from __future__ import annotations
 
 import re
-from urllib.parse import urlsplit
 
 from cyberfw.exceptions import ParseError, ToolNotFoundError
 from cyberfw.pipeline.schemas import RustscanResult
 from cyberfw.tools.base import BaseTool, ToolContext
+from cyberfw.tools.targets import hostname_of
 
 
 class RustscanTool(BaseTool):
@@ -34,7 +34,7 @@ class RustscanTool(BaseTool):
         return "--addresses"
 
     def prepare_inputs(self, inputs: list[str]) -> list[str]:
-        return [_hostname(host) for host in inputs]
+        return [hostname_of(host) for host in inputs]
 
     def build_cmd(self, ctx: ToolContext) -> list[str]:
         if ctx.input_file is not None:
@@ -43,7 +43,7 @@ class RustscanTool(BaseTool):
             hosts = ctx.inputs if ctx.inputs else ([ctx.target] if ctx.target else [])
             if not hosts:
                 raise ToolNotFoundError("RustScan needs at least one target (host or IP).")
-            addresses = ",".join(_hostname(host) for host in hosts)
+            addresses = ",".join(hostname_of(host) for host in hosts)
         return [
             str(self.binary),
             "--addresses",
@@ -69,14 +69,3 @@ class RustscanTool(BaseTool):
             target=host,
             kind="scan",
         )
-
-
-def _hostname(target: str) -> str:
-    """Accept a URL or ``host:port`` in the UI while passing RustScan only a host name.
-
-    ``urlsplit`` only recognises a netloc after ``//``; a scheme-less
-    ``192.0.2.10:8080`` (naabu's ``target`` shape) would otherwise parse as
-    ``scheme="192.0.2.10"`` and come back unchanged, port included.
-    """
-    parsed = urlsplit(target if "://" in target else f"//{target}")
-    return parsed.hostname or target
