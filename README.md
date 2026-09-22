@@ -29,12 +29,29 @@ Launcher автоматически:
 3. скачивает отсутствующие инструменты под текущую ОС и архитектуру;
 4. открывает интерактивное меню.
 
-После установки окружения доступны команды `cstool`, `cs-tool` и `cyberfw`.
-Основное короткое имя проекта — `cstool`.
+### Как вызывать команды
 
-В Windows `cmd.exe` команда `cstool` из корня репозитория автоматически находит
-`cstool.bat`. В PowerShell используй `./cstool.bat`, либо добавь корень
-репозитория в `PATH`, чтобы команда `cstool` была доступна из любой папки.
+`uv sync` ставит команды `cstool`, `cs-tool` и `cyberfw` **внутрь окружения
+проекта** (`.venv\Scripts` / `.venv/bin`). Само по себе это не кладёт их в
+`PATH`, поэтому просто `cyberfw status` в новой сессии PowerShell даёт
+«имя не распознано». Рабочие способы:
+
+| Откуда | Windows | Linux / macOS |
+|---|---|---|
+| Из корня репозитория | `.\cstool.bat status` | `./cstool status` |
+| Из корня репозитория | `uv run cyberfw status` | `uv run cyberfw status` |
+| Из любого каталога | `uv tool install .`, затем `cyberfw status` | то же |
+
+Launcher (`cstool.bat` / `cstool`) передаёт аргументы дальше без изменений,
+поэтому `.\cstool.bat status` — это тот же `cyberfw status`, но с
+автоматической подготовкой окружения.
+
+После `uv tool install .` uv сам предупредит, если его каталог с командами не
+в `PATH`; добавить туда — `uv tool update-shell` (новая сессия терминала).
+
+Голое `cstool` без `.\` в `cmd.exe` работает только там, где cmd ищет команды
+в текущем каталоге; при `NoDefaultCurrentDirectoryInExePath=1` (частая
+настройка безопасности) не находит. `.\cstool.bat` работает всегда.
 
 ### Установка как пакета
 
@@ -205,22 +222,27 @@ Linux/macOS) передают аргументы командному режим
 (2xx зелёный, 3xx голубой, 4xx жёлтый, 5xx красный).
 
 ```text
-                  pipeline recon-to-vuln · example.com
+                   pipeline recon-to-vuln · example.com
 
-  #   tool        stage        status    records   targets   time    note
- ────────────────────────────────────────────────────────────────────────
-  1   subfinder   subdomains   ok              3             1.2s
-  2   httpx       live_http    ok              3             1.3s
-  3   nuclei      vulns        running         1             4.7s
-  4   gowitness   screenshots  pending
+ tool         stage        status    records    time   note
+ ─────────────────────────────────────────────────────────────────────────
+ subfinder    subdomains   ok              2     0.9s
+ httpx        live_http    ok              1     0.7s
+ nuclei       vulns        running         1     3.1s
+ gowitness    screenshots  pending
 
-                            Latest findings
+                             Latest findings
 
- tool     kind   target                   detail
- ────────────────────────────────────────────────────────────────────────
- httpx    http   https://a.example.com/   Home
- nuclei   vuln   https://a.example.com/   critical
+ tool        kind   target                   detail
+ ─────────────────────────────────────────────────────────────────────────
+ subfinder   host   a.example.com            crtsh
+ httpx       http   https://a.example.com/   Home
+ nuclei      vuln   https://a.example.com/   critical
 ```
+
+Колонки появляются по надобности: `targets` (сколько целей из скольких
+обработано) — когда в прогоне есть fan-out-этап, `note` — когда есть что
+сказать о падении или пропуске.
 
 По завершении последний кадр остаётся на экране, а под ним печатается сводка:
 статус, число записей, длительность, записи по инструментам, идентификатор
@@ -312,8 +334,8 @@ HTML): имя pipeline, seed-цель, сессия, платформа (`window
 }
 ```
 
-Для отдельного `cyberfw run` архивация не включена по умолчанию — см. флаг
-`--save` выше.
+Одиночный `cyberfw run` пишет те же два отчёта и JSONL-записи — если ответить
+«да» на вопрос о сохранении (или передать `--save`).
 
 Диагностические логи находятся в `logs/`. Эти каталоги и скачанные бинарники
 игнорируются Git и не должны добавляться в коммит.
@@ -450,6 +472,11 @@ uv run pytest --cov=cyberfw --cov-fail-under=80
 uv run ruff check .
 uv run mypy cyberfw
 ```
+
+Если `uv run pytest` (или `uv run mypy`) вдруг отвечает `uv trampoline failed
+to canonicalize script path`, окружение устарело — так бывает после
+переименования или копирования каталога проекта. Лечится пересозданием:
+`rm -rf .venv && uv sync --all-extras`.
 
 Быстрый набор не скачивает инструменты и использует фиктивные бинарники, поэтому
 он детерминированный и подходит для CI. CI (`.github/workflows/ci.yml`) гоняет
