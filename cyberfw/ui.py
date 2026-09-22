@@ -10,9 +10,14 @@ literal ``ESC`` control byte does not survive a plain-text paste.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
+
 from rich import box
-from rich.console import Group, RenderableType
+from rich.color import Color
+from rich.console import Console, ConsoleOptions, Group, RenderableType, RenderResult
 from rich.panel import Panel
+from rich.segment import Segment
+from rich.style import Style
 from rich.text import Text
 
 from cyberfw import __version__
@@ -102,25 +107,89 @@ def tool_guide(name: str) -> Panel:
     )
 
 
-def banner(tool_count: int | None = None) -> RenderableType:
-    """Return the classic OSINT-tool startup banner: wordmarks + status line."""
-    byline = Text.assemble(
-        ("  Integrated Cybersecurity Framework", "tool"),
-        (f"  ·  v{__version__}", "muted"),
-    )
+#: One square per registered tool in the banner's status strip.
+PIP = "▰"
 
-    status = "  workspace ready"
-    if tool_count is not None:
-        noun = "tool" if tool_count == 1 else "tools"
-        status += f"  ·  {tool_count} {noun} registered"
+#: The character the gradient rule is drawn with.
+RULE_CHAR = "━"
 
+#: Ends of the rule's gradient, and the widest it is ever drawn (the wordmark's width).
+_RULE_FROM = (0x2E, 0xD5, 0x73)  # green
+_RULE_TO = (0x2E, 0xC5, 0xD5)  # cyan
+_RULE_MAX_WIDTH = 78
+
+#: A pip's colour answers "can this tool run"; anything unrecognised reads as
+#: unavailable rather than being dressed up as ready.
+_PIP_STYLES = {"ready": "ok", "blocked": "err"}
+_PIP_UNAVAILABLE = "muted"
+
+
+def pip_style(state: str) -> str:
+    """Theme style for one tool state (``ready`` / ``blocked`` / anything else)."""
+    return _PIP_STYLES.get(state, _PIP_UNAVAILABLE)
+
+
+class GradientRule:
+    """A horizontal rule whose colour slides from one end to the other.
+
+    Written as a renderable rather than a pre-coloured string so it follows the
+    terminal's width, and so a console without colour still gets the line.
+    """
+
+    def __init__(self, start: tuple[int, int, int], end: tuple[int, int, int]) -> None:
+        self.start = start
+        self.end = end
+
+    def __rich_console__(self, console: Console, options: ConsoleOptions) -> RenderResult:
+        width = max(1, min(options.max_width, _RULE_MAX_WIDTH))
+        last = max(width - 1, 1)
+        for index in range(width):
+            ratio = index / last
+            colour = Color.from_rgb(
+                *(begin + (finish - begin) * ratio for begin, finish in zip(self.start, self.end, strict=True))
+            )
+            yield Segment(RULE_CHAR, Style(color=colour))
+        yield Segment("\n")
+
+
+def gradient_rule() -> GradientRule:
+    """The banner's rule, in the framework's green-to-cyan palette."""
+    return GradientRule(_RULE_FROM, _RULE_TO)
+
+
+def _status_strip(states: Sequence[str] | None, platform: str | None) -> Panel:
+    """The HUD under the wordmark: one pip per tool, then how many can run."""
+    parts: list[Text] = []
+    if states:
+        pips = Text()
+        for state in states:
+            pips.append(PIP, style=pip_style(state))
+        ready = sum(1 for state in states if state == "ready")
+        overall = "ok" if ready == len(states) else ("warn" if ready else "err")
+        parts += [pips, Text(f"{ready}/{len(states)} ready", style=overall)]
+    if platform:
+        parts.append(Text(platform, style="muted"))
+    parts.append(Text(f"v{__version__}", style="muted"))
+
+    line = Text("   ", style="muted").join(parts)
+    return Panel(line, border_style="accent", box=box.ROUNDED, padding=(0, 2), expand=False)
+
+
+def banner(states: Sequence[str] | None = None, platform: str | None = None) -> RenderableType:
+    """The startup banner: wordmarks, a gradient rule and the status strip.
+
+    ``states`` is one ``ready`` / ``blocked`` / ``not installed`` per registered
+    tool — the same states the inventory table shows — so the strip answers
+    "is this thing ready to run" without a separate command.
+    """
     return Group(
         Text.from_ansi(CS_TOOL_LOGO),
-        byline,
+        Text(""),
+        gradient_rule(),
+        _status_strip(states, platform),
         Text(""),
         Text.from_ansi(UNIV_LOGO),
         Text(""),
-        Text(status, style="accent"),
     )
 
 

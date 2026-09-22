@@ -171,14 +171,89 @@ class TestHelpAndUnknown:
         }
         assert "gitleaks" in str(tool_guide("gitleaks").title)
 
-    def test_banner_shows_wordmark_and_tool_count(self) -> None:
+
+class TestBanner:
+    """The startup banner: wordmarks, a gradient rule and a status strip whose pips
+    show, at a glance, how much of the toolbox is actually usable."""
+
+    @staticmethod
+    def _render(**kwargs: object) -> str:
         output = Console(theme=THEME, record=True, width=100)
-        output.print(banner(tool_count=8))
-        rendered = output.export_text()
+        output.print(banner(**kwargs))  # type: ignore[arg-type]
+        return output.export_text()
+
+    def test_the_wordmarks_are_kept(self) -> None:
+        rendered = self._render(states=["ready"] * 8, platform="windows/amd64")
+
         # the block-art wordmark itself, not literal "CS-TOOL" text
         assert "▄▄▄▄▄▄▄▄▄" in rendered
-        assert "Integrated Cybersecurity Framework" in rendered
-        assert "8 tools registered" in rendered
+
+    def test_the_byline_is_gone(self) -> None:
+        rendered = self._render(states=["ready"] * 8, platform="windows/amd64")
+
+        assert "Integrated Cybersecurity Framework" not in rendered
+        assert "workspace ready" not in rendered
+
+    def test_one_pip_per_tool(self) -> None:
+        from cyberfw.ui import PIP
+
+        rendered = self._render(states=["ready"] * 8, platform="windows/amd64")
+
+        assert rendered.count(PIP) == 8
+        assert "8/8 ready" in rendered
+
+    def test_only_the_runnable_tools_are_counted(self) -> None:
+        from cyberfw.ui import PIP
+
+        states = ["ready", "ready", "blocked", "not installed", "ready"]
+        rendered = self._render(states=states, platform="linux/arm64")
+
+        assert rendered.count(PIP) == 5
+        assert "3/5 ready" in rendered
+
+    def test_platform_and_version_are_shown(self) -> None:
+        from cyberfw import __version__
+
+        rendered = self._render(states=["ready"], platform="darwin/arm64")
+
+        assert "darwin/arm64" in rendered
+        assert f"v{__version__}" in rendered
+
+    def test_a_gradient_rule_separates_the_wordmark(self) -> None:
+        from cyberfw.ui import RULE_CHAR
+
+        rendered = self._render(states=["ready"], platform="windows/amd64")
+
+        assert RULE_CHAR * 20 in rendered, "a continuous rule, not a dotted one"
+
+    def test_it_renders_without_an_inventory(self) -> None:
+        """`banner()` is also printed before the registry is known."""
+        from cyberfw import __version__
+        from cyberfw.ui import PIP
+
+        rendered = self._render()
+
+        assert "▄▄▄▄▄▄▄▄▄" in rendered
+        assert f"v{__version__}" in rendered
+        assert PIP not in rendered, "no inventory, no pips"
+
+    def test_each_state_gets_its_own_colour(self) -> None:
+        from cyberfw.ui import pip_style
+
+        assert pip_style("ready") != pip_style("blocked") != pip_style("not installed")
+        assert pip_style("who knows") == pip_style("not installed"), "unknown reads as unavailable"
+
+    def test_the_rule_is_a_gradient_not_one_flat_colour(self) -> None:
+        from cyberfw.ui import gradient_rule
+
+        console = Console(theme=THEME, width=60, color_system="truecolor")
+        colours = {
+            segment.style.color.triplet
+            for segment in console.render(gradient_rule())
+            if segment.style is not None and segment.style.color is not None
+        }
+
+        assert len(colours) > 5, "a gradient shifts along the line"
 
 
 class TestPromptChoice:

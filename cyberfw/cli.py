@@ -387,12 +387,15 @@ def _toggle_setting(action: str, settings: Settings) -> None:
 def interactive_menu() -> None:
     """Run the keyboard-driven launcher used by ``cs-tool`` without arguments."""
     _ensure_tools()
-    _, manager = _bootstrap()
+    settings, manager = _bootstrap()
     try:
-        tool_count = len(manager.registry.names())
+        states = [
+            _tool_state(manager, name, settings.tools_dir) for name in manager.registry.names()
+        ]
+        platform = f"{manager.mapping.os_name}/{manager.mapping.arch}"
     finally:
         manager.close()
-    console.print(banner(tool_count))
+    console.print(banner(states, platform))
     while True:
         # Settings-adjust cycle: the launcher panel is a Live region, so the
         # p/l/f toggles redraw it in place instead of re-printing the whole
@@ -661,18 +664,13 @@ def status_cmd() -> None:
 
     settings, manager = _bootstrap()
     try:
-        console.print(banner(len(manager.registry.names())))
         tools, states = _inventory_table(manager, settings.tools_dir)
+        platform = f"{manager.mapping.os_name}/{manager.mapping.arch}"
+        console.print(banner(states, platform))
+        # The banner already carries the readiness and the platform; what it
+        # cannot show is where the binaries are looked for.
         console.print(
-            Text.assemble(
-                ("platform  ", "muted"),
-                (f"{manager.mapping.os_name}/{manager.mapping.arch}", "white"),
-                ("   ", ""),
-                _readiness(states),
-                ("   ", ""),
-                ("tools dir  ", "muted"),
-                (str(settings.tools_dir), "white"),
-            )
+            Text.assemble(("tools dir  ", "muted"), (str(settings.tools_dir), "white"))
         )
         console.print(tools)
 
