@@ -45,6 +45,13 @@ def _write_fake_binaries(tools_dir: Path) -> None:
         binary.chmod(binary.stat().st_mode | stat.S_IEXEC)
 
 
+def _break_tool(root: Path, tool: str, exit_code: int = 7) -> None:
+    """Replace a workspace binary with one that exits non-zero."""
+    binary = root / "tools_bin" / tool
+    binary.write_text(f"#!/usr/bin/env bash\nexit {exit_code}\n", encoding="utf-8")
+    binary.chmod(binary.stat().st_mode | stat.S_IEXEC)
+
+
 def _write_registry(root: Path) -> None:
     lines = [
         f"{name}:\n  repo: org/{name}\n  asset_patterns: []\n  binary: {name}\n"
@@ -792,6 +799,30 @@ class TestRunSummary:
 
         assert "failed" in result.stdout
         assert "success" not in result.stdout
+
+    def test_summary_names_the_stage_that_failed(self, tmp_path: Path) -> None:
+        """"failed" alone makes the user scroll back through a long run to find out
+        which stage it was; the panel is the last thing on screen, so it must say."""
+        _break_tool(tmp_path, "httpx")
+
+        result = runner.invoke(app, ["pipeline", "recon-to-vuln", "-t", "example.com", "--no-report"])
+
+        assert "live_http" in result.stdout.split("failed")[-1], "the failed stage is named in the panel"
+
+    def test_summary_separates_skipped_stages_from_failed_ones(self, tmp_path: Path) -> None:
+        _break_tool(tmp_path, "httpx")
+
+        result = runner.invoke(app, ["pipeline", "recon-to-vuln", "-t", "example.com", "--no-report"])
+
+        tail = result.stdout[result.stdout.rindex("elapsed") :]
+        assert "failed" in tail and "live_http" in tail
+        assert "skipped" in tail and "vulns" in tail
+
+    def test_a_clean_run_says_nothing_about_failures(self) -> None:
+        result = runner.invoke(app, ["pipeline", "recon-to-vuln", "-t", "example.com", "--no-report"])
+
+        tail = result.stdout[result.stdout.rindex("elapsed") :]
+        assert "failed" not in tail and "skipped" not in tail
 
     def test_duration_is_reported(self) -> None:
         result = runner.invoke(app, ["pipeline", "recon-to-vuln", "-t", "example.com", "--no-report"])

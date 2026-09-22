@@ -154,6 +154,29 @@ class TestStageTable:
         assert "skipped" in text
         assert "failed" not in text
 
+    def test_a_long_note_does_not_squeeze_the_other_columns(self) -> None:
+        """The skip reason is a sentence; letting it take the width turns the tool
+        column into "nucl…" — the one thing the row is identified by."""
+        view = PipelineLiveView([_node("nuclei", "vulns")])
+        view.on_stage(
+            StageEvent(
+                kind="done",
+                stage="vulns",
+                tool="nuclei",
+                result=NodeResult(
+                    node=_node("nuclei", "vulns"),
+                    ok=False,
+                    skipped=True,
+                    error="skipped: stage 'live_http' failed, so it produced no targets",
+                ),
+            )
+        )
+
+        text = _render(view, width=100)
+
+        assert "nuclei" in text and "vulns" in text
+        assert "skipped" in text
+
     def test_a_stage_not_in_the_plan_is_added_on_the_fly(self) -> None:
         """`run <tool>` drives a single node the view was not constructed with."""
         view = PipelineLiveView([])

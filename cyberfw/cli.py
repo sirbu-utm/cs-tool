@@ -185,8 +185,18 @@ def _run_summary(
             (f"elapsed {result.duration_s:.1f}s" if result.duration_s is not None else "elapsed n/a", "white"),
         ),
         Text.from_markup(totals or "[muted]no records[/muted]"),
-        Text.assemble(("session  ", "muted"), (session_id, "white")),
     ]
+    # Name the stages that did not deliver: the panel is the last thing on
+    # screen, and scrolling back through a long run to find out which one it
+    # was is exactly what the summary exists to save.
+    for label, style, entries in (
+        ("failed ", "err", [n for n in result.nodes if not n.ok and not n.skipped]),
+        ("skipped", "warn", [n for n in result.nodes if n.skipped]),
+    ):
+        if entries:
+            named = ", ".join(f"{n.node.stage} ({n.node.tool})" for n in entries)
+            lines.append(Text.assemble((f"{label}  ", style), (named, "white")))
+    lines.append(Text.assemble(("session  ", "muted"), (session_id, "white")))
     lines += [Text.assemble((f"{label:<8} ", "muted"), (str(path), "white")) for label, path in reports]
     return Panel(
         Group(*lines),

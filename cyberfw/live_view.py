@@ -131,6 +131,13 @@ class PipelineLiveView:
 
     def _stage_table(self) -> Table:
         now = self._clock()
+        stages = list(self._stages.values())
+        # Only the columns that carry something: eight columns do not fit an
+        # 80-100 column terminal, and the first to be squeezed are the ones that
+        # identify the row ("nucl…"). "targets" is meaningful only for a fan-out
+        # stage, and "note" only once something went wrong.
+        with_targets = any(stage.total > 1 for stage in stages)
+        with_note = any(stage.note for stage in stages)
         # Not expanded: the stage table is narrow, and stretching it to the
         # terminal width scatters "records/targets/time" across the screen.
         table = Table(
@@ -139,26 +146,32 @@ class PipelineLiveView:
             box=box.SIMPLE_HEAD,
             pad_edge=False,
         )
-        table.add_column("#", style="muted", justify="right", width=2)
-        table.add_column("tool", style="tool", no_wrap=True)
-        table.add_column("stage", no_wrap=True)
-        table.add_column("status", no_wrap=True)
-        table.add_column("records", justify="right", no_wrap=True)
-        table.add_column("targets", justify="right", no_wrap=True)
-        table.add_column("time", justify="right", no_wrap=True)
-        table.add_column("note", style="err", overflow="ellipsis", no_wrap=True)
-        for index, stage in enumerate(self._stages.values(), start=1):
+        # min_width on the identifying columns and a cap on the free-text note:
+        # without both, a one-sentence note claims the width and Rich shrinks
+        # the tool and stage names to "nucl…" / "vul…".
+        table.add_column("tool", style="tool", no_wrap=True, min_width=10)
+        table.add_column("stage", no_wrap=True, min_width=10)
+        table.add_column("status", no_wrap=True, min_width=7)
+        table.add_column("records", justify="right", no_wrap=True, min_width=7)
+        if with_targets:
+            table.add_column("targets", justify="right", no_wrap=True, min_width=7)
+        table.add_column("time", justify="right", no_wrap=True, min_width=5)
+        if with_note:
+            table.add_column("note", style="err", overflow="ellipsis", no_wrap=True, max_width=40)
+        for stage in stages:
             elapsed = stage.elapsed(now)
-            table.add_row(
-                str(index),
+            row: list[str | Text] = [
                 stage.tool,
                 stage.stage,
                 Text(stage.status, style=_STATUS_STYLES[stage.status]),
                 str(stage.count) if stage.count or stage.status != "pending" else "",
-                f"{stage.done}/{stage.total}" if stage.total > 1 else "",
-                "" if elapsed is None else f"{elapsed:.1f}s",
-                stage.note,
-            )
+            ]
+            if with_targets:
+                row.append(f"{stage.done}/{stage.total}" if stage.total > 1 else "")
+            row.append("" if elapsed is None else f"{elapsed:.1f}s")
+            if with_note:
+                row.append(stage.note)
+            table.add_row(*row)
         return table
 
     def _tail_table(self) -> Table:
