@@ -177,19 +177,32 @@ class TestBanner:
     show, at a glance, how much of the toolbox is actually usable."""
 
     @staticmethod
-    def _render(**kwargs: object) -> str:
+    def _render(states: list[str], platform: str = "windows/amd64") -> str:
         output = Console(theme=THEME, record=True, width=100)
-        output.print(banner(**kwargs))  # type: ignore[arg-type]
+        output.print(banner(states, platform))
         return output.export_text()
 
-    def test_the_wordmarks_are_kept(self) -> None:
-        rendered = self._render(states=["ready"] * 8, platform="windows/amd64")
+    @staticmethod
+    def _segments(renderable: object) -> list:
+        """Rendered segments, styles resolved through the theme (what the terminal gets)."""
+        console = Console(theme=THEME, width=100, color_system="truecolor")
+        return list(console.render(renderable))  # type: ignore[arg-type]
 
-        # the block-art wordmark itself, not literal "CS-TOOL" text
-        assert "▄▄▄▄▄▄▄▄▄" in rendered
+    @pytest.mark.parametrize("logo_name", ["CS_TOOL_LOGO", "UNIV_LOGO"])
+    def test_each_wordmark_is_kept(self, logo_name: str) -> None:
+        """Checked per logo: a substring both logos share would pass with either missing."""
+        from rich.text import Text
+
+        import cyberfw.ui as ui
+
+        rendered = self._render(["ready"] * 8)
+        own_lines = [line for line in Text.from_ansi(getattr(ui, logo_name)).plain.splitlines() if line.strip()]
+
+        assert own_lines
+        assert all(line.rstrip() in rendered for line in own_lines)
 
     def test_the_byline_is_gone(self) -> None:
-        rendered = self._render(states=["ready"] * 8, platform="windows/amd64")
+        rendered = self._render(["ready"] * 8)
 
         assert "Integrated Cybersecurity Framework" not in rendered
         assert "workspace ready" not in rendered
@@ -197,7 +210,7 @@ class TestBanner:
     def test_one_pip_per_tool(self) -> None:
         from cyberfw.ui import PIP
 
-        rendered = self._render(states=["ready"] * 8, platform="windows/amd64")
+        rendered = self._render(["ready"] * 8)
 
         assert rendered.count(PIP) == 8
         assert "8/8 ready" in rendered
@@ -205,8 +218,7 @@ class TestBanner:
     def test_only_the_runnable_tools_are_counted(self) -> None:
         from cyberfw.ui import PIP
 
-        states = ["ready", "ready", "blocked", "not installed", "ready"]
-        rendered = self._render(states=states, platform="linux/arm64")
+        rendered = self._render(["ready", "ready", "blocked", "not installed", "ready"], "linux/arm64")
 
         assert rendered.count(PIP) == 5
         assert "3/5 ready" in rendered
@@ -214,7 +226,7 @@ class TestBanner:
     def test_platform_and_version_are_shown(self) -> None:
         from cyberfw import __version__
 
-        rendered = self._render(states=["ready"], platform="darwin/arm64")
+        rendered = self._render(["ready"], "darwin/arm64")
 
         assert "darwin/arm64" in rendered
         assert f"v{__version__}" in rendered
@@ -222,26 +234,56 @@ class TestBanner:
     def test_a_gradient_rule_separates_the_wordmark(self) -> None:
         from cyberfw.ui import RULE_CHAR
 
-        rendered = self._render(states=["ready"], platform="windows/amd64")
+        rendered = self._render(["ready"])
 
         assert RULE_CHAR * 20 in rendered, "a continuous rule, not a dotted one"
 
-    def test_it_renders_without_an_inventory(self) -> None:
-        """`banner()` is also printed before the registry is known."""
-        from cyberfw import __version__
-        from cyberfw.ui import PIP
+    def test_an_empty_registry_reads_0_of_0(self) -> None:
+        """An empty registry is a state worth showing, not the absence of one."""
+        rendered = self._render([])
 
-        rendered = self._render()
-
-        assert "▄▄▄▄▄▄▄▄▄" in rendered
-        assert f"v{__version__}" in rendered
-        assert PIP not in rendered, "no inventory, no pips"
+        assert "0/0 ready" in rendered
 
     def test_each_state_gets_its_own_colour(self) -> None:
-        from cyberfw.ui import pip_style
+        """Compared as a set: a chained != never compares the first and the last."""
+        from cyberfw.ui import state_style
 
-        assert pip_style("ready") != pip_style("blocked") != pip_style("not installed")
-        assert pip_style("who knows") == pip_style("not installed"), "unknown reads as unavailable"
+        assert len({state_style(s) for s in ("ready", "blocked", "not installed")}) == 3
+        assert state_style("who knows") != state_style("ready"), "unknown must not pass for ready"
+
+    def test_pips_keep_their_own_colour(self) -> None:
+        """The separator's muted style used to become the whole strip's base style,
+        so every pip and the counter came out dim."""
+        from cyberfw.ui import PIP
+
+        segments = self._segments(banner(["ready", "blocked", "not installed"], "windows/amd64"))
+        pips = [seg for seg in segments if seg.text == PIP or PIP in seg.text]
+
+        assert pips, "the pips were rendered"
+        assert not any(seg.style and seg.style.dim for seg in pips)
+
+    def test_pips_and_the_inventory_table_share_one_style_map(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """One state, one colour: change the map and both views follow."""
+        import cyberfw.ui as ui
+        from cyberfw.cli import _inventory_table
+        from cyberfw.config import Settings
+        from cyberfw.manager import ToolManager, load_registry
+
+        monkeypatch.setitem(ui.STATE_STYLES, "ready", "magenta")
+        settings = Settings(root_dir=tmp_path)
+        manager = ToolManager(settings, load_registry(tmp_path / "registry.yaml"))
+        try:
+            table, states = _inventory_table(manager, settings.tools_dir)
+        finally:
+            manager.close()
+        state_column = next(column for column in table.columns if column.header == "state")
+        cell_styles = {str(cell.style) for cell in state_column._cells}
+
+        assert set(states) == {"ready"}
+        assert cell_styles == {"magenta"}
+        assert ui.state_style("ready") == "magenta"
 
     def test_the_rule_is_a_gradient_not_one_flat_colour(self) -> None:
         from cyberfw.ui import gradient_rule

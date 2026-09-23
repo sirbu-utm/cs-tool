@@ -55,7 +55,7 @@ from cyberfw.report.run_info import RunInfo
 from cyberfw.resources import packaged_data
 from cyberfw.tools import adapter_class
 from cyberfw.tools.base import ToolContext
-from cyberfw.ui import banner, record_detail, record_style, tool_guide
+from cyberfw.ui import banner, readiness, record_detail, record_style, state_style, tool_guide
 
 LOG = get_logger("cli")
 
@@ -297,11 +297,6 @@ def _session_tag(kind: str, name: str) -> str:
     return f"{kind}-{name}-{strftime('%Y%m%d-%H%M%S')}"
 
 
-#: How each inventory state reads. ``blocked`` means the file is on disk but
-#: cannot be read or run — an antivirus quarantine, not a missing download.
-_STATE_STYLES = {"ready": "ok", "blocked": "err", "not installed": "warn"}
-
-
 def _tool_state(manager: ToolManager, name: str, tools_dir: Path) -> str:
     """``ready`` / ``blocked`` / ``not installed`` for one registered tool.
 
@@ -320,13 +315,6 @@ def _tool_state(manager: ToolManager, name: str, tools_dir: Path) -> str:
 
 def _tool_version(manager: ToolManager, name: str) -> str:
     return str((manager.install_state(name) or {}).get("version", ""))
-
-
-def _readiness(states: list[str]) -> Text:
-    """``3/8 ready`` — the one number that answers "can I run a pipeline?"."""
-    ready = sum(1 for state in states if state == "ready")
-    style = "ok" if ready == len(states) else ("warn" if ready else "err")
-    return Text.assemble((f"{ready}/{len(states)} ready", style))
 
 
 def _inventory_table(manager: ToolManager, tools_dir: Path, *, numbered: bool = False) -> tuple[Table, list[str]]:
@@ -349,7 +337,7 @@ def _inventory_table(manager: ToolManager, tools_dir: Path, *, numbered: bool = 
         row: list[str | Text] = [
             name,
             _tool_version(manager, name) or "—",
-            Text(state, style=_STATE_STYLES[state]),
+            Text(state, style=state_style(state)),
             manager.spec(name).repo,
         ]
         table.add_row(*([str(index), *row] if numbered else row))
@@ -496,7 +484,7 @@ def _launcher_view(manager: ToolManager, settings: Settings) -> Table:
     content, states = _inventory_table(manager, settings.tools_dir, numbered=True)
     sidebar.add_row("")
     sidebar.add_row(Text("STATUS", style="accent"))
-    sidebar.add_row(Text.assemble(("  ", ""), _readiness(states)))
+    sidebar.add_row(Text.assemble(("  ", ""), readiness(states)))
 
     table.add_row(Panel(sidebar, border_style="accent", padding=(1, 1), box=box.ROUNDED), content)
     return table

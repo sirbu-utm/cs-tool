@@ -118,15 +118,34 @@ _RULE_FROM = (0x2E, 0xD5, 0x73)  # green
 _RULE_TO = (0x2E, 0xC5, 0xD5)  # cyan
 _RULE_MAX_WIDTH = 78
 
-#: A pip's colour answers "can this tool run"; anything unrecognised reads as
-#: unavailable rather than being dressed up as ready.
-_PIP_STYLES = {"ready": "ok", "blocked": "err"}
-_PIP_UNAVAILABLE = "muted"
+#: How each tool state reads — the one map the banner's pips, the inventory
+#: table and the launcher all use. ``blocked`` means the file is on disk but
+#: cannot be read or run (an antivirus quarantine, not a missing download).
+STATE_STYLES: dict[str, str] = {"ready": "ok", "blocked": "err", "not installed": "warn"}
+
+#: An unrecognised state must not pass for ready.
+_UNKNOWN_STATE_STYLE = "warn"
 
 
-def pip_style(state: str) -> str:
-    """Theme style for one tool state (``ready`` / ``blocked`` / anything else)."""
-    return _PIP_STYLES.get(state, _PIP_UNAVAILABLE)
+def state_style(state: str) -> str:
+    """Theme style for one tool state (``ready`` / ``blocked`` / ``not installed``)."""
+    return STATE_STYLES.get(state, _UNKNOWN_STATE_STYLE)
+
+
+def readiness(states: Sequence[str]) -> Text:
+    """``3/8 ready`` — the one number that answers "can I run a pipeline?".
+
+    Green when everything can run, yellow when some can, red when none can —
+    including an empty registry, where there is nothing to run at all.
+    """
+    ready = sum(1 for state in states if state == "ready")
+    if states and ready == len(states):
+        style = "ok"
+    elif ready:
+        style = "warn"
+    else:
+        style = "err"
+    return Text(f"{ready}/{len(states)} ready", style=style)
 
 
 class GradientRule:
@@ -157,25 +176,19 @@ def gradient_rule() -> GradientRule:
     return GradientRule(_RULE_FROM, _RULE_TO)
 
 
-def _status_strip(states: Sequence[str] | None, platform: str | None) -> Panel:
+def _status_strip(states: Sequence[str], platform: str) -> Panel:
     """The HUD under the wordmark: one pip per tool, then how many can run."""
-    parts: list[Text] = []
-    if states:
-        pips = Text()
-        for state in states:
-            pips.append(PIP, style=pip_style(state))
-        ready = sum(1 for state in states if state == "ready")
-        overall = "ok" if ready == len(states) else ("warn" if ready else "err")
-        parts += [pips, Text(f"{ready}/{len(states)} ready", style=overall)]
-    if platform:
-        parts.append(Text(platform, style="muted"))
-    parts.append(Text(f"v{__version__}", style="muted"))
-
-    line = Text("   ", style="muted").join(parts)
+    pips = Text()
+    for state in states:
+        pips.append(PIP, style=state_style(state))
+    parts = [pips, readiness(states), Text(platform, style="muted"), Text(f"v{__version__}", style="muted")]
+    # An unstyled separator: Text.join takes the joiner as the base style of the
+    # result, so a styled one would tint every pip and the counter with it.
+    line = Text("   ").join(part for part in parts if part.plain)
     return Panel(line, border_style="accent", box=box.ROUNDED, padding=(0, 2), expand=False)
 
 
-def banner(states: Sequence[str] | None = None, platform: str | None = None) -> RenderableType:
+def banner(states: Sequence[str], platform: str) -> RenderableType:
     """The startup banner: wordmarks, a gradient rule and the status strip.
 
     ``states`` is one ``ready`` / ``blocked`` / ``not installed`` per registered
