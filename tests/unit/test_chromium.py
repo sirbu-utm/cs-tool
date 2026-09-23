@@ -129,6 +129,26 @@ class TestInstall:
         assert client.downloads
 
 
+class TestDebugDiagnostics:
+    def test_install_logs_resolve_and_download(self, tmp_path: Path, caplog) -> None:  # type: ignore[no-untyped-def]
+        import logging
+
+        client = _FakeClient(_manifest(), _chrome_zip())
+        inst = _installer(tmp_path, client)
+
+        logger = logging.getLogger("cyberfw.manager.chromium")
+        logger.addHandler(caplog.handler)
+        logger.setLevel(logging.DEBUG)
+        try:
+            inst.install()
+        finally:
+            logger.removeHandler(caplog.handler)
+
+        messages = " ".join(r.getMessage() for r in caplog.records)
+        assert "linux64" in messages  # resolved CfT platform
+        assert "131.0.6778.85" in messages  # resolved version
+
+
 class TestFindChromium:
     def test_returns_none_when_absent(self, tmp_path: Path) -> None:
         assert find_chromium(tmp_path / "tools_bin", Mapping("linux", "amd64")) is None

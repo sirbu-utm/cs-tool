@@ -763,6 +763,21 @@ class TestStatusCommand:
     def test_doctor_is_an_alias_for_status(self) -> None:
         assert runner.invoke(app, ["doctor"]).exit_code == 0
 
+    def test_verbose_flag_raises_log_level_to_debug(self) -> None:
+        import logging
+
+        runner.invoke(app, ["status"])
+        assert logging.getLogger("cyberfw").level == logging.INFO
+        runner.invoke(app, ["status", "--verbose"])
+        assert logging.getLogger("cyberfw").level == logging.DEBUG
+
+    def test_verbose_short_flag_is_accepted(self) -> None:
+        import logging
+
+        result = runner.invoke(app, ["status", "-v"])
+        assert result.exit_code == 0
+        assert logging.getLogger("cyberfw").level == logging.DEBUG
+
     def test_status_flags_a_present_but_unreadable_binary_as_blocked(self, tmp_path: Path) -> None:
         """A downloaded-but-unreadable binary (e.g. Defender-blocked) shows 'blocked'."""
         binary = tmp_path / "tools_bin" / "subfinder"

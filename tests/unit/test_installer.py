@@ -121,6 +121,28 @@ class TestArchiveBombs:
             installer.install(_spec(archive="tar"))
 
 
+class TestDebugDiagnostics:
+    def test_install_logs_selected_asset_and_result(self, tmp_path: Path, caplog) -> None:  # type: ignore[no-untyped-def]
+        import logging
+
+        archive = _zip_bytes({"subfinder/subfinder": b"#!/bin/sh\necho ok\n"})
+        asset = ReleaseAsset("subfinder_1.0.0_linux_amd64.zip", "http://x", len(archive))
+        release = GitHubRelease(tag="v1.0.0", assets=[asset], checksums_url=None)
+        installer = _installer(tmp_path, _FakeClient(release, archive), _spec())
+
+        logger = logging.getLogger("cyberfw.manager.installer")
+        logger.addHandler(caplog.handler)
+        logger.setLevel(logging.DEBUG)
+        try:
+            installer.install(_spec())
+        finally:
+            logger.removeHandler(caplog.handler)
+
+        messages = " ".join(r.getMessage() for r in caplog.records)
+        assert "subfinder_1.0.0_linux_amd64.zip" in messages  # the chosen asset
+        assert "1.0.0" in messages  # the resolved version / install result
+
+
 class TestInstall:
     def test_platform_asset_precedes_registry_fallback(self, tmp_path: Path) -> None:
         archive = _zip_bytes({"ffuf/ffuf": b"#!/bin/sh\necho ok\n"})

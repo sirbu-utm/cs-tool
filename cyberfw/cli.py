@@ -82,9 +82,28 @@ def app_callback(ctx: typer.Context) -> None:
 
 
 # -- shared plumbing ------------------------------------------------------------
-def _bootstrap() -> tuple[Settings, ToolManager]:
-    """Load settings + registry, ensure directories, wire logging, return manager."""
+#: ``-v/--verbose`` — raise this run's log level to DEBUG so the resolve /
+#: download / extract steps are traced. Shared by init/status/run/pipeline.
+VerboseOption = Annotated[
+    bool,
+    typer.Option(
+        "--verbose",
+        "-v",
+        help="Trace what runs under the hood at DEBUG (release resolution, downloads, extraction).",
+    ),
+]
+
+
+def _bootstrap(*, verbose: bool = False) -> tuple[Settings, ToolManager]:
+    """Load settings + registry, ensure directories, wire logging, return manager.
+
+    ``verbose`` forces this process's log level to DEBUG regardless of the
+    configured ``log_level``, so ``-v`` surfaces the install/download trace
+    without a permanent config change.
+    """
     settings = load_settings()
+    if verbose and settings.log_level != "DEBUG":
+        settings = settings.model_copy(update={"log_level": "DEBUG"})
     settings.ensure_dirs()
     setup_logging(level=settings.log_level, log_dir=settings.logs_dir, log_to_file=settings.log_to_file)
     manager = ToolManager(settings, load_registry(_registry_path()))
@@ -586,6 +605,7 @@ def init_cmd(
             help="Also download a portable Chromium for gowitness when no Chrome is found.",
         ),
     ] = True,
+    verbose: VerboseOption = False,
 ) -> None:
     """Download and install precompiled tool binaries into ``tools_bin/``.
 
@@ -595,8 +615,10 @@ def init_cmd(
     When gowitness is installed and no Chrome/Chromium is on the machine, a
     portable Chromium (Chrome for Testing) is downloaded too, so the screenshot
     stage works without a system browser. Skip it with ``--no-chromium``.
+
+    ``-v/--verbose`` traces each release resolution, download and extraction.
     """
-    settings, manager = _bootstrap()
+    settings, manager = _bootstrap(verbose=verbose)
     if token:
         settings = settings.model_copy(update={"github_token": token})
         manager = ToolManager(settings, manager.registry, manager.mapping)
@@ -709,7 +731,7 @@ def _binary_on_disk(tools_dir: Path, name: str, binary_hint: str | None) -> bool
 
 @app.command("status")
 @app.command("doctor")
-def status_cmd() -> None:
+def status_cmd(verbose: VerboseOption = False) -> None:
     """Show environment readiness: tools, external deps and effective settings.
 
     A pre-flight check so a missing binary, a Defender-blocked executable, or an
@@ -717,7 +739,7 @@ def status_cmd() -> None:
     """
     from cyberfw.tools.gowitness import _find_chrome
 
-    settings, manager = _bootstrap()
+    settings, manager = _bootstrap(verbose=verbose)
     try:
         tools, states = _inventory_table(manager, settings.tools_dir)
         console.print(banner(states, manager.mapping.label))
@@ -780,13 +802,14 @@ def run_cmd(
             "Omit both to be asked once the results are on screen.",
         ),
     ] = None,
+    verbose: VerboseOption = False,
 ) -> None:
     """Run a single registered tool and print its records to the screen."""
     if target is None and list_file is None:
         console.print("[err]Provide a target via --target and/or a host list via --list.[/err]")
         raise typer.Exit(2)
 
-    settings, manager = _bootstrap()
+    settings, manager = _bootstrap(verbose=verbose)
     try:
         # The adapter knows what kind of target it takes; check that before
         # looking for the binary so a wrong target is a usage error (exit 2).
@@ -924,13 +947,14 @@ def pipeline_cmd(
         bool,
         typer.Option("--force-start", help="Start even when a tool this pipeline needs is unavailable."),
     ] = False,
+    verbose: VerboseOption = False,
 ) -> None:
     """Run a ready-made pipeline and render HTML/JSON reports."""
     if target is None:
         console.print("[err]Provide a seed target via --target.[/err]")
         raise typer.Exit(2)
 
-    settings, manager = _bootstrap()
+    settings, manager = _bootstrap(verbose=verbose)
     try:
         nodes = build(
             name,

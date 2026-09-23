@@ -7,6 +7,11 @@
 ## [Unreleased]
 
 ### Added
+- Флаг `-v` / `--verbose` у `init`, `run`, `pipeline`, `status`: поднимает
+  уровень логов до `DEBUG` только для этого запуска и печатает трассировку
+  установки — разрешение релиза, URL и размер загрузок, выбранный под платформу
+  ассет, каталог распаковки и путь к бинарнику (для Chromium — платформу CfT,
+  версию и URL). Постоянный `log_level` не меняется.
 - Автозагрузка portable Chromium (Chrome for Testing) для gowitness: `cyberfw
   init` докачивает браузер в `tools_bin/chromium/`, если gowitness в наборе, а
   системного Chrome нет. Скачанный Chromium имеет приоритет над системным,

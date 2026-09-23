@@ -26,8 +26,11 @@ from tenacity import (
 )
 
 from cyberfw.exceptions import DownloadError
+from cyberfw.logging import get_logger
 
 __all__ = ["GitHubRelease", "ReleaseAsset", "GitHubClient", "CacheEntry", "RETRY_ATTEMPTS"]
+
+LOG = get_logger("manager.github_client")
 
 #: Attempts made for one HTTP request (API call, asset download, checksum
 #: fetch) before giving up.
@@ -213,8 +216,10 @@ class GitHubClient:
         """
         cached = self._cache_may_load(owner, repo, tag)
         if cached is not None:
+            LOG.debug("release %s/%s (%s): served from cache -> %s", owner, repo, tag, cached.version)
             return cached
 
+        LOG.debug("release %s/%s: resolving %s from GitHub API", owner, repo, tag)
         headers: dict[str, str] = {
             "Accept": "application/vnd.github+json",
             "X-GitHub-Api-Version": "2022-11-28",
@@ -267,6 +272,14 @@ class GitHubClient:
                 )
             )
         release = GitHubRelease(tag=tag_name, assets=assets, checksums_url=checksums)
+        LOG.debug(
+            "release %s/%s: resolved %s (%d assets%s)",
+            owner,
+            repo,
+            release.version,
+            len(assets),
+            ", checksums" if checksums else "",
+        )
         self._cache_save(owner, repo, release, tag)
         return release
 
@@ -280,10 +293,13 @@ class GitHubClient:
         """
         if not url.startswith(("http://", "https://")):
             raise DownloadError(f"Invalid download URL: {url!r}")
+        size = f" ({expected_size} bytes)" if expected_size else ""
+        LOG.debug("download %s -> %s%s", url, destination.name, size)
         try:
             self._download_stream(url, destination, expected_size)
         except (RetryError, httpx.HTTPError, OSError) as exc:
             _raise_download_error(f"Failed to download {url}", exc)
+        LOG.debug("download complete: %s", destination.name)
 
     @_transient_retry
     def _download_stream(self, url: str, destination: Path, expected_size: int | None) -> None:

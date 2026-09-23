@@ -137,7 +137,9 @@ class ChromiumInstaller:
             raise DownloadError(f"Unexpected Chrome for Testing manifest: {exc}") from exc
         for entry in downloads:
             if entry.get("platform") == platform:
-                return version, str(entry["url"])
+                url = str(entry["url"])
+                LOG.debug("chromium: %s Stable %s -> %s", platform, version, url)
+                return version, url
         raise ChromiumUnsupportedError(
             f"Chrome for Testing manifest lists no '{platform}' build (version {version})."
         )
@@ -160,6 +162,7 @@ class ChromiumInstaller:
         version, url = self.resolve()
         existing = self.executable()
         if not force and existing is not None and self.installed_version() == version:
+            LOG.debug("chromium: %s already installed at %s", version, existing)
             return ChromiumInstallResult(Path(existing), version, up_to_date=True)
 
         chromium_dir = self.tools_dir / CHROMIUM_DIR_NAME
@@ -180,6 +183,7 @@ class ChromiumInstaller:
             )
         self._make_executable(binary)
         self._write_state(version, binary)
+        LOG.debug("chromium: installed %s -> %s", version, binary)
         return ChromiumInstallResult(binary.resolve(), version)
 
     # -- state ---------------------------------------------------------------

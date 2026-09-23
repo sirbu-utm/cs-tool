@@ -110,6 +110,13 @@ class ToolInstaller:
                 f"arch={self.mapping.arch}. Release tag: {release.tag}. "
                 f"Tried patterns: {patterns or '<none>'}."
             )
+        LOG.debug(
+            "%s: selected asset %s for %s (patterns %s)",
+            spec.name,
+            asset.name,
+            self.mapping.label,
+            patterns,
+        )
         tool_dir = self.tools_dir / spec.name
         archive_path = self.tools_dir / asset.name
         try:
@@ -123,6 +130,7 @@ class ToolInstaller:
         finally:
             archive_path.unlink(missing_ok=True)
         self._make_executable(binary)
+        LOG.debug("%s: installed %s -> %s", spec.name, release.version, binary)
         return InstallResult(spec=spec, binary=binary.resolve(), version=release.version)
 
     # -- pipeline ------------------------------------------------------------
