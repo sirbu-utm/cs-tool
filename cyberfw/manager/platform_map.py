@@ -33,6 +33,11 @@ class Mapping:
     arch: str
 
     @property
+    def label(self) -> str:
+        """``windows/amd64`` — how the platform is named on screen and in reports."""
+        return f"{self.os_name}/{self.arch}"
+
+    @property
     def arch_umbrella(self) -> str:
         """Return ``arm64`` if this is any 64-bit ARM, else the raw arch."""
         return "arm64" if self.arch == "arm64" else self.arch

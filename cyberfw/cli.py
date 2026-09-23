@@ -55,7 +55,7 @@ from cyberfw.report.run_info import RunInfo
 from cyberfw.resources import packaged_data
 from cyberfw.tools import adapter_class
 from cyberfw.tools.base import ToolContext
-from cyberfw.ui import banner, readiness, record_detail, record_style, state_style, tool_guide
+from cyberfw.ui import banner, record_detail, record_style, state_style, tool_guide
 
 LOG = get_logger("cli")
 
@@ -218,7 +218,7 @@ def _run_info(manager: ToolManager, *, name: str, seed: str | None, session_id: 
         pipeline=name,
         seed=seed,
         session_id=session_id,
-        platform=f"{manager.mapping.os_name}/{manager.mapping.arch}",
+        platform=manager.mapping.label,
         tool_versions={tool: (manager.install_state(tool) or {}).get("version") for tool in sorted(tools)},
     )
 
@@ -317,11 +317,19 @@ def _tool_version(manager: ToolManager, name: str) -> str:
     return str((manager.install_state(name) or {}).get("version", ""))
 
 
-def _inventory_table(manager: ToolManager, tools_dir: Path, *, numbered: bool = False) -> tuple[Table, list[str]]:
+def _tool_states(manager: ToolManager, tools_dir: Path) -> list[str]:
+    """One state per registered tool, in registry order."""
+    return [_tool_state(manager, name, tools_dir) for name in manager.registry.names()]
+
+
+def _inventory_table(
+    manager: ToolManager, tools_dir: Path, *, numbered: bool = False, states: list[str] | None = None
+) -> tuple[Table, list[str]]:
     """The tool inventory shared by the launcher and ``status``.
 
     Returns the table and the per-tool states, so the caller can render the
-    readiness summary without computing them twice.
+    readiness summary without computing them twice; ``states`` passes in an
+    inventory pass the caller already made (registry order).
     """
     table = Table(title="TOOLS", title_style="accent", box=box.SIMPLE_HEAD, expand=True, pad_edge=False)
     if numbered:
@@ -330,10 +338,10 @@ def _inventory_table(manager: ToolManager, tools_dir: Path, *, numbered: bool = 
     table.add_column("version", style="muted", no_wrap=True)
     table.add_column("state", no_wrap=True)
     table.add_column("source", style="muted", overflow="ellipsis", no_wrap=True)
-    states: list[str] = []
-    for index, name in enumerate(manager.registry.names(), start=1):
-        state = _tool_state(manager, name, tools_dir)
-        states.append(state)
+    names = manager.registry.names()
+    if states is None or len(states) != len(names):
+        states = _tool_states(manager, tools_dir)
+    for index, (name, state) in enumerate(zip(names, states, strict=True), start=1):
         row: list[str | Text] = [
             name,
             _tool_version(manager, name) or "—",
@@ -377,13 +385,13 @@ def interactive_menu() -> None:
     _ensure_tools()
     settings, manager = _bootstrap()
     try:
-        states = [
-            _tool_state(manager, name, settings.tools_dir) for name in manager.registry.names()
-        ]
-        platform = f"{manager.mapping.os_name}/{manager.mapping.arch}"
+        # One inventory pass serves the banner and the first launcher frame;
+        # later frames recompute, since a tool can change state mid-session.
+        startup_states = _tool_states(manager, settings.tools_dir)
+        console.print(banner(startup_states, manager.mapping.label))
+        known_states: list[str] | None = startup_states
     finally:
         manager.close()
-    console.print(banner(states, platform))
     while True:
         # Settings-adjust cycle: the launcher panel is a Live region, so the
         # p/l/f toggles redraw it in place instead of re-printing the whole
@@ -396,7 +404,8 @@ def interactive_menu() -> None:
                 settings, manager = _bootstrap()
                 try:
                     names = manager.registry.names()
-                    live.update(_launcher_view(manager, settings), refresh=True)
+                    live.update(_launcher_view(manager, settings, states=known_states), refresh=True)
+                    known_states = None
                 finally:
                     manager.close()
                 choice = _prompt_choice(names)
@@ -458,8 +467,12 @@ def _dispatch_choice(choice: str, names: list[str]) -> bool:
     return True
 
 
-def _launcher_view(manager: ToolManager, settings: Settings) -> Table:
-    """Render the compact two-column launcher workspace."""
+def _launcher_view(manager: ToolManager, settings: Settings, *, states: list[str] | None = None) -> Table:
+    """Render the compact two-column launcher workspace.
+
+    ``states`` reuses an inventory pass the caller already made (the banner's);
+    the ready count itself is left to the banner, so it is shown once.
+    """
     table = Table.grid(expand=True, padding=(0, 2))
     table.add_column(width=28, no_wrap=True, vertical="top")
     table.add_column(ratio=1, vertical="top")
@@ -481,10 +494,7 @@ def _launcher_view(manager: ToolManager, settings: Settings) -> Table:
     file_text, file_style = _flag(settings.log_to_file)
     sidebar.add_row(Text.assemble(("  f  log file   ", "dim"), (file_text, file_style)))
 
-    content, states = _inventory_table(manager, settings.tools_dir, numbered=True)
-    sidebar.add_row("")
-    sidebar.add_row(Text("STATUS", style="accent"))
-    sidebar.add_row(Text.assemble(("  ", ""), readiness(states)))
+    content, _states = _inventory_table(manager, settings.tools_dir, numbered=True, states=states)
 
     table.add_row(Panel(sidebar, border_style="accent", padding=(1, 1), box=box.ROUNDED), content)
     return table
@@ -653,8 +663,7 @@ def status_cmd() -> None:
     settings, manager = _bootstrap()
     try:
         tools, states = _inventory_table(manager, settings.tools_dir)
-        platform = f"{manager.mapping.os_name}/{manager.mapping.arch}"
-        console.print(banner(states, platform))
+        console.print(banner(states, manager.mapping.label))
         # The banner already carries the readiness and the platform; what it
         # cannot show is where the binaries are looked for.
         console.print(

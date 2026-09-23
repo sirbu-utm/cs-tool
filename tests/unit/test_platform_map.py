@@ -68,3 +68,12 @@ class TestExecutableValidation:
         path.write_bytes(b"\x7fELF" + b"\0" * 8)
         monkeypatch.setattr(os, "name", "nt")
         assert not is_executable(path)
+
+
+def test_mapping_has_one_label_for_every_display() -> None:
+    """The banner, the saved report and `status` all name the platform; one
+    property keeps them from drifting apart."""
+    from cyberfw.manager.platform_map import Mapping
+
+    assert Mapping("windows", "amd64").label == "windows/amd64"
+    assert Mapping("darwin", "arm64").label == "darwin/arm64"

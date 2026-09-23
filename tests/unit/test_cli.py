@@ -1068,7 +1068,28 @@ class TestInventoryPresentation:
         rendered = output.export_text()
 
         assert "2.6.6" in rendered
-        assert "4/4 ready" in rendered
+        # The count lives in the banner above; a second copy here could disagree
+        # with it as soon as a tool changed state during the session.
+        assert "STATUS" not in rendered
+        assert "4/4 ready" not in rendered
+
+    def test_startup_resolves_each_tool_once(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The banner and the first launcher frame share one inventory pass."""
+        import cyberfw.cli as cli
+
+        calls: list[str] = []
+        real_state = cli._tool_state
+
+        def counting_state(manager, name, tools_dir):  # type: ignore[no-untyped-def]
+            calls.append(name)
+            return real_state(manager, name, tools_dir)
+
+        monkeypatch.setattr(cli, "_tool_state", counting_state)
+        monkeypatch.setattr(cli, "_ensure_tools", lambda: None)
+        monkeypatch.setattr(cli, "_prompt_choice", lambda names: "0")
+        cli.interactive_menu()
+
+        assert sorted(calls) == sorted(_FAKE_OUTPUT), "one lookup per tool, not two"
 
     def test_status_opens_with_the_readiness_summary(self) -> None:
         """All four workspace binaries are runnable, so all four are ready — an install
