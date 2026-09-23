@@ -2,8 +2,9 @@
 
 The startup banner follows the classic OSINT-tool convention (Sherlock,
 theHarvester, recon-ng, ...): a big pre-rendered ANSI/block-art wordmark
-printed straight to the terminal, no box around it, followed by a short
-byline. ``CS_TOOL_LOGO`` and ``UNIV_LOGO`` are exported verbatim from a
+printed straight to the terminal, followed by a green-to-cyan gradient rule
+and a one-line status strip (a pip per tool, then the ready count, platform
+and version). ``CS_TOOL_LOGO`` and ``UNIV_LOGO`` are exported verbatim from a
 terminal capture — the escape codes are restored at import time because the
 literal ``ESC`` control byte does not survive a plain-text paste.
 """
