@@ -306,12 +306,14 @@ def _tool_state(manager: ToolManager, name: str, tools_dir: Path) -> str:
     file is on disk but cannot be read or executed — typically an antivirus
     quarantine.
     """
+    # binary_path and _binary_on_disk both rglob tools_dir; a directory that
+    # lists but cannot be entered raises PermissionError (OSError) there on
+    # Python 3.10-3.13 (3.14 swallows it). Treat an unreadable tree as "not on
+    # disk" rather than letting a traceback replace the banner. OSError around
+    # binary_path is the same net is_installed already casts.
     try:
         manager.binary_path(name)
-    except CyberfwError:
-        # _binary_on_disk walks tools_dir; a directory that lists but cannot be
-        # entered raises PermissionError (OSError) on Python 3.10-3.13. Treat an
-        # unreadable tree as "not on disk" rather than crashing before the banner.
+    except (CyberfwError, OSError):
         try:
             on_disk = _binary_on_disk(tools_dir, name, manager.spec(name).binary)
         except OSError:
