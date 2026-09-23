@@ -1051,6 +1051,33 @@ class TestInventoryPresentation:
         finally:
             manager.close()
 
+    def test_an_unreadable_tools_dir_does_not_crash_the_state_check(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """_binary_on_disk walks tools_bin with rglob/is_file; a directory that lists
+        but cannot be entered raises PermissionError there on Python 3.10-3.13, which
+        _tool_state caught only as CyberfwError. It must read as not installed."""
+        from cyberfw.cli import _tool_state
+        from cyberfw.config import Settings
+        from cyberfw.manager import ToolManager, load_registry
+
+        (tmp_path / "tools_bin" / "subfinder").unlink()  # so binary_path fails first
+        settings = Settings(root_dir=tmp_path)
+        manager = ToolManager(settings, load_registry(tmp_path / "registry.yaml"))
+
+        real_is_file = Path.is_file
+
+        def denying_is_file(self: Path) -> bool:
+            if self.name == "subfinder":
+                raise PermissionError(13, "Permission denied")
+            return real_is_file(self)
+
+        monkeypatch.setattr(Path, "is_file", denying_is_file)
+        try:
+            assert _tool_state(manager, "subfinder", settings.tools_dir) == "not installed"
+        finally:
+            manager.close()
+
     def test_launcher_lists_installed_versions(self, tmp_path: Path) -> None:
         from cyberfw.cli import _launcher_view
         from cyberfw.config import Settings

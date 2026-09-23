@@ -309,7 +309,14 @@ def _tool_state(manager: ToolManager, name: str, tools_dir: Path) -> str:
     try:
         manager.binary_path(name)
     except CyberfwError:
-        return "blocked" if _binary_on_disk(tools_dir, name, manager.spec(name).binary) else "not installed"
+        # _binary_on_disk walks tools_dir; a directory that lists but cannot be
+        # entered raises PermissionError (OSError) on Python 3.10-3.13. Treat an
+        # unreadable tree as "not on disk" rather than crashing before the banner.
+        try:
+            on_disk = _binary_on_disk(tools_dir, name, manager.spec(name).binary)
+        except OSError:
+            on_disk = False
+        return "blocked" if on_disk else "not installed"
     return "ready"
 
 
