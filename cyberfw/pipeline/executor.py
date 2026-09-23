@@ -32,6 +32,31 @@ _STDERR_KEEP = 25
 #: Seconds a child gets to exit after SIGTERM before it is SIGKILLed.
 _TERM_GRACE = 3.0
 
+#: Max bytes one stdout/stderr line may hold before the reader gives up on it.
+#: asyncio's StreamReader defaults to 64 KiB, and a single ``nuclei -jsonl``
+#: finding (large extracted/matched content) can exceed that, which used to fail
+#: the whole stage with "Separator is not found, and chunk exceed the limit".
+#: Raise it generously; :func:`_readline` still degrades an even bigger line to
+#: a dropped record rather than a dead stage.
+_STREAM_LIMIT = 8 * 1024 * 1024
+
+
+async def _readline(reader: asyncio.StreamReader) -> bytes:
+    """``readline`` that survives a line longer than the reader's buffer limit.
+
+    When a single line grows past the limit, ``StreamReader.readline`` drains the
+    offending bytes from its buffer and raises :class:`ValueError` ("Separator is
+    ... limit"). We already give the stream a generous limit, but a pathological
+    line (a scanner dumping a huge blob on one line) must not kill the stage:
+    swallow that error and read the next line instead, so the oversized line is
+    dropped and the stage keeps going.
+    """
+    while True:
+        try:
+            return await reader.readline()
+        except ValueError as exc:
+            LOG.debug("dropping an over-limit output line (%s)", exc)
+
 
 def _prepare_cmd(cmd: list[str]) -> list[str]:
     """Make Windows shebang scripts runnable via bash when the target is a file.
@@ -199,6 +224,7 @@ async def run_stage(
             stdin=asyncio.subprocess.DEVNULL,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            limit=_STREAM_LIMIT,
         )
     except OSError as exc:
         raise ExecutionError(
@@ -215,7 +241,7 @@ async def run_stage(
     async def _drain_stderr() -> None:
         assert proc.stderr is not None
         while True:
-            raw = await proc.stderr.readline()
+            raw = await _readline(proc.stderr)
             if not raw:
                 break
             text = raw.decode("utf-8", errors="replace").rstrip("\r\n")
@@ -229,7 +255,7 @@ async def run_stage(
         assert proc.stdout is not None
         lineno = 0
         while True:
-            raw = await proc.stdout.readline()
+            raw = await _readline(proc.stdout)
             if not raw:
                 break
             lineno += 1

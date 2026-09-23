@@ -66,6 +66,44 @@ class TestRunStage:
         assert len(warnings) == 1
         assert "3" in warnings[0].getMessage() and "subfinder" in warnings[0].getMessage()
 
+    async def test_jsonl_line_larger_than_default_reader_limit_is_parsed(self, tmp_path: Path) -> None:
+        """A single finding longer than asyncio's 64 KiB default must not fail the stage.
+
+        nuclei -jsonl can emit one finding well past 64 KiB (large extracted /
+        matched content); the reader used to raise LimitOverrunError ("Separator
+        is not found, and chunk exceed the limit") and kill the whole stage.
+        """
+        script = _write_script(
+            tmp_path,
+            "import json, sys\n"
+            "big = 'x' * 200_000\n"  # ~200 KiB on one line, far over the 64 KiB default
+            "sys.stdout.write(json.dumps({'host': 'big.example.com', 'source': big}) + '\\n')\n",
+        )
+        records = await run_stage(
+            [sys.executable, str(script)], tool="subfinder", stage="sub", context=None
+        )
+        assert len(records) == 1
+        assert records[0].target == "big.example.com"
+
+    async def test_line_over_stream_limit_is_dropped_not_fatal(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Even a line past our raised limit degrades to a dropped line, not a dead stage."""
+        import cyberfw.pipeline.executor as executor
+
+        monkeypatch.setattr(executor, "_STREAM_LIMIT", 2048)  # tiny, to exercise the overrun path
+        script = _write_script(
+            tmp_path,
+            "import json, sys\n"
+            "sys.stdout.write('y' * 10_000 + '\\n')\n"  # one monster line, no valid JSON
+            "sys.stdout.write(json.dumps({'host': 'ok.example.com'}) + '\\n')\n",
+        )
+        records = await run_stage(
+            [sys.executable, str(script)], tool="subfinder", stage="sub", context=None
+        )
+        # The oversized line is dropped; the following valid finding still lands.
+        assert [r.target for r in records] == ["ok.example.com"]
+
     async def test_uses_tool_parser_for_non_json_output(self, tmp_path: Path) -> None:
         script = _write_script(
             tmp_path,
