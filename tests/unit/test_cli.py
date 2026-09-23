@@ -285,17 +285,88 @@ class TestBanner:
         assert cell_styles == {"magenta"}
         assert ui.state_style("ready") == "magenta"
 
-    def test_the_rule_is_a_gradient_not_one_flat_colour(self) -> None:
+    @staticmethod
+    def _rule_colour_runs(color_system: str, width: int = 100) -> dict[str, int]:
+        """Cells per SGR colour code, as the terminal receives the rule.
+
+        Parsed from real output: console.render() hands back the colours before
+        Rich downgrades them to the terminal's palette, which is exactly where a
+        truecolor ramp falls apart.
+        """
+        import io
+        import re
+
+        from cyberfw.ui import RULE_CHAR, gradient_rule
+
+        buffer = io.StringIO()
+        # no_color=False: conftest exports NO_COLOR, which would strip every code.
+        console = Console(
+            file=buffer,
+            theme=THEME,
+            width=width,
+            force_terminal=True,
+            color_system=color_system,  # type: ignore[arg-type]
+            no_color=False,
+        )
+        console.print(gradient_rule())
+        runs: dict[str, int] = {}
+        for code, cells in re.findall(r"\x1b\[([0-9;]*)m(" + re.escape(RULE_CHAR) + "+)", buffer.getvalue()):
+            runs[code] = runs.get(code, 0) + len(cells)
+        return runs
+
+    @staticmethod
+    def _wordmark_width() -> int:
+        from rich.cells import cell_len
+        from rich.text import Text
+
+        import cyberfw.ui as ui
+
+        return max(cell_len(line) for line in Text.from_ansi(ui.CS_TOOL_LOGO).plain.splitlines())
+
+    def test_truecolor_draws_a_smooth_ramp(self) -> None:
+        assert len(self._rule_colour_runs("truecolor")) > 20
+
+    @pytest.mark.parametrize("color_system", ["standard", "windows", "256"])
+    def test_the_gradient_survives_a_limited_palette(self, color_system: str) -> None:
+        """Downgraded cell by cell, the ramp came out as 10 green cells and 68 cyan
+        ones on a 16-colour terminal: a seam near one end, not a gradient."""
+        runs = self._rule_colour_runs(color_system)
+        total = sum(runs.values())
+
+        assert len(runs) >= 3, runs
+        assert max(runs.values()) <= total / 2, f"one colour takes over the rule: {runs}"
+
+    def test_the_rule_is_exactly_as_wide_as_the_wordmark(self) -> None:
+        assert sum(self._rule_colour_runs("truecolor", width=120).values()) == self._wordmark_width()
+
+    def test_the_rule_reports_its_real_width(self) -> None:
+        """Measured as (0, max_width), it made a Panel(expand=False) around it fill the
+        whole terminal with blank cells."""
+        from rich.measure import Measurement
+        from rich.panel import Panel
+
         from cyberfw.ui import gradient_rule
 
-        console = Console(theme=THEME, width=60, color_system="truecolor")
-        colours = {
-            segment.style.color.triplet
-            for segment in console.render(gradient_rule())
-            if segment.style is not None and segment.style.color is not None
-        }
+        console = Console(theme=THEME, width=120)
+        measured = Measurement.get(console, console.options, gradient_rule())
+        panel = Console(theme=THEME, width=120, record=True)
+        panel.print(Panel(gradient_rule(), expand=False))
 
-        assert len(colours) > 5, "a gradient shifts along the line"
+        assert measured.maximum == self._wordmark_width()
+        assert max(len(line) for line in panel.export_text().splitlines()) <= self._wordmark_width() + 4
+
+    def test_every_glyph_exists_in_the_classic_windows_console_fonts(self) -> None:
+        """Checked against the cmaps of consola.ttf and lucon.ttf: ▰ is in neither, and
+        ━ and the rounded corners ╭╮╰╯ are missing from Lucida Console, so a conhost
+        window drew boxes. These are present in both."""
+        from cyberfw.ui import PIP, RULE_CHAR
+
+        in_both_fonts = set("■▬█▄▀─═┌┐└┘│")
+        rendered = self._render(["ready", "blocked"])
+
+        assert PIP in in_both_fonts
+        assert RULE_CHAR in in_both_fonts
+        assert not set("╭╮╰╯") & set(rendered)
 
 
 class TestPromptChoice:

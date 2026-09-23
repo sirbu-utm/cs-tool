@@ -13,8 +13,11 @@ from __future__ import annotations
 from collections.abc import Sequence
 
 from rich import box
-from rich.color import Color
+from rich.cells import cell_len
+from rich.color import Color, blend_rgb
+from rich.color_triplet import ColorTriplet
 from rich.console import Console, ConsoleOptions, Group, RenderableType, RenderResult
+from rich.measure import Measurement
 from rich.panel import Panel
 from rich.segment import Segment
 from rich.style import Style
@@ -107,16 +110,30 @@ def tool_guide(name: str) -> Panel:
     )
 
 
+# Glyphs are limited to what both classic Windows console fonts carry (checked
+# against the cmaps of consola.ttf and lucon.ttf): U+25B0 ▰ is in neither, and
+# U+2501 ━ and the rounded box corners are missing from Lucida Console, so a
+# conhost window drew empty boxes in their place. The wordmark itself is built
+# from the same half blocks, which is why it always rendered.
+
 #: One square per registered tool in the banner's status strip.
-PIP = "▰"
+PIP = "■"
 
 #: The character the gradient rule is drawn with.
-RULE_CHAR = "━"
+RULE_CHAR = "▀"
 
-#: Ends of the rule's gradient, and the widest it is ever drawn (the wordmark's width).
-_RULE_FROM = (0x2E, 0xD5, 0x73)  # green
-_RULE_TO = (0x2E, 0xC5, 0xD5)  # cyan
-_RULE_MAX_WIDTH = 78
+#: The rule is exactly as wide as the wordmark above it, never wider.
+_RULE_MAX_WIDTH = max(cell_len(line) for line in Text.from_ansi(CS_TOOL_LOGO).plain.splitlines())
+
+#: Ends of the truecolor ramp.
+_RULE_FROM = ColorTriplet(0x2E, 0xD5, 0x73)  # green
+_RULE_TO = ColorTriplet(0x2E, 0xC5, 0xD5)  # cyan
+
+#: Stand-ins for terminals that cannot show the ramp. Downgraded cell by cell,
+#: it collapsed on a 16-colour terminal into 10 green cells and 68 cyan ones,
+#: so those palettes get even bands of colours they really have.
+_RULE_BANDS_256 = tuple(Color.from_ansi(number) for number in (40, 41, 42, 43, 44))  # green3 .. dark turquoise
+_RULE_BANDS_16 = tuple(Color.parse(name) for name in ("green", "bright_green", "bright_cyan", "cyan"))
 
 #: How each tool state reads — the one map the banner's pips, the inventory
 #: table and the launcher all use. ``blocked`` means the file is on disk but
@@ -149,31 +166,44 @@ def readiness(states: Sequence[str]) -> Text:
 
 
 class GradientRule:
-    """A horizontal rule whose colour slides from one end to the other.
+    """A horizontal rule whose colour slides from green to cyan.
 
-    Written as a renderable rather than a pre-coloured string so it follows the
-    terminal's width, and so a console without colour still gets the line.
+    A renderable rather than a pre-coloured string, so it follows the terminal:
+    a smooth per-cell ramp in truecolor, even bands from the palette the
+    terminal really has otherwise, and a plain line when there is no colour.
     """
 
-    def __init__(self, start: tuple[int, int, int], end: tuple[int, int, int]) -> None:
-        self.start = start
-        self.end = end
+    def __rich_measure__(self, console: Console, options: ConsoleOptions) -> Measurement:
+        width = min(options.max_width, _RULE_MAX_WIDTH)
+        return Measurement(width, width)
 
     def __rich_console__(self, console: Console, options: ConsoleOptions) -> RenderResult:
         width = max(1, min(options.max_width, _RULE_MAX_WIDTH))
-        last = max(width - 1, 1)
-        for index in range(width):
-            ratio = index / last
-            colour = Color.from_rgb(
-                *(begin + (finish - begin) * ratio for begin, finish in zip(self.start, self.end, strict=True))
-            )
-            yield Segment(RULE_CHAR, Style(color=colour))
-        yield Segment("\n")
+        if console.color_system == "256":
+            yield from _bands(_RULE_BANDS_256, width)
+        elif console.color_system in ("standard", "windows"):
+            yield from _bands(_RULE_BANDS_16, width)
+        else:
+            # truecolor, or no colour at all (the styles are dropped then).
+            last = max(width - 1, 1)
+            for index in range(width):
+                colour = Color.from_triplet(blend_rgb(_RULE_FROM, _RULE_TO, index / last))
+                yield Segment(RULE_CHAR, Style(color=colour))
+        yield Segment.line()
+
+
+def _bands(colours: Sequence[Color], width: int) -> RenderResult:
+    """``width`` rule cells split into near-equal runs, one per colour, in order."""
+    for index, colour in enumerate(colours):
+        start = width * index // len(colours)
+        end = width * (index + 1) // len(colours)
+        if end > start:
+            yield Segment(RULE_CHAR * (end - start), Style(color=colour))
 
 
 def gradient_rule() -> GradientRule:
     """The banner's rule, in the framework's green-to-cyan palette."""
-    return GradientRule(_RULE_FROM, _RULE_TO)
+    return GradientRule()
 
 
 def _status_strip(states: Sequence[str], platform: str) -> Panel:
@@ -185,7 +215,7 @@ def _status_strip(states: Sequence[str], platform: str) -> Panel:
     # An unstyled separator: Text.join takes the joiner as the base style of the
     # result, so a styled one would tint every pip and the counter with it.
     line = Text("   ").join(part for part in parts if part.plain)
-    return Panel(line, border_style="accent", box=box.ROUNDED, padding=(0, 2), expand=False)
+    return Panel(line, border_style="accent", box=box.SQUARE, padding=(0, 2), expand=False)
 
 
 def banner(states: Sequence[str], platform: str) -> RenderableType:
