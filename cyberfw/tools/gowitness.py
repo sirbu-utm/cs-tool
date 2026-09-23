@@ -34,8 +34,20 @@ _CHROME_PATHS = (
 )
 
 
-def _find_chrome() -> str | None:
-    """Return a Chrome/Chromium executable path, or ``None`` if none is found."""
+def _find_chrome(tools_dir: Path | None = None) -> str | None:
+    """Return a Chrome/Chromium executable path, or ``None`` if none is found.
+
+    A portable Chromium installed by the framework under ``tools_dir`` takes
+    precedence over a system Chrome, so ``cyberfw init`` fully provisions the
+    screenshot stage without depending on what the host happens to have.
+    """
+    if tools_dir is not None:
+        from cyberfw.manager.chromium import find_chromium
+        from cyberfw.manager.platform_map import get_target
+
+        managed = find_chromium(tools_dir, get_target())
+        if managed:
+            return managed
     for name in _CHROME_NAMES:
         found = shutil.which(name)
         if found:
@@ -51,7 +63,8 @@ def _find_chrome() -> str | None:
 #: Said once, by both the pre-flight and the stage that would fail.
 _NO_CHROME = (
     "Gowitness needs a headless Chrome/Chromium, which was not found. "
-    "Install Google Chrome (winget install Google.Chrome / brew install --cask "
+    "Run `cyberfw init` to download a portable Chromium automatically, or "
+    "install Google Chrome (winget install Google.Chrome / brew install --cask "
     "google-chrome / apt install chromium) and run again."
 )
 
@@ -60,14 +73,14 @@ class GowitnessTool(BaseTool):
     per_target = True
 
     @classmethod
-    def missing_requirement(cls) -> str | None:
-        return None if _find_chrome() is not None else _NO_CHROME
+    def missing_requirement(cls, tools_dir: Path | None = None) -> str | None:
+        return None if _find_chrome(tools_dir) is not None else _NO_CHROME
 
     def build_cmd(self, ctx: ToolContext) -> list[str]:
         targets = ctx.inputs if ctx.inputs else ([ctx.target] if ctx.target else [])
         if not targets:
             raise ToolNotFoundError("Gowitness needs at least one target URL.")
-        chrome = _find_chrome()
+        chrome = _find_chrome(self._tools_dir())
         if chrome is None:
             raise ToolNotFoundError(_NO_CHROME)
         base = targets[0]
@@ -87,6 +100,11 @@ class GowitnessTool(BaseTool):
             "-q",
             *self._static_flags(),
         ]
+
+    def _tools_dir(self) -> Path | None:
+        """``tools_bin/`` inferred from the installed binary (``tools_bin/gowitness/...``)."""
+        parent = self.binary.parent
+        return parent.parent if parent.name == self.name else parent
 
     @property
     def input_flag(self) -> str | None:

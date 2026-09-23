@@ -59,7 +59,7 @@ def test_subfinder_reduces_url_seed_to_bare_domain() -> None:
 
 
 def test_gowitness_uses_v3_scan_single_command(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr("cyberfw.tools.gowitness._find_chrome", lambda: "/usr/bin/chrome")
+    monkeypatch.setattr("cyberfw.tools.gowitness._find_chrome", lambda *_: "/usr/bin/chrome")
     command = _adapter("gowitness").build_cmd(ToolContext(target="https://example.com"))  # type: ignore[attr-defined]
     assert command[1:3] == ["scan", "single"]
     assert "--log-level" not in command  # v2 flag that no longer exists
@@ -67,7 +67,7 @@ def test_gowitness_uses_v3_scan_single_command(monkeypatch: pytest.MonkeyPatch) 
 
 
 def test_gowitness_without_chrome_raises_clear_error(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr("cyberfw.tools.gowitness._find_chrome", lambda: None)
+    monkeypatch.setattr("cyberfw.tools.gowitness._find_chrome", lambda *_: None)
     with pytest.raises(ToolNotFoundError, match="Chrome"):
         _adapter("gowitness").build_cmd(ToolContext(target="https://example.com"))  # type: ignore[attr-defined]
 
@@ -75,7 +75,7 @@ def test_gowitness_without_chrome_raises_clear_error(monkeypatch: pytest.MonkeyP
 def test_gowitness_without_target_raises_toolnotfound_like_other_adapters(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr("cyberfw.tools.gowitness._find_chrome", lambda: "/usr/bin/chrome")
+    monkeypatch.setattr("cyberfw.tools.gowitness._find_chrome", lambda *_: "/usr/bin/chrome")
     with pytest.raises(ToolNotFoundError):
         _adapter("gowitness").build_cmd(ToolContext())  # type: ignore[attr-defined]
 
@@ -329,7 +329,7 @@ class TestExternalRequirements:
     def test_gowitness_needs_chrome(self, monkeypatch: pytest.MonkeyPatch) -> None:
         from cyberfw.tools.gowitness import GowitnessTool
 
-        monkeypatch.setattr("cyberfw.tools.gowitness._find_chrome", lambda: None)
+        monkeypatch.setattr("cyberfw.tools.gowitness._find_chrome", lambda *_: None)
         message = GowitnessTool.missing_requirement()
 
         assert message is not None
@@ -339,7 +339,7 @@ class TestExternalRequirements:
     def test_gowitness_is_satisfied_when_chrome_is_there(self, monkeypatch: pytest.MonkeyPatch) -> None:
         from cyberfw.tools.gowitness import GowitnessTool
 
-        monkeypatch.setattr("cyberfw.tools.gowitness._find_chrome", lambda: "/usr/bin/chromium")
+        monkeypatch.setattr("cyberfw.tools.gowitness._find_chrome", lambda *_: "/usr/bin/chromium")
 
         assert GowitnessTool.missing_requirement() is None
 
@@ -347,7 +347,7 @@ class TestExternalRequirements:
         """One message, one place: the pre-flight and the stage failure must agree."""
         from cyberfw.tools.gowitness import GowitnessTool
 
-        monkeypatch.setattr("cyberfw.tools.gowitness._find_chrome", lambda: None)
+        monkeypatch.setattr("cyberfw.tools.gowitness._find_chrome", lambda *_: None)
         expected = GowitnessTool.missing_requirement()
 
         with pytest.raises(ToolNotFoundError) as excinfo:

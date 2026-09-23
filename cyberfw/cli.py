@@ -34,7 +34,12 @@ from rich.table import Table
 from rich.text import Text
 
 from cyberfw.config import Settings, load_settings
-from cyberfw.exceptions import CyberfwError, RegistryError, ToolNotFoundError
+from cyberfw.exceptions import (
+    ChromiumUnsupportedError,
+    CyberfwError,
+    RegistryError,
+    ToolNotFoundError,
+)
 from cyberfw.live_view import PipelineLiveView
 from cyberfw.logging import console, ensure_utf8_stdio, get_logger, setup_logging
 from cyberfw.manager import ToolManager, load_registry
@@ -244,7 +249,7 @@ def _preflight(
         if state != "ready":
             blocking.append((node.stage, node.tool, state))
             continue
-        requirement = adapter_class(node.tool).missing_requirement()
+        requirement = adapter_class(node.tool).missing_requirement(tools_dir)
         if requirement is not None:
             blocking.append((node.stage, node.tool, requirement))
         for dep in manager.spec(node.tool).check_deps:
@@ -574,11 +579,22 @@ def init_cmd(
         bool,
         typer.Option("--force", help="Re-download even when the wanted version is already installed."),
     ] = False,
+    chromium: Annotated[
+        bool,
+        typer.Option(
+            "--chromium/--no-chromium",
+            help="Also download a portable Chromium for gowitness when no Chrome is found.",
+        ),
+    ] = True,
 ) -> None:
     """Download and install precompiled tool binaries into ``tools_bin/``.
 
     A tool whose installed version already matches (the pinned ``version:`` in
     registry.yaml, or the latest release) is left alone unless ``--force``.
+
+    When gowitness is installed and no Chrome/Chromium is on the machine, a
+    portable Chromium (Chrome for Testing) is downloaded too, so the screenshot
+    stage works without a system browser. Skip it with ``--no-chromium``.
     """
     settings, manager = _bootstrap()
     if token:
@@ -618,6 +634,8 @@ def init_cmd(
                     else Text("installed", style="ok")
                 )
                 table.add_row(name, result.version, state, _relative_to(result.binary, settings.tools_dir))
+            if chromium and "gowitness" in targets and "gowitness" in manager.registry.names():
+                failed += _provision_chromium(manager, settings, table, force=force, spinner=spinner)
     finally:
         manager.close()
 
@@ -626,6 +644,36 @@ def init_cmd(
         console.print(f"[warn]{ok} ready, {failed} failed.[/warn]")
         raise typer.Exit(1)
     console.print(f"[ok]Done: {ok} tool(s) ready.[/ok]")
+
+
+def _provision_chromium(
+    manager: ToolManager, settings: Settings, table: Table, *, force: bool, spinner: object
+) -> int:
+    """Download a portable Chromium for gowitness; add one row. Returns failures (0/1).
+
+    A Chrome already on the machine (system or a previous portable install) is
+    left alone — no 150 MB download when one is present, unless ``--force``.
+    A platform Chrome for Testing has no build for is a ``skipped`` row, not a
+    failure: gowitness simply needs a system Chrome there.
+    """
+    from cyberfw.tools.gowitness import _find_chrome
+
+    if not force and _find_chrome(settings.tools_dir) is not None:
+        table.add_row("chromium", "—", Text("present", style="muted"), "Chrome already available")
+        return 0
+    if hasattr(spinner, "update"):
+        spinner.update("[info]checking[/info] chromium (Chrome for Testing) ...")
+    try:
+        result = manager.install_chromium(force=force)
+    except ChromiumUnsupportedError as exc:
+        table.add_row("chromium", "—", Text("skipped", style="warn"), str(exc))
+        return 0
+    except CyberfwError as exc:
+        table.add_row("chromium", "—", Text("failed", style="err"), str(exc))
+        return 1
+    state = Text("up to date", style="muted") if result.up_to_date else Text("installed", style="ok")
+    table.add_row("chromium", result.version, state, _relative_to(result.binary, settings.tools_dir))
+    return 0
 
 
 def _relative_to(path: Path, root: Path) -> str:
@@ -685,7 +733,9 @@ def status_cmd() -> None:
         deps.add_column("state")
         deps.add_column("detail", style="muted", overflow="fold")
         deps.add_row(*_dep_row("nmap", shutil.which("nmap"), "rustscan (service/version detection)"))
-        deps.add_row(*_dep_row("chrome/chromium", _find_chrome(), "gowitness (screenshots)"))
+        deps.add_row(
+            *_dep_row("chrome/chromium", _find_chrome(settings.tools_dir), "gowitness (screenshots)")
+        )
         console.print(deps)
 
         cfg = Table(title="Effective settings", box=box.SIMPLE_HEAD, expand=True)

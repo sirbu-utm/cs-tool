@@ -73,9 +73,11 @@ class BaseTool(ABC):
         self.binary: Path = binary
 
     @classmethod
-    def missing_requirement(cls) -> str | None:
+    def missing_requirement(cls, tools_dir: Path | None = None) -> str | None:
         """Why this tool cannot run at all right now, or ``None`` when it can.
 
+        ``tools_dir`` lets an adapter honour a dependency the framework itself
+        provisions there (gowitness's portable Chromium under ``tools_bin/``).
         For something the framework cannot ship and the tool cannot work
         without — gowitness's headless Chrome. Returned as a finished,
         user-facing sentence so the pre-flight can print it before a scan and

@@ -21,8 +21,9 @@ import zipfile
 import zlib
 from pathlib import Path
 
-from cyberfw.exceptions import ArchiveSafetyError, ChecksumError, DownloadError
+from cyberfw.exceptions import ChecksumError, DownloadError
 from cyberfw.logging import get_logger
+from cyberfw.manager.archive import assert_extract_size, normalize, safe_extract_zip, safe_member
 from cyberfw.manager.github_client import GitHubClient, GitHubRelease, ReleaseAsset
 from cyberfw.manager.platform_map import Mapping, asset_patterns
 from cyberfw.manager.registry import ToolSpec
@@ -184,23 +185,14 @@ class ToolInstaller:
 
     # -- extraction ----------------------------------------------------------
     def _extract_zip(self, archive_path: Path, dest: Path) -> None:
-        with zipfile.ZipFile(archive_path) as zf:
-            self._assert_extract_size(sum(i.file_size for i in zf.infolist()), archive_path)
-            for info in zf.infolist():
-                target = self._safe_member(_normalize(info.filename), dest)
-                if info.is_dir():
-                    target.mkdir(parents=True, exist_ok=True)
-                    continue
-                target.parent.mkdir(parents=True, exist_ok=True)
-                with zf.open(info) as src, open(target, "wb") as out:
-                    shutil.copyfileobj(src, out)
+        safe_extract_zip(archive_path, dest, max_size=self.max_archive_size)
 
     def _extract_tar(self, archive_path: Path, dest: Path) -> None:
         with tarfile.open(archive_path, "r:*") as tf:
             total = sum(m.size for m in tf.getmembers() if m.isfile())
-            self._assert_extract_size(total, archive_path)
+            assert_extract_size(total, archive_path.name, self.max_archive_size)
             for member in tf.getmembers():
-                target = self._safe_member(_normalize(member.name), dest)
+                target = safe_member(normalize(member.name), dest)
                 if member.isdir():
                     target.mkdir(parents=True, exist_ok=True)
                     continue
@@ -213,21 +205,6 @@ class ToolInstaller:
                 with open(target, "wb") as out:
                     shutil.copyfileobj(src, out)
                 os.chmod(target, member.mode | stat.S_IRWXU)
-
-    def _safe_member(self, member_rel: str, dest: Path) -> Path:
-        """Validate an archive member path stays inside ``dest`` (the tool's directory)."""
-        target = (dest / member_rel).resolve()
-        root = dest.resolve()
-        if target != root and root not in target.parents:
-            raise ArchiveSafetyError(f"Archive member escapes {dest.name}/: {member_rel!r}")
-        return target
-
-    def _assert_extract_size(self, total: int, archive_path: Path) -> None:
-        limit = self.max_archive_size
-        if total > limit:
-            raise DownloadError(
-                f"Archive {archive_path.name} would extract to {total} bytes (limit {limit})"
-            )
 
     # -- helpers -------------------------------------------------------------
     def _make_tree_executable(self, root: Path) -> None:
@@ -312,10 +289,6 @@ class ToolInstaller:
             return
         mode = binary.stat().st_mode | stat.S_IEXEC
         binary.chmod(mode)
-
-
-def _normalize(name: str) -> str:
-    return os.path.normpath(name.replace("\\", "/"))
 
 
 def _archive_kind(declared: str, name: str) -> str:

@@ -12,6 +12,7 @@ from pathlib import Path
 
 from cyberfw.config import Settings
 from cyberfw.exceptions import CyberfwError
+from cyberfw.manager.chromium import ChromiumInstallResult
 from cyberfw.manager.github_client import GitHubClient
 from cyberfw.manager.installer import InstallResult, ToolInstaller
 from cyberfw.manager.platform_map import Mapping, asset_patterns, get_target
@@ -21,6 +22,7 @@ from cyberfw.manager.verify import ensure_binary
 __all__ = [
     "ToolManager",
     "InstallResult",
+    "ChromiumInstallResult",
     "ToolInstaller",
     "GitHubClient",
     "ToolRegistry",
@@ -137,3 +139,16 @@ class ToolManager:
     def install_all(self) -> list[InstallResult]:
         """Install every registered tool in name order."""
         return [self.install(name) for name in self.registry.names()]
+
+    def install_chromium(self, *, force: bool = False) -> ChromiumInstallResult:
+        """Download the portable Chromium gowitness needs into ``tools_bin/``.
+
+        Reuses the same HTTP client as tool installs. Skips the download when the
+        recorded version is already on disk unless ``force``. Raises
+        :class:`ChromiumUnsupportedError` on a platform Chrome for Testing does
+        not build for.
+        """
+        from cyberfw.manager.chromium import ChromiumInstaller
+
+        installer = ChromiumInstaller(self.client, self.settings.tools_dir, self.mapping)
+        return installer.install(force=force)

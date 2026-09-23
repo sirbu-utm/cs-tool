@@ -7,6 +7,13 @@
 ## [Unreleased]
 
 ### Added
+- Автозагрузка portable Chromium (Chrome for Testing) для gowitness: `cyberfw
+  init` докачивает браузер в `tools_bin/chromium/`, если gowitness в наборе, а
+  системного Chrome нет. Скачанный Chromium имеет приоритет над системным,
+  виден в `cyberfw status` и передаётся gowitness через `--chrome-path`. Уже
+  имеющийся Chrome (системный или portable) повторно не качается (строка
+  `present`); платформа без сборки CfT помечается `skipped`. Пропустить —
+  `cyberfw init --no-chromium`.
 - Живая таблица прогона: состояние каждого этапа, счётчик записей, прогресс
   fan-out по целям, время этапа и причина падения обновляются на месте, под
   ними — последние находки. Цвет записей отражает severity nuclei и класс

@@ -612,6 +612,142 @@ class TestInitCommand:
         assert "up to date" not in result.stdout
         assert fake_github.downloads == 2  # type: ignore[attr-defined]
 
+    @staticmethod
+    def _register_gowitness_and_stub_install(monkeypatch: pytest.MonkeyPatch) -> None:
+        """Add gowitness to the workspace registry and make ``install`` a no-op.
+
+        Keeps the network out of it: only the chromium-provisioning wiring is
+        under test, not the real GitHub download.
+        """
+        from cyberfw.manager import InstallResult, ToolManager
+
+        with (Path.cwd() / "registry.yaml").open("a", encoding="utf-8") as handle:
+            handle.write("gowitness:\n  repo: sensepost/gowitness\n  asset_patterns: ['g_*']\n  binary: gowitness\n")
+
+        def fake_install(self, name: str, *, force: bool = False) -> InstallResult:  # type: ignore[no-untyped-def]
+            return InstallResult(self.spec(name), Path("tools_bin") / name / name, "1.0.0")
+
+        monkeypatch.setattr(ToolManager, "install", fake_install)
+
+    def test_init_gowitness_provisions_chromium(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self._register_gowitness_and_stub_install(monkeypatch)
+        called: list[bool] = []
+
+        def spy(manager, settings, table, *, force, spinner):  # type: ignore[no-untyped-def]
+            called.append(force)
+            return 0
+
+        monkeypatch.setattr("cyberfw.cli._provision_chromium", spy)
+        runner.invoke(app, ["init", "gowitness"])
+        assert called == [False]
+
+    def test_no_chromium_flag_skips_provisioning(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self._register_gowitness_and_stub_install(monkeypatch)
+        called: list[bool] = []
+        monkeypatch.setattr(
+            "cyberfw.cli._provision_chromium",
+            lambda *a, **k: called.append(True) or 0,
+        )
+        runner.invoke(app, ["init", "gowitness", "--no-chromium"])
+        assert called == []
+
+    def test_init_without_gowitness_does_not_provision_chromium(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._register_gowitness_and_stub_install(monkeypatch)
+        called: list[bool] = []
+        monkeypatch.setattr(
+            "cyberfw.cli._provision_chromium",
+            lambda *a, **k: called.append(True) or 0,
+        )
+        runner.invoke(app, ["init", "subfinder"])
+        assert called == []
+
+
+class TestProvisionChromium:
+    """The init helper that downloads a portable Chromium for gowitness."""
+
+    def _table(self):  # type: ignore[no-untyped-def]
+        from rich.table import Table
+
+        table = Table()
+        for col in ("tool", "version", "state", "detail"):
+            table.add_column(col)
+        return table
+
+    def _manager(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path):  # type: ignore[no-untyped-def]
+        from cyberfw.config import Settings
+        from cyberfw.manager import ToolManager, load_registry
+
+        settings = Settings(root_dir=tmp_path, tools_dir=tmp_path / "tools_bin")
+        (tmp_path / "registry.yaml").write_text("{}\n", encoding="utf-8")
+        manager = ToolManager(settings, load_registry(tmp_path / "registry.yaml"))
+        return manager, settings
+
+    def test_present_chrome_skips_download(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+        from cyberfw.cli import _provision_chromium
+
+        monkeypatch.setattr("cyberfw.tools.gowitness._find_chrome", lambda *_: "/usr/bin/chrome")
+        manager, settings = self._manager(monkeypatch, tmp_path)
+        called: list[bool] = []
+        monkeypatch.setattr(manager, "install_chromium", lambda **k: called.append(True))
+        table = self._table()
+        rc = _provision_chromium(manager, settings, table, force=False, spinner=None)
+        assert rc == 0
+        assert called == []  # a present Chrome means no download
+
+    def test_downloads_when_absent(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+        from cyberfw.cli import _provision_chromium
+        from cyberfw.manager.chromium import ChromiumInstallResult
+
+        monkeypatch.setattr("cyberfw.tools.gowitness._find_chrome", lambda *_: None)
+        manager, settings = self._manager(monkeypatch, tmp_path)
+        binary = settings.tools_dir / "chromium" / "chrome"
+        binary.parent.mkdir(parents=True, exist_ok=True)
+        binary.write_bytes(b"MZ")
+        monkeypatch.setattr(
+            manager,
+            "install_chromium",
+            lambda **k: ChromiumInstallResult(binary, "131.0.0"),
+        )
+        table = self._table()
+        rc = _provision_chromium(manager, settings, table, force=False, spinner=None)
+        assert rc == 0
+
+    def test_unsupported_platform_is_skipped_not_failed(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        from cyberfw.cli import _provision_chromium
+        from cyberfw.exceptions import ChromiumUnsupportedError
+
+        monkeypatch.setattr("cyberfw.tools.gowitness._find_chrome", lambda *_: None)
+        manager, settings = self._manager(monkeypatch, tmp_path)
+
+        def boom(**k):  # type: ignore[no-untyped-def]
+            raise ChromiumUnsupportedError("no build for linux/arm64")
+
+        monkeypatch.setattr(manager, "install_chromium", boom)
+        table = self._table()
+        rc = _provision_chromium(manager, settings, table, force=False, spinner=None)
+        assert rc == 0  # skipped, not a failure
+
+    def test_download_failure_counts_as_failure(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        from cyberfw.cli import _provision_chromium
+        from cyberfw.exceptions import DownloadError
+
+        monkeypatch.setattr("cyberfw.tools.gowitness._find_chrome", lambda *_: None)
+        manager, settings = self._manager(monkeypatch, tmp_path)
+
+        def boom(**k):  # type: ignore[no-untyped-def]
+            raise DownloadError("network down")
+
+        monkeypatch.setattr(manager, "install_chromium", boom)
+        table = self._table()
+        rc = _provision_chromium(manager, settings, table, force=False, spinner=None)
+        assert rc == 1
+
 
 class TestStatusCommand:
     def test_status_shows_tools_deps_and_settings(self) -> None:
@@ -1375,7 +1511,7 @@ class TestPreFlightExternalDependencies:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         self._add_tool(tmp_path, "gowitness")
-        monkeypatch.setattr("cyberfw.tools.gowitness._find_chrome", lambda: None)
+        monkeypatch.setattr("cyberfw.tools.gowitness._find_chrome", lambda *_: None)
 
         result = runner.invoke(app, ["pipeline", "recon-to-vuln", "-t", "example.com", "--gowitness"])
 
@@ -1385,7 +1521,7 @@ class TestPreFlightExternalDependencies:
 
     def test_force_start_runs_without_chrome(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         self._add_tool(tmp_path, "gowitness")
-        monkeypatch.setattr("cyberfw.tools.gowitness._find_chrome", lambda: None)
+        monkeypatch.setattr("cyberfw.tools.gowitness._find_chrome", lambda *_: None)
 
         result = runner.invoke(
             app,
@@ -1397,7 +1533,7 @@ class TestPreFlightExternalDependencies:
 
     def test_chrome_present_is_not_mentioned(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         self._add_tool(tmp_path, "gowitness")
-        monkeypatch.setattr("cyberfw.tools.gowitness._find_chrome", lambda: "/usr/bin/chromium")
+        monkeypatch.setattr("cyberfw.tools.gowitness._find_chrome", lambda *_: "/usr/bin/chromium")
 
         result = runner.invoke(
             app, ["pipeline", "recon-to-vuln", "-t", "example.com", "--gowitness", "--no-report"]

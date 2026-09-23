@@ -175,6 +175,9 @@ cyberfw init subfinder nuclei
 # Переустановить, даже если нужная версия уже стоит
 cyberfw init --force
 
+# Не докачивать portable Chromium для gowitness (по умолчанию докачивается)
+cyberfw init --no-chromium
+
 # Проверка готовности окружения (алиас: cyberfw doctor)
 cyberfw status
 
@@ -233,6 +236,25 @@ rustscan, Chrome для gowitness); и текущие настройки (`parse
 (`tools_bin/<tool>`, `tools_bin/<tool>_*.zip`) убираются при следующей
 установке того же инструмента; README/LICENSE прежних версий, если они
 остались на верхнем уровне `tools_bin/`, можно удалить вручную.
+
+### Portable Chromium для gowitness
+
+`gowitness` делает скриншоты через headless Chrome/Chromium, а тот не
+распространяется отдельным portable-бинарником. Поэтому, если в наборе есть
+`gowitness`, `cyberfw init` докачивает **Chrome for Testing** — официальную
+portable-сборку Google — в `tools_bin/chromium/` тем же механизмом, что и
+остальные инструменты (тот же безопасный распаковщик и повтор при обрывах).
+`gowitness` получает путь к ней через `--chrome-path`, так что этап скриншотов
+работает без установленного в системе браузера.
+
+- если Chrome/Chromium уже есть в системе (или portable уже скачан), повторно
+  ничего не качается — в таблице строка `chromium … present`;
+- скачанный Chromium имеет приоритет над системным и виден в `cyberfw status`
+  в блоке внешних зависимостей;
+- пропустить загрузку — `cyberfw init --no-chromium`;
+- Chrome for Testing собирается под `linux64`, `win32/64`, `mac-x64/arm64`; на
+  платформе без сборки (например Linux ARM64) строка помечается `skipped`, и
+  там по-прежнему нужен системный Chrome (`apt install chromium`).
 
 Флаг `--no-parse` доступен для отдельного запуска любой утилиты. Он отключает
 валидацию по Pydantic-схеме и выводит в реальном времени каждую строку stdout

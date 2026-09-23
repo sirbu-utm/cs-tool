@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from cyberfw.exceptions import ArchiveSafetyError, ChecksumError, DownloadError, ToolNotFoundError
+from cyberfw.exceptions import ChecksumError, DownloadError, ToolNotFoundError
 from cyberfw.manager.github_client import GitHubRelease, ReleaseAsset
 from cyberfw.manager.installer import ToolInstaller
 from cyberfw.manager.platform_map import Mapping
@@ -119,23 +119,6 @@ class TestArchiveBombs:
 
         with pytest.raises(DownloadError, match="corrupt"):
             installer.install(_spec(archive="tar"))
-
-
-class TestSafeMember:
-    def test_zip_slip_rejected(self, tmp_path: Path) -> None:
-        installer = _installer(tmp_path, _FakeClient(None, b""), _spec())
-        with pytest.raises(ArchiveSafetyError):
-            installer._safe_member("../evil.txt", installer.tools_dir / "subfinder")
-
-    def test_member_escaping_into_a_sibling_tool_dir_rejected(self, tmp_path: Path) -> None:
-        installer = _installer(tmp_path, _FakeClient(None, b""), _spec())
-        with pytest.raises(ArchiveSafetyError):
-            installer._safe_member("../httpx/httpx", installer.tools_dir / "subfinder")
-
-    def test_nested_within_root_allowed(self, tmp_path: Path) -> None:
-        installer = _installer(tmp_path, _FakeClient(None, b""), _spec())
-        target = installer._safe_member("subfinder_1.0/subfinder", installer.tools_dir / "subfinder")
-        assert target.relative_to(installer.tools_dir / "subfinder") == Path("subfinder_1.0/subfinder")
 
 
 class TestInstall:

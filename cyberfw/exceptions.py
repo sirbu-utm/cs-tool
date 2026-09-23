@@ -53,6 +53,10 @@ class ChecksumError(CyberfwError):
     """SHA-256 verification failed for a downloaded archive."""
 
 
+class ChromiumUnsupportedError(CyberfwError):
+    """Chrome for Testing publishes no portable build for the current OS/arch."""
+
+
 class ArchiveSafetyError(CyberfwError):
     """An archive tried to write outside the extraction directory (Zip Slip)."""
 
