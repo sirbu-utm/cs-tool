@@ -354,21 +354,27 @@ class PipelineEngine:
             extra_input=ctx.extra_input,
             output_dir=self._output_dir(),
         )
-        cmd = adapter.build_cmd(run_ctx)
-        await self._emit(StageEvent(kind="start", stage=node.stage, tool=node.tool, done=0, total=1))
-        return await run_stage(
-            cmd,
-            tool=node.tool,
-            stage=node.stage_id,
-            context=self.context,
-            on_record=self._on_record,
-            on_stderr=self._on_stderr,
-            on_stdout_raw=self._on_stdout_raw,
-            parse_line=adapter.parse_line,
-            parse_buffer=adapter.parse_output if adapter.buffered else None,
-            parse=parse,
-            timeout=self.settings.stage_timeout,
-        )
+        try:
+            cmd = adapter.build_cmd(run_ctx)
+            await self._emit(StageEvent(kind="start", stage=node.stage, tool=node.tool, done=0, total=1))
+            return await run_stage(
+                cmd,
+                tool=node.tool,
+                stage=node.stage_id,
+                context=self.context,
+                on_record=self._on_record,
+                on_stderr=self._on_stderr,
+                on_stdout_raw=self._on_stdout_raw,
+                parse_line=adapter.parse_line,
+                parse_buffer=adapter.parse_output if adapter.buffered else None,
+                parse=parse,
+                timeout=self.settings.stage_timeout,
+            )
+        finally:
+            # A session keeps its .input next to the stage's JSONL; without one
+            # it is a temp file only this process uses, so it goes with the stage.
+            if input_file is not None and self.context is None:
+                input_file.unlink(missing_ok=True)
 
     async def _fan_out(
         self, adapter: BaseTool, ctx: ToolContext, node: Node, *, parse: bool = True
@@ -439,7 +445,7 @@ class PipelineEngine:
 
         Lives in the session directory when there is one; an ad-hoc ``run --list``
         without ``--save`` has no session, so fall back to the system temp dir
-        rather than refusing to run the tool.
+        rather than refusing to run the tool (:meth:`_dispatch` removes it again).
         """
         if self.context is not None:
             path = self.context.session_dir / f"{stage_id}.input"

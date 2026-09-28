@@ -304,8 +304,14 @@ class TestEngine:
         )
         engine = _make_engine(tmp_path, registry_path)
         engine.context = None
-        script = tmp_path / "noop.py"
-        script.write_text("pass\n", encoding="utf-8")
+        script = tmp_path / "copy_list.py"
+        # The list only exists while the stage runs, so the tool copies what it was given.
+        script.write_text(
+            "import pathlib, sys\n"
+            "given = pathlib.Path(sys.argv[sys.argv.index('-l') + 1]).read_text(encoding='utf-8')\n"
+            "pathlib.Path(sys.argv[0]).with_name('listed.txt').write_text(given, encoding='utf-8')\n",
+            encoding="utf-8",
+        )
         stub = _CaptureCmdTool(engine.tool_manager.spec("subfinder"), script)
         engine.build_tool = lambda name: stub  # type: ignore[method-assign]
 
@@ -313,8 +319,9 @@ class TestEngine:
 
         assert node_result.ok, node_result.error
         assert _CaptureCmdTool.last_cmd is not None and "-l" in _CaptureCmdTool.last_cmd
-        listed = Path(_CaptureCmdTool.last_cmd[-1]).read_text(encoding="utf-8").split()
+        listed = (tmp_path / "listed.txt").read_text(encoding="utf-8").split()
         assert listed == ["a.example.com", "b.example.com"]
+        assert not Path(_CaptureCmdTool.last_cmd[-1]).exists(), "the temp list is removed after the stage"
 
     async def test_adapter_can_normalise_inputs_before_they_are_materialised(self, tmp_path: Path, monkeypatch) -> None:
         """RustScan wants bare hosts in its --addresses file even when upstream handed over URLs / host:port."""
@@ -484,6 +491,43 @@ class TestOutputDir:
 
         assert engine.context is not None
         assert adapter_cls.seen == [engine.context.session_dir]  # type: ignore[attr-defined]
+
+
+class TestUnsavedRunHostList:
+    """`run --list` without --save has no session, so its host list goes to the temp dir — and must not stay."""
+
+    @pytest.mark.parametrize("fails", [False, True], ids=["stage-ok", "stage-failed"])
+    async def test_the_temporary_host_list_is_removed_after_the_stage(
+        self, tmp_path: Path, monkeypatch, fails: bool
+    ) -> None:
+        registry_path = tmp_path / "registry.yaml"
+        registry_path.write_text(
+            "subfinder:\n  repo: org/subfinder\n  asset_patterns: []\n  binary: stub_probe.py\n",
+            encoding="utf-8",
+        )
+        settings = Settings(root_dir=tmp_path, reports_dir=tmp_path / "reports")
+        settings.ensure_dirs()
+        engine = PipelineEngine(settings, ToolManager(settings, load_registry(registry_path)), context=None)
+        temp = tmp_path / "tmp"
+        temp.mkdir()
+        monkeypatch.setattr("cyberfw.pipeline.engine.tempfile.gettempdir", lambda: str(temp))
+        adapter = _CaptureCmdTool(engine.tool_manager.spec("subfinder"), tmp_path / "stub_probe.py")
+        engine.build_tool = lambda name: adapter  # type: ignore[method-assign]
+        seen: list[str] = []
+
+        async def reads_the_list(command, **kwargs):
+            seen.append(Path(command[command.index("-l") + 1]).read_text(encoding="utf-8"))
+            if fails:
+                raise ExecutionError("subfinder exited with code 1", exit_code=1)
+            return []
+
+        monkeypatch.setattr("cyberfw.pipeline.engine.run_stage", reads_the_list)
+        await engine.run_single(
+            Node(tool="subfinder", stage="subfinder"), ToolContext(inputs=["a.example.com", "b.example.com"])
+        )
+
+        assert seen == ["a.example.com\nb.example.com\n"], "the tool still gets its list"
+        assert list(temp.iterdir()) == []
 
 
 class TestBuildToolDependencyCheck:
