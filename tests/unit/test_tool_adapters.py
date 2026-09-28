@@ -66,6 +66,15 @@ def test_gowitness_uses_v3_scan_single_command(monkeypatch: pytest.MonkeyPatch) 
     assert "--chrome-path" in command
 
 
+def test_gowitness_saves_screenshots_in_the_output_dir(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Screenshots belong to the session, not to whatever directory cyberfw was started from."""
+    monkeypatch.setattr("cyberfw.tools.gowitness._find_chrome", lambda *_: "/usr/bin/chrome")
+    command = _adapter("gowitness").build_cmd(  # type: ignore[attr-defined]
+        ToolContext(target="https://example.com", output_dir=tmp_path / "sess")
+    )
+    assert command[command.index("--screenshot-path") + 1] == str(tmp_path / "sess" / "screenshots")
+
+
 def test_gowitness_without_chrome_raises_clear_error(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("cyberfw.tools.gowitness._find_chrome", lambda *_: None)
     with pytest.raises(ToolNotFoundError, match="Chrome"):

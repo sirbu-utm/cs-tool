@@ -446,6 +446,44 @@ class TestToolContextDefaults:
         assert ctx.inputs == []
         assert ctx.input_file is None
         assert ctx.extra_input is None
+        assert ctx.output_dir is None
+
+
+class TestOutputDir:
+    """Tools that write files of their own (gowitness screenshots) get the session directory."""
+
+    @staticmethod
+    def _capture(per_target: bool) -> type[BaseTool]:
+        class _Capture(BaseTool):
+            seen: list[Path | None] = []
+
+            def build_cmd(self, ctx: ToolContext) -> list[str]:
+                type(self).seen.append(ctx.output_dir)
+                return ["unused"]
+
+        _Capture.per_target = per_target
+        return _Capture
+
+    @pytest.mark.parametrize("per_target", [True, False], ids=["fan-out", "single-process"])
+    async def test_stage_runs_with_the_session_dir(self, tmp_path: Path, monkeypatch, per_target: bool) -> None:
+        registry_path = tmp_path / "registry.yaml"
+        registry_path.write_text(
+            "subfinder:\n  repo: org/subfinder\n  asset_patterns: []\n  binary: stub_probe.py\n",
+            encoding="utf-8",
+        )
+        engine = _make_engine(tmp_path, registry_path)
+        adapter_cls = self._capture(per_target)
+        adapter = adapter_cls(engine.tool_manager.spec("subfinder"), tmp_path / "stub_probe.py")
+        engine.build_tool = lambda name: adapter  # type: ignore[method-assign]
+
+        async def no_process(command, **kwargs):
+            return []
+
+        monkeypatch.setattr("cyberfw.pipeline.engine.run_stage", no_process)
+        await engine.run([Node(tool="subfinder", stage="shots")], seed="https://example.com")
+
+        assert engine.context is not None
+        assert adapter_cls.seen == [engine.context.session_dir]  # type: ignore[attr-defined]
 
 
 class TestBuildToolDependencyCheck:

@@ -43,12 +43,18 @@ class ToolContext:
 
     .. attribute:: extra_input
        Optional secondary path (e.g. a fuzz wordlist) supplied by the user.
+
+    .. attribute:: output_dir
+       The session directory, for a tool that writes files of its own (gowitness
+       screenshots) — so they live and die with the session's reports.
+       ``None`` when the run has no session (an unsaved ``cyberfw run``).
     """
 
     target: str | None = None
     inputs: list[str] = field(default_factory=list)
     input_file: Path | None = None
     extra_input: str | None = None
+    output_dir: Path | None = None
 
 
 class BaseTool(ABC):

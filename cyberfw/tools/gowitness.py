@@ -86,6 +86,9 @@ class GowitnessTool(BaseTool):
         base = targets[0]
         if not base.startswith(("http://", "https://")):
             base = f"https://{base}"
+        # Inside the session, so the images sit next to the report and go with
+        # it when the user declines to save; relative to the CWD only without one.
+        screenshots = str(ctx.output_dir / "screenshots") if ctx.output_dir else "screenshots"
         return [
             str(self.binary),
             "scan",
@@ -95,7 +98,7 @@ class GowitnessTool(BaseTool):
             "--chrome-path",
             chrome,
             "--screenshot-path",
-            "screenshots",
+            screenshots,
             "--write-stdout",
             "-q",
             *self._static_flags(),

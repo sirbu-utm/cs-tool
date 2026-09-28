@@ -352,6 +352,7 @@ class PipelineEngine:
             inputs=inputs,
             input_file=input_file,
             extra_input=ctx.extra_input,
+            output_dir=self._output_dir(),
         )
         cmd = adapter.build_cmd(run_ctx)
         await self._emit(StageEvent(kind="start", stage=node.stage, tool=node.tool, done=0, total=1))
@@ -385,9 +386,13 @@ class PipelineEngine:
                 StageEvent(kind="progress", stage=node.stage, tool=node.tool, done=finished, total=len(targets))
             )
 
+        output_dir = self._output_dir()
+
         async def run_target(target: str) -> list[ToolRecord]:
             async with semaphore:
-                cmd = adapter.build_cmd(ToolContext(target=target, extra_input=ctx.extra_input))
+                cmd = adapter.build_cmd(
+                    ToolContext(target=target, extra_input=ctx.extra_input, output_dir=output_dir)
+                )
                 try:
                     return await run_stage(
                         cmd,
@@ -424,6 +429,10 @@ class PipelineEngine:
                 partial_records=records,
             )
         return records
+
+    def _output_dir(self) -> Path | None:
+        """Where a tool writes files of its own: the session directory, if there is one."""
+        return self.context.session_dir if self.context is not None else None
 
     def _materialize(self, stage_id: str, inputs: list[str]) -> Path:
         """Write ``inputs`` one per line and return the file the tool's list flag should point at.
