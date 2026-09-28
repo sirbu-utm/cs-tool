@@ -11,12 +11,18 @@ under the same rules:
   fill the disk (:func:`assert_extract_size`). The stdlib bounds each member to
   its declared size, so a member that lies about being small still cannot inflate
   past the checked total.
+* **Unix modes** — on POSIX, a member's exec bits and symlinks are kept, as
+  ``unzip`` would. ``zipfile.extract`` drops both, which leaves Chromium's
+  ``chrome_crashpad_handler`` unrunnable on Linux and turns the macOS
+  ``.framework`` symlinks into text files. A symlink whose target leaves the
+  destination is refused like any other Zip Slip.
 """
 
 from __future__ import annotations
 
 import os
 import shutil
+import stat
 import zipfile
 from pathlib import Path
 
@@ -49,6 +55,7 @@ def assert_extract_size(total: int, archive_name: str, limit: int) -> None:
 
 def safe_extract_zip(archive_path: Path, dest: Path, *, max_size: int) -> None:
     """Extract a zip into ``dest`` with the Zip Slip and size guards applied."""
+    keep_modes = os.name != "nt"
     with zipfile.ZipFile(archive_path) as zf:
         assert_extract_size(sum(i.file_size for i in zf.infolist()), archive_path.name, max_size)
         for info in zf.infolist():
@@ -57,5 +64,23 @@ def safe_extract_zip(archive_path: Path, dest: Path, *, max_size: int) -> None:
                 target.mkdir(parents=True, exist_ok=True)
                 continue
             target.parent.mkdir(parents=True, exist_ok=True)
+            mode = info.external_attr >> 16
+            if keep_modes and stat.S_ISLNK(mode):
+                _extract_symlink(zf, info, target, dest)
+                continue
             with zf.open(info) as src, open(target, "wb") as out:
                 shutil.copyfileobj(src, out)
+            if keep_modes and mode & 0o111:
+                target.chmod(target.stat().st_mode | (mode & 0o111))
+
+
+def _extract_symlink(zf: zipfile.ZipFile, info: zipfile.ZipInfo, target: Path, dest: Path) -> None:
+    """Recreate a symlink member, refusing one whose target escapes ``dest``."""
+    link = zf.read(info).decode("utf-8")
+    resolved = (target.parent / link).resolve()
+    root = dest.resolve()
+    if resolved != root and root not in resolved.parents:
+        raise ArchiveSafetyError(f"Archive symlink escapes {dest.name}/: {info.filename!r} -> {link!r}")
+    if target.is_symlink() or target.exists():
+        target.unlink()
+    target.symlink_to(link)

@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import io
+import os
+import stat
 import zipfile
 from pathlib import Path
 
@@ -69,3 +71,60 @@ class TestSafeExtractZip:
         with pytest.raises(DownloadError, match="limit"):
             safe_extract_zip(archive, dest, max_size=16)
         assert not dest.exists() or not any(dest.rglob("*"))
+
+
+def _unix_zip(tmp_path: Path, members: list[tuple[str, int, bytes]]) -> Path:
+    """A zip whose members carry Unix modes, as Chrome for Testing's do."""
+    archive = tmp_path / "unix.zip"
+    with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as zf:
+        for name, mode, data in members:
+            info = zipfile.ZipInfo(name)
+            info.create_system = 3  # Unix, so external_attr holds st_mode
+            info.external_attr = mode << 16
+            zf.writestr(info, data)
+    return archive
+
+
+@pytest.mark.skipif(os.name == "nt", reason="exec bits and symlinks are POSIX concepts")
+class TestSafeExtractZipUnixModes:
+    """Chrome for Testing ships helpers that must stay executable and frameworks built on symlinks."""
+
+    def test_keeps_the_exec_bit_of_every_executable_member(self, tmp_path: Path) -> None:
+        archive = _unix_zip(
+            tmp_path,
+            [
+                ("chrome-linux64/chrome", stat.S_IFREG | 0o755, b"\x7fELF"),
+                ("chrome-linux64/chrome_crashpad_handler", stat.S_IFREG | 0o755, b"\x7fELF"),
+                ("chrome-linux64/resources.pak", stat.S_IFREG | 0o644, b"data"),
+            ],
+        )
+        dest = tmp_path / "chromium"
+
+        safe_extract_zip(archive, dest, max_size=1 << 20)
+
+        assert os.access(dest / "chrome-linux64" / "chrome_crashpad_handler", os.X_OK)
+        assert not os.access(dest / "chrome-linux64" / "resources.pak", os.X_OK)
+
+    def test_recreates_symlinks_instead_of_writing_their_target_as_text(self, tmp_path: Path) -> None:
+        framework = "Chrome.app/Contents/Frameworks/Chrome Framework.framework"
+        archive = _unix_zip(
+            tmp_path,
+            [
+                (f"{framework}/Versions/154.0/Chrome Framework", stat.S_IFREG | 0o755, b"\xcf\xfa\xed\xfe"),
+                (f"{framework}/Versions/Current", stat.S_IFLNK | 0o777, b"154.0"),
+            ],
+        )
+        dest = tmp_path / "chromium"
+
+        safe_extract_zip(archive, dest, max_size=1 << 20)
+
+        current = dest / framework / "Versions" / "Current"
+        assert current.is_symlink()
+        assert os.readlink(current) == "154.0"
+        assert (current / "Chrome Framework").read_bytes() == b"\xcf\xfa\xed\xfe"
+
+    def test_symlink_pointing_outside_the_destination_is_refused(self, tmp_path: Path) -> None:
+        archive = _unix_zip(tmp_path, [("chrome/escape", stat.S_IFLNK | 0o777, b"../../outside")])
+
+        with pytest.raises(ArchiveSafetyError):
+            safe_extract_zip(archive, tmp_path / "chromium", max_size=1 << 20)
