@@ -52,6 +52,16 @@ def _silence_tool(root: Path, tool: str) -> None:
     binary.chmod(binary.stat().st_mode | stat.S_IEXEC)
 
 
+def _slow_tool(root: Path, tool: str, seconds: float) -> None:
+    """Make a workspace binary take ``seconds`` before printing its usual output."""
+    binary = root / "tools_bin" / tool
+    binary.write_text(
+        f"#!/usr/bin/env bash\nsleep {seconds}\n" f'printf "%s" \'{_FAKE_OUTPUT[tool]}\'\n',
+        encoding="utf-8",
+    )
+    binary.chmod(binary.stat().st_mode | stat.S_IEXEC)
+
+
 def _break_tool(root: Path, tool: str, exit_code: int = 7) -> None:
     """Replace a workspace binary with one that exits non-zero."""
     binary = root / "tools_bin" / tool
@@ -1466,6 +1476,33 @@ class TestSavePrompt:
         session = tmp_path / "reports" / "single"
         assert (session / "report.json").is_file()
         assert (session / "subfinder.jsonl").is_file(), "the records themselves are archived too"
+
+    def test_run_save_flag_writes_both_reports(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """--save used to keep only the JSONL; the README promises report.json and report.html too."""
+        self._never_asks(monkeypatch)
+
+        result = runner.invoke(app, ["run", "subfinder", "-t", "example.com", "--session", "flagged", "--save"])
+
+        assert result.exit_code == 0, result.stdout
+        session = tmp_path / "reports" / "flagged"
+        assert (session / "report.json").is_file()
+        assert (session / "report.html").is_file()
+        lines = (session / "subfinder.jsonl").read_text(encoding="utf-8").splitlines()
+        assert len(lines) == 1, "records streamed during the run are not written a second time"
+
+    @pytest.mark.parametrize("flags", [["--save"], []], ids=["save-flag", "answered-yes"])
+    def test_run_report_times_the_tool_not_the_save(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, flags: list[str]
+    ) -> None:
+        """The run's duration covers the process; it used to be stamped at save time (~0 s)."""
+        _slow_tool(tmp_path, "subfinder", seconds=0.5)
+        self._answer(monkeypatch, True)
+
+        result = runner.invoke(app, ["run", "subfinder", "-t", "example.com", "--session", "slow", *flags])
+
+        assert result.exit_code == 0, result.stdout
+        run = json.loads((tmp_path / "reports" / "slow" / "report.json").read_text(encoding="utf-8"))["run"]
+        assert run["duration_s"] >= 0.5
 
     def test_run_writes_nothing_on_no(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         self._answer(monkeypatch, False)

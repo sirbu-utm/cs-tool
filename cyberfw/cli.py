@@ -848,6 +848,9 @@ def run_cmd(
     # (CYBERFW_PARSE=false) or override per-run with --no-parse.
     do_parse = settings.parse and not no_parse
 
+    # Timed here, around the process, so a saved report's duration is the
+    # tool's — not the instant the user answered the save prompt.
+    started_at = datetime.now(timezone.utc)
     if not do_parse:
         why = "--no-parse" if no_parse else "config parse=false"
         console.print(f"[muted]{why}: streaming raw stdout/stderr exactly as the tool prints it[/muted]")
@@ -888,22 +891,24 @@ def run_cmd(
             console.print(_record_table(records))
         else:
             console.print("[muted]No records found.[/muted]")
+    finished_at = datetime.now(timezone.utc)
 
     if context is not None:
         context.close()
-    if save:
-        console.print(f"[ok]saved:[/ok] {settings.reports_dir / session_id}")
-    elif records and _wants_to_save(save, default=False, what=tool):
-        # Nothing was streamed, so archive the records now and report on them.
+    # --save decided up front (and streamed the records as they came); an
+    # undecided run asks now, and only when there is something to keep.
+    if save or (save is None and records and _wants_to_save(save, default=False, what=tool)):
         result = PipelineResult(
             nodes=[node_result],
             records=records,
-            started_at=datetime.now(timezone.utc),
-            finished_at=datetime.now(timezone.utc),
+            started_at=started_at,
+            finished_at=finished_at,
         )
-        with SessionContext(settings.reports_dir, session_id) as store:
-            for record in records:
-                store.append(tool, record)
+        if context is None:
+            # Nothing was streamed, so archive the records now.
+            with SessionContext(settings.reports_dir, session_id) as store:
+                for record in records:
+                    store.append(tool, record)
         written = _write_reports(
             result,
             session_id=session_id,
