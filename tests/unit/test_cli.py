@@ -1379,6 +1379,30 @@ class TestPipelinePreFlight:
         assert result.exit_code == 0
 
 
+class TestSessionName:
+    """--session names a directory under reports/; it must not reach anywhere else."""
+
+    @pytest.mark.parametrize("session", ["../escape", "..\\escape", "..", "nested/dir", "C:escape"])
+    @pytest.mark.parametrize(
+        "command",
+        [["run", "subfinder", "-t", "example.com", "--save"], ["pipeline", "recon-to-vuln", "-t", "example.com"]],
+        ids=["run", "pipeline"],
+    )
+    def test_a_path_is_a_usage_error(self, tmp_path: Path, command: list[str], session: str) -> None:
+        result = runner.invoke(app, [*command, "--session", session])
+
+        assert result.exit_code == 2, result.stdout
+        assert "--session" in result.stdout
+        assert not (tmp_path / "escape").exists()
+        assert not (tmp_path / "reports" / "nested").exists()
+
+    def test_a_plain_name_is_accepted(self, tmp_path: Path) -> None:
+        result = runner.invoke(app, ["pipeline", "recon-to-vuln", "-t", "example.com", "--session", "scan-01.b_2"])
+
+        assert result.exit_code == 0, result.stdout
+        assert (tmp_path / "reports" / "scan-01.b_2" / "report.json").is_file()
+
+
 class TestSavePrompt:
     """Saving is the user's call: after the results are on screen, the command asks.
     Explicit flags answer it in advance, and a non-interactive session never blocks.

@@ -321,6 +321,19 @@ def _session_tag(kind: str, name: str) -> str:
     return f"{kind}-{name}-{strftime('%Y%m%d-%H%M%S')}"
 
 
+def _checked_session(session: str) -> str:
+    """Accept ``--session`` only as a plain directory name under ``reports/``.
+
+    It is joined onto the reports directory, and a session this run created is
+    removed when the user declines to save — so ``../x``, ``a/b`` or ``C:x``
+    must never get as far as a path. A usage error, exit 2.
+    """
+    if session in {".", ".."} or any(ch in session for ch in "/\\:"):
+        console.print(f"[err]--session must be a plain directory name under reports/, got {session!r}.[/err]")
+        raise typer.Exit(2)
+    return session
+
+
 def _tool_state(manager: ToolManager, name: str, tools_dir: Path) -> str:
     """``ready`` / ``blocked`` / ``not installed`` for one registered tool.
 
@@ -808,6 +821,8 @@ def run_cmd(
     if target is None and list_file is None:
         console.print("[err]Provide a target via --target and/or a host list via --list.[/err]")
         raise typer.Exit(2)
+    if session:
+        _checked_session(session)
 
     settings, manager = _bootstrap(verbose=verbose)
     try:
@@ -958,6 +973,8 @@ def pipeline_cmd(
     if target is None:
         console.print("[err]Provide a seed target via --target.[/err]")
         raise typer.Exit(2)
+    if session:
+        _checked_session(session)
 
     settings, manager = _bootstrap(verbose=verbose)
     try:
