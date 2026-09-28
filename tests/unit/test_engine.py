@@ -416,6 +416,28 @@ class TestEngine:
                 adapter, ToolContext(inputs=["host-0", "host-1"]), Node(tool="subfinder", stage="fan-out")
             )
 
+    async def test_fan_out_keeps_what_failing_targets_found(self, tmp_path: Path, monkeypatch) -> None:
+        """A target that times out after some hits keeps them, whether or not its siblings succeed."""
+        registry_path = tmp_path / "registry.yaml"
+        registry_path.write_text(
+            "subfinder:\n  repo: org/subfinder\n  asset_patterns: []\n  binary: stub_probe.py\n",
+            encoding="utf-8",
+        )
+        engine = _make_engine(tmp_path, registry_path)
+        adapter = _PerTargetTool(engine.tool_manager.spec("subfinder"), tmp_path / "stub_probe.py")
+
+        async def times_out_after_one_hit(command, **kwargs):
+            found = [ToolRecord(tool="subfinder", target=f"{command[0]}/admin", kind="fuzz")]
+            raise ExecutionError("ffuf timed out after 1s", partial_records=found)
+
+        monkeypatch.setattr("cyberfw.pipeline.engine.run_stage", times_out_after_one_hit)
+        with pytest.raises(ExecutionError, match="all 2 target") as exc_info:
+            await engine._fan_out(
+                adapter, ToolContext(inputs=["host-0", "host-1"]), Node(tool="subfinder", stage="fan-out")
+            )
+
+        assert [r.target for r in exc_info.value.partial_records] == ["host-0/admin", "host-1/admin"]
+
 
 class TestToolContextDefaults:
     def test_empty_context(self) -> None:
@@ -527,6 +549,39 @@ class TestStageTimeout:
         assert not result.succeeded()
         assert result.nodes[0].error is not None
         assert "timed out" in result.nodes[0].error
+
+    @pytest.mark.parametrize(
+        ("tail", "timeout", "why"),
+        [("time.sleep(30)", 0.5, "timed out"), ("sys.exit(9)", None, "exited with code 9")],
+        ids=["timeout", "non-zero-exit"],
+    )
+    async def test_findings_before_the_failure_stay_in_the_result(
+        self, tmp_path: Path, tail: str, timeout: float | None, why: str
+    ) -> None:
+        """The stage still fails, but what it found before failing reaches the report."""
+        registry_path = tmp_path / "registry.yaml"
+        registry_path.write_text(
+            "subfinder:\n  repo: org/subfinder\n  asset_patterns: []\n  binary: partial.py\n",
+            encoding="utf-8",
+        )
+        engine = _make_engine(tmp_path, registry_path)
+        engine.settings.stage_timeout = timeout
+        script = tmp_path / "partial.py"
+        script.write_text(
+            "import json, sys, time\n"
+            "print(json.dumps({'host': 'early.example.com'}), flush=True)\n"
+            f"{tail}\n",
+            encoding="utf-8",
+        )
+        stub = _StubTool(engine.tool_manager.spec("subfinder"), script)
+        engine.build_tool = lambda name: stub  # type: ignore[method-assign]
+
+        result = await engine.run([Node(tool="subfinder", stage="sub")], seed="x")
+
+        assert result.nodes[0].ok is False
+        assert why in (result.nodes[0].error or "")
+        assert result.nodes[0].count == 1
+        assert [r.target for r in result.records] == ["early.example.com"]
 
 
 class TestRunSingle:

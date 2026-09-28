@@ -21,6 +21,20 @@ def _write_script(tmp_path: Path, body: str) -> Path:
 
 
 class TestRunStage:
+    async def test_records_before_a_non_zero_exit_travel_with_the_error(self, tmp_path: Path) -> None:
+        script = _write_script(
+            tmp_path,
+            "import json, sys\n"
+            "print(json.dumps({'host': 'found.example.com'}), flush=True)\n"
+            "sys.exit(3)\n",
+        )
+
+        with pytest.raises(ExecutionError) as exc_info:
+            await run_stage([sys.executable, str(script)], tool="subfinder", stage="sub", context=None)
+
+        assert exc_info.value.exit_code == 3
+        assert [r.target for r in exc_info.value.partial_records] == ["found.example.com"]
+
     async def test_parses_jsonl_stdout(self, tmp_path: Path) -> None:
         script = _write_script(
             tmp_path,
@@ -474,6 +488,20 @@ class TestTimeout:
                     [sys.executable, str(script)], tool="subfinder", stage="sub", context=context, timeout=0.5
                 )
             assert context.targets("sub") == ["early.example.com"]
+
+    async def test_records_streamed_before_the_deadline_travel_with_the_error(self, tmp_path: Path) -> None:
+        """A 29-minute nuclei run that hits stage_timeout must not lose its findings to the report."""
+        script = _write_script(
+            tmp_path,
+            "import json, time\n"
+            "print(json.dumps({'host': 'early.example.com'}), flush=True)\n"
+            "time.sleep(30)\n",
+        )
+
+        with pytest.raises(ExecutionError, match="timed out") as exc_info:
+            await run_stage([sys.executable, str(script)], tool="subfinder", stage="sub", context=None, timeout=0.5)
+
+        assert [r.target for r in exc_info.value.partial_records] == ["early.example.com"]
 
     async def test_no_timeout_by_default(self, tmp_path: Path) -> None:
         script = _write_script(tmp_path, "import time\ntime.sleep(0.6)\n")

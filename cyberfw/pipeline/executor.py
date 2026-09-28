@@ -207,8 +207,9 @@ async def run_stage(
 
     Returns the list of validated records. Raises :class:`ExecutionError` if the
     process exits non-zero, dies from a signal/OOM, or is still running after
-    ``timeout`` seconds (it is then stopped like on cancellation; records already
-    streamed stay in the context store). ``on_record`` is awaited
+    ``timeout`` seconds (it is then stopped like on cancellation); records already
+    streamed stay in the context store and ride along as the error's
+    ``partial_records``. ``on_record`` is awaited
     per validated record (Rich live table), before persisting to ``context``.
     ``on_stderr`` is awaited per stderr line as it arrives (e.g. ``--no-parse``
     passthrough), independently of the bounded tail kept for error reporting.
@@ -313,6 +314,7 @@ async def run_stage(
             raise ExecutionError(
                 f"{tool} timed out after {timeout:g}s",
                 stderr_tail=list(stderr_tail),
+                partial_records=records,
             ) from None
         exit_code = await proc.wait()
         if exit_code != 0:
@@ -320,6 +322,7 @@ async def run_stage(
                 f"{tool} {_describe_crash(exit_code)}",
                 exit_code=exit_code,
                 stderr_tail=list(stderr_tail),
+                partial_records=records,
             )
         if buffered and parse_buffer is not None:
             for rec in parse_buffer("\n".join(buffer_lines)):

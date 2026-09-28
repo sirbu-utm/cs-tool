@@ -8,6 +8,10 @@ callers can react precisely instead of catching bare ``OSError``/``ValueError``.
 from __future__ import annotations
 
 from collections.abc import Sequence
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:  # schemas imports this module; the annotation must not
+    from cyberfw.pipeline.schemas import ToolRecord
 
 __all__ = [
     "CyberfwError",
@@ -62,12 +66,24 @@ class ArchiveSafetyError(CyberfwError):
 
 
 class ExecutionError(CyberfwError):
-    """An external tool ran but failed (non-zero exit, crash, OOM)."""
+    """An external tool ran but failed (non-zero exit, crash, OOM, timeout).
 
-    def __init__(self, message: str, *, exit_code: int | None = None, stderr_tail: Sequence[str] | None = None) -> None:
+    ``partial_records`` holds what the tool emitted before it failed, so a scan
+    that times out late still delivers its findings to the report.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        exit_code: int | None = None,
+        stderr_tail: Sequence[str] | None = None,
+        partial_records: Sequence[ToolRecord] | None = None,
+    ) -> None:
         super().__init__(message)
         self.exit_code = exit_code
         self.stderr_tail = list(stderr_tail or [])
+        self.partial_records = list(partial_records or [])
 
 
 class ParseError(CyberfwError):

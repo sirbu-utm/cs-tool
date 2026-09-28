@@ -6,8 +6,9 @@ an earlier stage's validated records — the immediately preceding node by
 default, or the node named by ``Node.input_from``. Tools that accept a host
 list run in one process via ``-l``/``-iL``; ``per_target`` tools fan out one
 invocation per input.
-A crashed or non-zero child (:class:`ExecutionError`) is recorded on the node but
-never aborts the whole pipeline — the stage simply contributes no records.
+A crashed, non-zero or timed-out child (:class:`ExecutionError`) is recorded on
+the node but never aborts the whole pipeline — the stage keeps whatever records
+it emitted before failing, and the stages that read it are skipped.
 """
 
 from __future__ import annotations
@@ -305,7 +306,10 @@ class PipelineEngine:
             records = await self._dispatch(adapter, ctx, node, parse=parse)
         except ExecutionError as exc:
             LOG.warning("stage %s failed: %s (stderr tail: %s)", node.stage, exc, exc.stderr_tail)
-            return NodeResult(node=node, ok=False, count=0, error=str(exc)), []
+            # Still a failed stage (its consumers are skipped), but what the tool
+            # found before timing out or crashing belongs in the report.
+            partial = exc.partial_records[: node.max_records] if node.max_records else exc.partial_records
+            return NodeResult(node=node, ok=False, count=len(partial), error=str(exc)), partial
         except (ToolNotFoundError, ValueError) as exc:
             # Expected, user-actionable pre-flight errors (missing wordlist,
             # missing target): a clean stage failure, no scary traceback.
@@ -405,19 +409,21 @@ class PipelineEngine:
                         "%s failed for %s: %s (stderr tail: %s)", node.tool, target, exc, exc.stderr_tail
                     )
                     failures.append((target, exc))
-                    return []
+                    return exc.partial_records
                 finally:
                     await report_progress()
 
         batches = await asyncio.gather(*(run_target(target) for target in targets))
+        records = [record for batch in batches for record in batch]
         if targets and len(failures) == len(targets):
             first = failures[0][1]
             raise ExecutionError(
                 f"{node.tool} failed for all {len(targets)} target(s); first error: {first}",
                 exit_code=first.exit_code,
                 stderr_tail=first.stderr_tail,
+                partial_records=records,
             )
-        return [record for batch in batches for record in batch]
+        return records
 
     def _materialize(self, stage_id: str, inputs: list[str]) -> Path:
         """Write ``inputs`` one per line and return the file the tool's list flag should point at.
