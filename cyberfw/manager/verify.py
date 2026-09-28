@@ -105,22 +105,25 @@ def ensure_binary(tools_dir: Path, name: str, binary_hint: str | None = None) ->
 def verify_checksum(checksums_text: str | bytes, asset_name: str, archive_path: Path) -> bool:
     """Check ``archive_path`` against the SHA-256 upstream lists for ``asset_name``.
 
-    ``checksums_text`` is the body of ``checksums.txt``; filenames may carry a
-    leading ``*``/`` `` (BSD/GPG signing style). Returns True when an entry was
-    found and matched, False when the file has no entry for this asset (the
-    caller decides how loudly to report an unverified download); a
-    present-but-mismatched entry raises :class:`ChecksumError` so a corrupted
-    download is never unpacked.
+    ``checksums_text`` is the body of ``checksums.txt``: ``<sha256>  <name>``
+    lines, where the name may carry a leading ``*`` (binary mode) or a
+    directory. The name must equal ``asset_name`` exactly — a suffix match
+    would take ``mytool_linux_amd64.zip``'s line for ``tool_linux_amd64.zip``.
+    Returns True when an entry was found and matched, False when the file has
+    no entry for this asset (the caller decides how loudly to report an
+    unverified download); a present-but-mismatched entry raises
+    :class:`ChecksumError` so a corrupted download is never unpacked.
     """
     if isinstance(checksums_text, bytes):
         checksums_text = checksums_text.decode("utf-8", errors="replace")
     entry: str | None = None
     for line in checksums_text.splitlines():
-        line = line.strip()
-        if not line:
+        parts = line.strip().split(maxsplit=1)
+        if len(parts) != 2:
             continue
-        if line.endswith(asset_name) or f"*{asset_name}" in line:
-            entry = line.split()[0]
+        digest, name = parts
+        if name.lstrip("*").rsplit("/", 1)[-1] == asset_name:
+            entry = digest
             break
     if entry is None:
         return False  # upstream publishes no checksum for this archive

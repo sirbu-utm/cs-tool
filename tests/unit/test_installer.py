@@ -15,7 +15,7 @@ from cyberfw.manager.github_client import GitHubRelease, ReleaseAsset
 from cyberfw.manager.installer import ToolInstaller
 from cyberfw.manager.platform_map import Mapping
 from cyberfw.manager.registry import ToolSpec
-from cyberfw.manager.verify import sha256_hex
+from cyberfw.manager.verify import sha256_hex, verify_checksum
 
 
 def _zip_bytes(members: dict[str, bytes]) -> bytes:
@@ -290,6 +290,41 @@ def _write_tmp_archive(tmp_path: Path, data: bytes) -> Path:
     dest = tmp_path / "reference.zip"
     dest.write_bytes(data)
     return dest
+
+
+class TestVerifyChecksum:
+    """checksums.txt lines are `<sha256>  [*]<file name>`; the name must match exactly."""
+
+    @staticmethod
+    def _archive(tmp_path: Path) -> tuple[Path, str]:
+        archive = tmp_path / "tool_1.0.0_linux_amd64.zip"
+        archive.write_bytes(b"the real archive")
+        return archive, sha256_hex(archive)
+
+    def test_an_entry_for_a_longer_name_ending_the_same_is_not_ours(self, tmp_path: Path) -> None:
+        archive, digest = self._archive(tmp_path)
+        checksums = (
+            f"{'0' * 64}  mytool_1.0.0_linux_amd64.zip\n"  # listed first, merely ends with our name
+            f"{digest}  tool_1.0.0_linux_amd64.zip\n"
+        )
+
+        assert verify_checksum(checksums, archive.name, archive) is True
+
+    def test_binary_mode_marker_is_accepted(self, tmp_path: Path) -> None:
+        archive, digest = self._archive(tmp_path)
+
+        assert verify_checksum(f"{digest} *tool_1.0.0_linux_amd64.zip\n", archive.name, archive) is True
+
+    def test_no_entry_for_the_asset_is_unverified_not_an_error(self, tmp_path: Path) -> None:
+        archive, _digest = self._archive(tmp_path)
+
+        assert verify_checksum(f"{'0' * 64}  mytool_1.0.0_linux_amd64.zip\n", archive.name, archive) is False
+
+    def test_a_mismatch_for_our_exact_name_still_raises(self, tmp_path: Path) -> None:
+        archive, _digest = self._archive(tmp_path)
+
+        with pytest.raises(ChecksumError):
+            verify_checksum(f"{'0' * 64}  tool_1.0.0_linux_amd64.zip\n", archive.name, archive)
 
 
 def test_missing_binary_message_mentions_blocked_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
