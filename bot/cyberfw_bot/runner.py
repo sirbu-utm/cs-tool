@@ -20,6 +20,10 @@ __all__ = ["ScanOutcome", "CyberfwRunner"]
 #: Tail of stdout/stderr kept for diagnostics on failure.
 _TAIL = 4000
 
+#: Environment variables that configure the bot itself and are withheld from
+#: the cyberfw subprocess (BOT_TOKEN, BOT_*, ALLOWED_USER_IDS).
+_BOT_ENV_PREFIXES = ("BOT_", "ALLOWED_USER_IDS")
+
 
 @dataclass(frozen=True)
 class ScanOutcome:
@@ -56,7 +60,9 @@ class CyberfwRunner:
         ]
 
     def _env(self) -> dict[str, str]:
-        env = dict(os.environ)
+        # The bot's own settings — above all BOT_TOKEN — are of no use to cyberfw
+        # or the scanners it starts, so they never reach the child environment.
+        env = {key: value for key, value in os.environ.items() if not key.startswith(_BOT_ENV_PREFIXES)}
         # Belt and braces: pin the workspace and the per-tool timeout regardless
         # of where the bot process was started from.
         env["CYBERFW_ROOT_DIR"] = str(self._config.workspace)

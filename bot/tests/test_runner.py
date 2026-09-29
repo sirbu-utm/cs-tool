@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 
@@ -60,6 +61,30 @@ async def test_a_scan_that_overruns_is_stopped(tmp_path: Path) -> None:
 
     assert outcome.timed_out is True
     assert outcome.report_json is None
+
+
+_DUMPS_ENV = (
+    "import json, os\n"
+    "open('env-dump.json', 'w').write(json.dumps(dict(os.environ)))\n"
+)
+
+
+async def test_the_bot_settings_never_reach_the_cyberfw_process(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """cyberfw and the scanners it starts have no use for the bot's own settings."""
+    monkeypatch.setenv("BOT_TOKEN", "unit-test-placeholder")
+    monkeypatch.setenv("ALLOWED_USER_IDS", "42")
+    monkeypatch.setenv("KEEP_ME", "yes")
+    config = make_config(tmp_path, cyberfw_cmd=_fake_cyberfw(tmp_path, body=_DUMPS_ENV))
+
+    await CyberfwRunner(config).run("example.com", session="bot-env")
+
+    child_env = json.loads((tmp_path / "env-dump.json").read_text(encoding="utf-8"))
+    assert "BOT_TOKEN" not in child_env
+    assert "ALLOWED_USER_IDS" not in child_env
+    assert child_env.get("KEEP_ME") == "yes"  # unrelated vars still pass through
+    assert child_env.get("CYBERFW_ROOT_DIR") == str(tmp_path)  # and cyberfw's own are set
 
 
 async def test_a_missing_cyberfw_binary_is_an_outcome_not_a_crash(tmp_path: Path) -> None:

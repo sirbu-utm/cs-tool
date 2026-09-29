@@ -3,7 +3,12 @@
 from __future__ import annotations
 
 from _helpers import SAMPLE_REPORT
-from cyberfw_bot.formatting import status_message, summary_message
+from cyberfw_bot.formatting import (
+    failed_message,
+    queued_message,
+    status_message,
+    summary_message,
+)
 from cyberfw_bot.models import Finding, Scan, Summary
 from cyberfw_bot.reports import summarize
 
@@ -32,6 +37,27 @@ def test_finding_text_is_html_escaped() -> None:
     text = summary_message(_scan(), summary, max_findings=10)
     assert "<script>" not in text
     assert "&lt;script&gt;" in text
+
+
+def test_failed_message_escapes_the_scanner_error() -> None:
+    """scan.error is scanner stderr — a scanned server can shape it, so it must be escaped."""
+    scan = Scan(
+        id="ab12",
+        user_id=1,
+        chat_id=1,
+        target="example.com",
+        status="failed",
+        error="<b>boom</b> <script>x</script>",
+    )
+    text = failed_message(scan)
+    assert "<script>" not in text
+    assert "&lt;script&gt;" in text
+
+
+def test_queued_message_names_the_scan_and_target() -> None:
+    text = queued_message(_scan())
+    assert "ab12" in text
+    assert "example.com" in text
 
 
 def test_status_lists_scans_or_says_empty() -> None:

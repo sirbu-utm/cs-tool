@@ -11,7 +11,14 @@ from html import escape
 
 from cyberfw_bot.models import SEVERITY_ORDER, Scan, Summary
 
-__all__ = ["summary_message", "scan_line", "status_message", "HELP_TEXT"]
+__all__ = [
+    "summary_message",
+    "failed_message",
+    "queued_message",
+    "scan_line",
+    "status_message",
+    "HELP_TEXT",
+]
 
 _SEVERITY_EMOJI = {
     "critical": "🟥",
@@ -55,6 +62,27 @@ def summary_message(scan: Scan, summary: Summary, max_findings: int) -> str:
         if extra > 0:
             lines.append(f"…and {extra} more — see the attached report.")
     return "\n".join(lines)
+
+
+def failed_message(scan: Scan) -> str:
+    """The message for a scan that produced no usable report.
+
+    ``scan.error`` is the scanner's stderr — text a scanned server can influence
+    — so it is escaped like every other dynamic value, never trusted as markup.
+    """
+    error = (scan.error or "unknown error")[:500]
+    return (
+        f"❌ Scan <code>{escape(scan.id)}</code> failed — {escape(scan.target)}\n"
+        f"<code>{escape(error)}</code>"
+    )
+
+
+def queued_message(scan: Scan) -> str:
+    """The immediate reply to ``/scan`` once the scan is accepted."""
+    return (
+        f"🔍 Queued scan <code>{escape(scan.id)}</code> for <b>{escape(scan.target)}</b>. "
+        "I'll message you when it's done."
+    )
 
 
 def scan_line(scan: Scan) -> str:

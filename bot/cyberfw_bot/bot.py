@@ -16,7 +16,13 @@ from telegram.constants import ParseMode
 from telegram.ext import Application, ApplicationBuilder, CommandHandler, ContextTypes
 
 from cyberfw_bot.config import BotConfig
-from cyberfw_bot.formatting import HELP_TEXT, status_message, summary_message
+from cyberfw_bot.formatting import (
+    HELP_TEXT,
+    failed_message,
+    queued_message,
+    status_message,
+    summary_message,
+)
 from cyberfw_bot.models import Scan
 from cyberfw_bot.service import AuthorizationError, ScanService
 from cyberfw_bot.storage import ScanStore
@@ -38,10 +44,7 @@ def build_application(config: BotConfig, store: ScanStore, service: ScanService)
             if scan.status == "done" and scan.summary is not None:
                 text = summary_message(scan, scan.summary, config.max_findings_in_message)
             else:
-                text = (
-                    f"❌ Scan <code>{scan.id}</code> failed — {scan.target}\n"
-                    f"<code>{(scan.error or 'unknown error')[:500]}</code>"
-                )
+                text = failed_message(scan)
             await application.bot.send_message(scan.chat_id, text, parse_mode=_HTML)
             await _send_report(application, scan)
         except Exception:  # noqa: BLE001 - never let delivery crash the worker
@@ -67,11 +70,7 @@ def build_application(config: BotConfig, store: ScanStore, service: ScanService)
         except ValidationError as exc:
             await _reply(update, f"⚠️ {exc}")
         else:
-            await _reply(
-                update,
-                f"🔍 Queued scan <code>{scan.id}</code> for <b>{scan.target}</b>. "
-                "I'll message you when it's done.",
-            )
+            await _reply(update, queued_message(scan))
 
     async def status_cmd(update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> None:
         user = update.effective_user
