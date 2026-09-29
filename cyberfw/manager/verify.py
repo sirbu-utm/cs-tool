@@ -58,7 +58,11 @@ def ensure_binary(tools_dir: Path, name: str, binary_hint: str | None = None) ->
 
     Searches ``tools_dir/<name>`` first, then any extension Windows may add,
     then a recursive scan — ProjectDiscovery archives nest the binary one
-    directory deep. Raises :class:`ToolNotFoundError` with install guidance.
+    directory deep. The recursive scan looks inside ``tools_dir/<name>/`` (where
+    installs live) before the whole ``tools_dir``, so resolving one tool never
+    walks another's tree — notably the ~hundreds of files under
+    ``tools_bin/chromium/``, which made the launcher's inventory pass slow.
+    Raises :class:`ToolNotFoundError` with install guidance.
     """
     root = Path(tools_dir)
     search = binary_hint or name
@@ -80,13 +84,18 @@ def ensure_binary(tools_dir: Path, name: str, binary_hint: str | None = None) ->
             return candidate
         _remember(candidate)
 
-    for candidate in root.rglob("*"):
-        if not candidate.is_file():
-            continue
-        if candidate.name == search or candidate.stem == search:
-            if is_executable(candidate):
-                return candidate
-            _remember(candidate)
+    # The per-tool directory first (the common, fast case), the whole tree only
+    # as a fallback for the legacy flat layout.
+    scan_roots = [root / name] if (root / name).is_dir() else []
+    scan_roots.append(root)
+    for scan_root in scan_roots:
+        for candidate in scan_root.rglob("*"):
+            if not candidate.is_file():
+                continue
+            if candidate.name == search or candidate.stem == search:
+                if is_executable(candidate):
+                    return candidate
+                _remember(candidate)
 
     if inaccessible:
         locations = ", ".join(str(path) for path in inaccessible[:3])

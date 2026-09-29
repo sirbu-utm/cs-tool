@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import io
+import stat
 import struct
 import tarfile
 import zipfile
@@ -338,6 +339,40 @@ def test_missing_binary_message_mentions_blocked_file(tmp_path: Path, monkeypatc
 
     with pytest.raises(ToolNotFoundError, match="downloaded but its executable could not be read"):
         ensure_binary(tools_dir, "naabu", "naabu")
+
+
+def test_ensure_binary_scans_the_tool_dir_not_a_siblings_tree(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Resolving one tool must not walk another's tree (e.g. tools_bin/chromium/'s many files)."""
+    from pathlib import Path as _P
+
+    from cyberfw.manager.verify import ensure_binary
+
+    tools = tmp_path / "tools_bin"
+    nested = tools / "subfinder" / "subfinder_1.0.0_linux"
+    nested.mkdir(parents=True)
+    exe = nested / "subfinder"
+    exe.write_text("#!/usr/bin/env bash\ntrue\n", encoding="utf-8")
+    exe.chmod(exe.stat().st_mode | stat.S_IEXEC)
+    sibling = tools / "chromium"
+    sibling.mkdir()
+    for i in range(30):
+        (sibling / f"f{i}").write_text("x", encoding="utf-8")
+
+    scanned: list[_P] = []
+    real_rglob = _P.rglob
+
+    def spy(self: _P, pattern: str):  # type: ignore[no-untyped-def]
+        scanned.append(_P(self))
+        return real_rglob(self, pattern)
+
+    monkeypatch.setattr(_P, "rglob", spy)
+    found = ensure_binary(tools, "subfinder", "subfinder")
+
+    assert found == exe
+    assert tools not in scanned, "the whole tools_bin tree was walked"
+    assert (tools / "subfinder") in scanned
 
 
 class TestArchiveSizeLimit:
