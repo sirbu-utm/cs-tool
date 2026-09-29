@@ -103,6 +103,13 @@ class TestSettingsEnv:
         with pytest.raises(ValidationError):
             Settings(root_dir=tmp_path, max_archive_size=0)
 
+    def test_redact_secrets_defaults_on(self, tmp_path: Path) -> None:
+        assert Settings(root_dir=tmp_path).redact_secrets is True
+
+    def test_redact_secrets_via_env(self, tmp_path: Path, monkeypatch) -> None:
+        monkeypatch.setenv("CYBERFW_REDACT_SECRETS", "false")
+        assert Settings(root_dir=tmp_path).redact_secrets is False
+
     def test_stage_timeout_defaults_to_unlimited(self, tmp_path: Path) -> None:
         assert Settings(root_dir=tmp_path).stage_timeout is None
 

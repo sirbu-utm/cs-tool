@@ -815,6 +815,13 @@ def run_cmd(
             "Omit both to be asked once the results are on screen.",
         ),
     ] = None,
+    show_secrets: Annotated[
+        bool,
+        typer.Option(
+            "--show-secrets",
+            help="Keep raw secret values in gitleaks output (default: redacted). Affects gitleaks only.",
+        ),
+    ] = False,
     verbose: VerboseOption = False,
 ) -> None:
     """Run a single registered tool and print its records to the screen."""
@@ -825,6 +832,9 @@ def run_cmd(
         _checked_session(session)
 
     settings, manager = _bootstrap(verbose=verbose)
+    if show_secrets:
+        settings = settings.model_copy(update={"redact_secrets": False})
+        console.print("[warn]--show-secrets: raw secret values will be printed and saved unredacted.[/warn]")
     try:
         # The adapter knows what kind of target it takes; check that before
         # looking for the binary so a wrong target is a usage error (exit 2).

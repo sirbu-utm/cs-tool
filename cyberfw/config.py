@@ -79,6 +79,11 @@ class Settings(BaseSettings):
         gt=0,
         description="Largest size (bytes) a downloaded tool archive may extract to.",
     )
+    redact_secrets: bool = Field(
+        default=True,
+        description="Redact secret values gitleaks finds (in reports and the context store). "
+        "Set false (or pass --show-secrets to `run`) to keep the raw values.",
+    )
 
     @field_validator("log_level", mode="before")
     @classmethod

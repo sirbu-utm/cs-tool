@@ -68,6 +68,10 @@ class BaseTool(ABC):
     #: stdout is collected and parsed once via :meth:`parse_output` (e.g. gitleaks).
     buffered: bool = False
 
+    #: Whether a tool that surfaces raw secrets should redact them. Set from
+    #: ``Settings.redact_secrets`` by the engine; only gitleaks acts on it.
+    redact_secrets: bool = True
+
     #: What the launcher asks for as this tool's single target.
     target_prompt: ClassVar[str] = "Target (domain, URL or host)"
 

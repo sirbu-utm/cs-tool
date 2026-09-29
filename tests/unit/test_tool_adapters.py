@@ -121,6 +121,39 @@ def test_gitleaks_uses_v8_dir_command_not_detect() -> None:
     assert "--report-path" in command and "-" in command
 
 
+def test_gitleaks_redacts_secrets_at_the_source_by_default() -> None:
+    """A recon tool must not print live credentials; gitleaks runs with --redact by default."""
+    command = _adapter("gitleaks").build_cmd(ToolContext(target="/repo"))  # type: ignore[attr-defined]
+    assert "--redact" in command
+
+
+def test_gitleaks_show_secrets_drops_the_redact_flag() -> None:
+    adapter = _adapter("gitleaks")
+    adapter.redact_secrets = False  # type: ignore[attr-defined]
+    command = adapter.build_cmd(ToolContext(target="/repo"))  # type: ignore[attr-defined]
+    assert "--redact" not in command
+
+
+def test_gitleaks_scrubs_a_secret_from_the_parsed_record_and_raw() -> None:
+    """Defence in depth: even if the tool did not redact, the framework must not store the secret."""
+    adapter = _adapter("gitleaks")
+    report = (
+        '[{"RuleID": "aws", "Description": "AWS key", '
+        '"Secret": "AKIAsupersecretVALUE", "File": "/repo/leak.txt"}]'
+    )
+    records = adapter.parse_output(report)  # type: ignore[attr-defined]
+    assert records[0].secret == "REDACTED"
+    assert "AKIAsupersecretVALUE" not in records[0].raw
+
+
+def test_gitleaks_show_secrets_preserves_the_value() -> None:
+    adapter = _adapter("gitleaks")
+    adapter.redact_secrets = False  # type: ignore[attr-defined]
+    report = '[{"RuleID": "aws", "Secret": "AKIAsupersecretVALUE", "File": "/repo/x"}]'
+    records = adapter.parse_output(report)  # type: ignore[attr-defined]
+    assert records[0].secret == "AKIAsupersecretVALUE"
+
+
 def test_gitleaks_parses_json_array_report() -> None:
     """gitleaks emits a JSON array (not JSONL), parsed once via parse_output."""
     adapter = _adapter("gitleaks")

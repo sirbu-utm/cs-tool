@@ -1379,6 +1379,39 @@ class TestPipelinePreFlight:
         assert result.exit_code == 0
 
 
+class TestShowSecrets:
+    """gitleaks secrets are redacted in saved artefacts unless --show-secrets is passed."""
+
+    @staticmethod
+    def _install_gitleaks(root: Path) -> None:
+        with (root / "registry.yaml").open("a", encoding="utf-8") as handle:
+            handle.write("gitleaks:\n  repo: org/gitleaks\n  asset_patterns: []\n  binary: gitleaks\n")
+        binary = root / "tools_bin" / "gitleaks"
+        binary.write_text(
+            "#!/usr/bin/env bash\n"
+            "printf '%s' '[{\"RuleID\":\"aws\",\"Secret\":\"AKIALIVEKEY123\",\"File\":\"/x/leak.txt\"}]'\n",
+            encoding="utf-8",
+        )
+        binary.chmod(binary.stat().st_mode | stat.S_IEXEC)
+
+    def test_secret_is_redacted_in_the_saved_jsonl_by_default(self, tmp_path: Path) -> None:
+        self._install_gitleaks(tmp_path)
+        result = runner.invoke(app, ["run", "gitleaks", "-t", str(tmp_path), "--save", "--session", "gl"])
+        assert result.exit_code == 0, result.stdout
+        jsonl = (tmp_path / "reports" / "gl" / "gitleaks.jsonl").read_text(encoding="utf-8")
+        assert "AKIALIVEKEY123" not in jsonl
+        assert "REDACTED" in jsonl
+
+    def test_show_secrets_keeps_the_value(self, tmp_path: Path) -> None:
+        self._install_gitleaks(tmp_path)
+        result = runner.invoke(
+            app, ["run", "gitleaks", "-t", str(tmp_path), "--save", "--session", "gl", "--show-secrets"]
+        )
+        assert result.exit_code == 0, result.stdout
+        jsonl = (tmp_path / "reports" / "gl" / "gitleaks.jsonl").read_text(encoding="utf-8")
+        assert "AKIALIVEKEY123" in jsonl
+
+
 class TestSessionName:
     """--session names a directory under reports/; it must not reach anywhere else."""
 

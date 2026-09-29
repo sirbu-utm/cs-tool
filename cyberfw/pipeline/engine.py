@@ -198,7 +198,11 @@ class PipelineEngine:
                     dependency_hint(dep),
                 )
         binary = self.tool_manager.binary_path(name)
-        return adapter_for(spec, binary)
+        adapter = adapter_for(spec, binary)
+        # A cross-cutting run option the adapter cannot read from settings itself
+        # (adapters are built from spec + binary only); only gitleaks acts on it.
+        adapter.redact_secrets = self.settings.redact_secrets
+        return adapter
 
     async def run(
         self, nodes: list[Node], seed: str | None, *, extra_input: str | None = None

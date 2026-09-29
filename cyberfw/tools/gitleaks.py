@@ -7,6 +7,9 @@ Targets gitleaks v8.x, whose scanning commands are ``dir`` (files) and ``git``
 * ``-r -`` streams the report to stdout,
 * ``--exit-code 0`` keeps a *successful* scan that found leaks from looking like
   a crash (gitleaks otherwise exits 1 when it finds secrets),
+* ``--redact`` (unless ``redact_secrets`` is off) makes gitleaks replace the
+  secret value with ``REDACTED`` in its own output, so a live credential is
+  never written to the reports the framework keeps or sends,
 * the report is a single pretty-printed JSON *array* (not JSONL), so the adapter
   is ``buffered`` and parses the whole document at once via :meth:`parse_output`.
 """
@@ -39,11 +42,19 @@ class GitleaksTool(BaseTool):
         if ctx.target:
             cmd.append(ctx.target)
         cmd += ["--report-format", "json", "--report-path", "-", "--exit-code", "0", "--no-banner"]
+        if self.redact_secrets:
+            cmd.append("--redact")
         cmd += self._static_flags()
         return cmd
 
     def parse_output(self, text: str) -> list[ToolRecord]:
-        """Parse gitleaks' JSON-array report into one record per finding."""
+        """Parse gitleaks' JSON-array report into one record per finding.
+
+        With ``redact_secrets`` on (the default) the secret is scrubbed here too,
+        not only at the tool: an older gitleaks without ``--redact``, or a future
+        output change, must never leave a live credential in ``secret`` or in the
+        ``raw`` line the context store and reports persist.
+        """
         text = text.strip()
         if not text:
             return []
@@ -57,11 +68,22 @@ class GitleaksTool(BaseTool):
         for index, item in enumerate(data, start=1):
             if not isinstance(item, dict):
                 continue
+            if self.redact_secrets:
+                item = self._redact(item)
             rec = GitleaksResult(tool=self.name, line_number=index, raw=json.dumps(item), **item)
             rec.target = rec.file_path
             rec.kind = "secret"
             records.append(rec)
         return records
+
+    @staticmethod
+    def _redact(item: dict[str, object]) -> dict[str, object]:
+        """Replace the secret-bearing fields of one finding with ``REDACTED``."""
+        redacted = dict(item)
+        for key in ("Secret", "Match"):
+            if redacted.get(key):
+                redacted[key] = "REDACTED"
+        return redacted
 
     @property
     def input_flag(self) -> str | None:
