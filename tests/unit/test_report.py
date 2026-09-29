@@ -115,14 +115,61 @@ class TestHtmlReport:
         assert "no stages ran" in text
         assert "no records" in text
 
+    def test_nuclei_detail_shows_name_not_the_raw_info_dict(self, tmp_path: Path) -> None:
+        text = html_report_gen(_ok_result(), output_path=tmp_path / "r.html").read_text(encoding="utf-8")
+        assert "Chk" in text
+        assert "info={" not in text and "'severity'" not in text
+
+    def test_severity_summary_and_column_present(self, tmp_path: Path) -> None:
+        result = PipelineResult(
+            nodes=[NodeResult(node=Node(tool="nuclei", stage="vulns"), ok=True, count=2)],
+            records=[
+                NucleiResult.from_json(
+                    "nuclei", '{"template-id": "a", "matched-at": "https://x/", '
+                    '"info": {"name": "RCE", "severity": "critical"}}', 1
+                ),
+                NucleiResult.from_json(
+                    "nuclei", '{"template-id": "b", "matched-at": "https://y/", '
+                    '"info": {"name": "Info leak", "severity": "low"}}', 2
+                ),
+            ],
+        )
+        text = html_report_gen(result, output_path=tmp_path / "r.html").read_text(encoding="utf-8")
+        assert 'sev-critical">critical' in text
+        assert "critical 1" in text and "low 1" in text  # header summary
+
+    def test_findings_are_sorted_most_severe_first(self, tmp_path: Path) -> None:
+        result = PipelineResult(
+            nodes=[NodeResult(node=Node(tool="nuclei", stage="vulns"), ok=True, count=2)],
+            records=[
+                NucleiResult.from_json(
+                    "nuclei", '{"template-id": "low", "matched-at": "https://low/", '
+                    '"info": {"name": "LOWONE", "severity": "low"}}', 1
+                ),
+                NucleiResult.from_json(
+                    "nuclei", '{"template-id": "crit", "matched-at": "https://crit/", '
+                    '"info": {"name": "CRITONE", "severity": "critical"}}', 2
+                ),
+            ],
+        )
+        text = html_report_gen(result, output_path=tmp_path / "r.html").read_text(encoding="utf-8")
+        assert text.index("CRITONE") < text.index("LOWONE")
+
+    def test_report_has_a_client_side_filter(self, tmp_path: Path) -> None:
+        text = html_report_gen(_ok_result(), output_path=tmp_path / "r.html").read_text(encoding="utf-8")
+        assert 'id="filter"' in text
+        assert "addEventListener('input'" in text
+
     def test_target_is_html_escaped(self, tmp_path: Path) -> None:
         result = PipelineResult(
             nodes=[NodeResult(node=Node(tool="subfinder", stage="subfinder"), ok=True, count=1)],
             records=[SubfinderResult.from_json("subfinder", '{"host": "<script>x</script>"}', 1)],
         )
         text = html_report_gen(result, output_path=tmp_path / "x.html").read_text(encoding="utf-8")
-        assert "<script>" not in text
-        assert "&lt;script&gt;" in text
+        # The page has its own <script> (the filter), so check the injected payload
+        # specifically rather than the bare tag.
+        assert "<script>x</script>" not in text
+        assert "&lt;script&gt;x&lt;/script&gt;" in text
 
 
 class TestRunProvenance:

@@ -22,7 +22,12 @@ LOG = get_logger("report.html")
 __all__ = ["generate_html_report"]
 
 #: Ordered human-facing headers for a record row.
-_HEADERS = ["#", "tool", "kind", "target", "detail"]
+_HEADERS = ["#", "tool", "kind", "severity", "target", "detail"]
+
+#: nuclei severities, most serious first; the rank orders the records table and
+#: the summary. Anything unexpected sorts as "unknown".
+_SEVERITY_ORDER = ("critical", "high", "medium", "low", "info", "unknown")
+_SEVERITY_RANK = {sev: i for i, sev in enumerate(_SEVERITY_ORDER)}
 
 
 def generate_html_report(
@@ -50,10 +55,12 @@ def generate_html_report(
         ok="success" if result.succeeded() else "failed",
         totals=_totals_summary(result),
         total_records=len(result.records),
+        severity_summary=_severity_summary(result.records),
         run_rows=_render_run(result, run or RunInfo()),
         headers_row=headers_row,
         stages_rows=stages_rows,
         records_rows=records_rows,
+        filter_and_script=_FILTER_AND_SCRIPT,
     )
     try:
         path.write_text(page, encoding="utf-8")
@@ -109,33 +116,77 @@ def _render_stages(result: PipelineResult) -> str:
     return "\n".join(rows) if rows else '<tr><td colspan="5" class="dim">no stages ran</td></tr>'
 
 
+def _severity_of(as_dict: dict[str, object]) -> str:
+    """The nuclei severity for a record, or ``""`` for records that carry none."""
+    if as_dict.get("kind") != "vuln":
+        return ""
+    info = as_dict.get("info")
+    severity = info.get("severity") if isinstance(info, dict) else None
+    severity = str(severity or "unknown").lower()
+    return severity if severity in _SEVERITY_RANK else "unknown"
+
+
+def _severity_summary(records: list[ToolRecord]) -> str:
+    """A ``critical N · high M · …`` line for the header (only severities present)."""
+    counts: dict[str, int] = {}
+    for record in records:
+        severity = _severity_of(record.as_dict())
+        if severity:
+            counts[severity] = counts.get(severity, 0) + 1
+    if not counts:
+        return ""
+    parts = [
+        f'<span class="sev sev-{sev}">{sev} {counts[sev]}</span>'
+        for sev in _SEVERITY_ORDER
+        if sev in counts
+    ]
+    return " · ".join(parts)
+
+
 def _render_records(records: list[ToolRecord]) -> str:
-    """Rows for the full record listing."""
-    rows: list[str] = []
-    for index, record in enumerate(records, start=1):
-        rendered = _render_record(index, record)
-        rows.append(rendered)
-    return "\n".join(rows) if rows else '<tr><td colspan="5" class="dim">no records</td></tr>'
+    """Rows for the full record listing, most-severe findings first (stable otherwise)."""
+    indexed = list(enumerate(records))
+    indexed.sort(key=lambda pair: (_severity_sort_key(pair[1]), pair[0]))
+    rows = [_render_record(display, record) for display, (_orig, record) in enumerate(indexed, start=1)]
+    return "\n".join(rows) if rows else '<tr><td colspan="6" class="dim">no records</td></tr>'
+
+
+def _severity_sort_key(record: ToolRecord) -> int:
+    """Rank a record for the table: nuclei findings by severity, everything else after."""
+    severity = _severity_of(record.as_dict())
+    return _SEVERITY_RANK.get(severity, len(_SEVERITY_ORDER))
 
 
 def _render_record(index: int, record: ToolRecord) -> str:
-    detail = html.escape(_format_detail(record.as_dict()))
+    as_dict = record.as_dict()
+    severity = _severity_of(as_dict)
+    sev_cell = f'<td class="sev sev-{severity}">{severity}</td>' if severity else '<td class="dim">—</td>'
+    detail = html.escape(_format_detail(as_dict))
     return (
         f"<tr><td>{index}</td><td>{html.escape(record.tool)}</td>"
-        f"<td>{html.escape(record.kind)}</td><td>{html.escape(record.target)}</td>"
-        f"<td class=\"detail\">{detail}</td></tr>"
+        f"<td>{html.escape(record.kind)}</td>{sev_cell}"
+        f"<td>{html.escape(record.target)}</td>"
+        f'<td class="detail">{detail}</td></tr>'
     )
 
 
 def _format_detail(as_dict: dict[str, object]) -> str:
-    """Flatten a record dict into a short, readable substring (first field wins)."""
-    skip = {"tool", "line_number", "raw", "target", "kind", "stage"}
-    seen: list[str] = []
+    """Flatten a record dict into a short, readable substring.
+
+    nuclei's ``info`` is a nested dict — dumping it raw (``info={...}``) is
+    unreadable, so surface the finding's name instead; the severity has its own
+    column. ``matched_at`` duplicates ``target``, so it is dropped too.
+    """
+    skip = {"tool", "line_number", "raw", "target", "kind", "stage", "matched_at"}
+    parts: list[str] = []
+    info = as_dict.get("info")
+    if isinstance(info, dict) and info.get("name"):
+        parts.append(str(info["name"]))
     for key, value in as_dict.items():
-        if key in skip or value in ("", None):
+        if key in skip or key == "info" or value in ("", None):
             continue
-        seen.append(f"{key}={value if not isinstance(value, list) else ','.join(map(str, value))}")
-    return " ".join(seen)
+        parts.append(f"{key}={value if not isinstance(value, list) else ','.join(map(str, value))}")
+    return " ".join(parts)
 
 
 def _resolve_path(output_path: Path | None, session_id: str | None, reports_dir: Path | None) -> Path:
@@ -176,12 +227,25 @@ _PAGE_TEMPLATE = """<!DOCTYPE html>
           font-size: 12px; font-weight: 600; }}
   .pill.success {{ background: #dcfce7; color: #15803d; }}
   .pill.failed {{ background: #fee2e2; color: #b91c1c; }}
+  .sev {{ font-weight: 600; text-transform: capitalize; white-space: nowrap; }}
+  .sev-critical {{ color: #b91c1c; }}
+  .sev-high {{ color: #c2410c; }}
+  .sev-medium {{ color: #a16207; }}
+  .sev-low {{ color: #2563eb; }}
+  .sev-info {{ color: #6b7380; }}
+  .sev-unknown {{ color: #8a919c; }}
+  #filter {{ width: 100%; box-sizing: border-box; padding: 8px 10px; margin-bottom: 10px;
+           font-size: 13px; border: 1px solid #d1d5db; border-radius: 6px;
+           background: #fff; color: inherit; }}
+  tr.hidden {{ display: none; }}
   @media (prefers-color-scheme: dark) {{
     body {{ background: #121417; color: #e4e6ea; }}
     table {{ background: #1b1f24; }}
     th {{ background: #262b31; }}
     th, td {{ border-bottom-color: #2c3138; }}
     .dim {{ color: #7d8590; }}
+    #filter {{ background: #1b1f24; border-color: #2c3138; }}
+    .sev-info {{ color: #9aa4af; }}
   }}
 </style>
 </head>
@@ -189,6 +253,7 @@ _PAGE_TEMPLATE = """<!DOCTYPE html>
 <div class="wrap">
   <h1>cyberfw report</h1>
   <div class="meta"><span class="pill {ok}">{ok}</span> · {totals} · {total_records} records</div>
+  <div class="meta">{severity_summary}</div>
   <h2>Run</h2>
   <table class="run"><tbody>
   {run_rows}
@@ -199,11 +264,30 @@ _PAGE_TEMPLATE = """<!DOCTYPE html>
   {stages_rows}
   </tbody></table>
   <h2>Records</h2>
-  <table><thead><tr>{headers_row}</tr></thead>
+  <input id="filter" type="text" placeholder="Filter records (tool, severity, target, detail)…" aria-label="Filter records">
+  <table id="records"><thead><tr>{headers_row}</tr></thead>
   <tbody>
   {records_rows}
   </tbody></table>
 </div>
+{filter_and_script}
 </body>
 </html>
 """
+
+#: Appended after ``.format`` so its braces are not treated as placeholders.
+_FILTER_AND_SCRIPT = """<script>
+(function () {
+  var box = document.getElementById('filter');
+  if (!box) return;
+  var rows = Array.prototype.slice.call(
+    document.querySelectorAll('#records tbody tr'));
+  box.addEventListener('input', function () {
+    var q = box.value.trim().toLowerCase();
+    rows.forEach(function (row) {
+      var hit = !q || row.textContent.toLowerCase().indexOf(q) !== -1;
+      row.classList.toggle('hidden', !hit);
+    });
+  });
+})();
+</script>"""
