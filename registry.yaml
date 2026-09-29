@@ -130,11 +130,18 @@ gitleaks:
 
 gowitness:
   repo: sensepost/gowitness
-  # sensepost/gowitness publishes raw binaries (not archives).
+  # sensepost/gowitness publishes raw binaries (not archives), incl. arm64 —
+  # so it installs natively on aarch64 hosts (e.g. Oracle Cloud's free Ampere
+  # VM). The screenshot stage still needs a Chrome/Chromium: Chrome for Testing
+  # has no linux/arm64 build, so there install a system chromium (apt install
+  # chromium) — cyberfw's _find_chrome picks it up.
   asset_patterns:
     - "gowitness-*-linux-amd64"
+    - "gowitness-*-linux-arm64"
     - "gowitness-*-darwin-amd64"
+    - "gowitness-*-darwin-arm64"
     - "gowitness-*-windows-amd64.exe"
+    - "gowitness-*-windows-arm64.exe"
   archive: raw
   binary: gowitness
   needs_checksum: false

@@ -264,6 +264,32 @@ class TestInstall:
         assert result.version == "2.5.2"
         assert result.binary.read_bytes() == payload
 
+    def test_gowitness_installs_the_arm64_binary_on_arm64(self, tmp_path: Path) -> None:
+        """On an aarch64 host (e.g. Oracle Cloud's free Ampere VM) gowitness must pick its
+        arm64 build, not -linux-arm or -linux-amd64. Uses the real registry.yaml entry."""
+        from cyberfw.manager.registry import load_registry
+
+        registry = load_registry(Path(__file__).resolve().parents[2] / "registry.yaml")
+        spec = registry.require("gowitness")
+        assert any("arm64" in pattern for pattern in spec.asset_patterns), "registry lists arm64 for gowitness"
+
+        payload = b"#!/bin/sh\narm64 raw"
+        assets = [
+            ReleaseAsset(name, "http://x", len(payload))
+            for name in (
+                "gowitness-3.2.0-linux-amd64",
+                "gowitness-3.2.0-linux-arm",
+                "gowitness-3.2.0-linux-arm64",
+            )
+        ]
+        release = GitHubRelease(tag="v3.2.0", assets=assets, checksums_url=None)
+        client = _FakeClient(release, payload)
+        installer = _installer_for_mapping(tmp_path, client, Mapping("linux", "arm64"))
+
+        installer.install(spec)
+
+        assert client.downloaded[-1].name == "gowitness-3.2.0-linux-arm64"
+
     def test_checksum_mismatch_raises(self, tmp_path: Path) -> None:
         archive = _zip_bytes({"f/f": b"data"})
         asset = ReleaseAsset("f_1.0.0_linux_amd64.zip", "http://x", len(archive))
