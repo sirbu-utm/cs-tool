@@ -18,11 +18,20 @@ WORKDIR /app
 COPY . /app
 RUN pip install --no-cache-dir .
 
+# Run as an unprivileged user, not root: cyberfw downloads and executes external
+# tool binaries, so the scan must not have root in the container, and headless
+# Chrome refuses its sandbox when run as root. /data is owned by that user so a
+# fresh named volume inherits writable ownership.
+RUN useradd --create-home --uid 10001 cyberfw \
+    && mkdir -p /data \
+    && chown cyberfw:cyberfw /data
+
 # tools_bin/, reports/ and logs/ all live under here; mount a volume so the
 # downloaded binaries and the reports survive container restarts. The wheel
 # ships registry.yaml and the pipelines as package data, so cyberfw works from
 # this empty workdir without the source tree.
-ENV CYBERFW_ROOT_DIR=/data
+ENV CYBERFW_ROOT_DIR=/data HOME=/home/cyberfw
+USER cyberfw
 VOLUME ["/data"]
 WORKDIR /data
 
