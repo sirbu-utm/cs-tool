@@ -606,6 +606,12 @@ cstool / start.sh        Linux/macOS launcher (bootstrap + CLI)
 - бинарники проверяются по формату текущей ОС;
 - токены читаются из окружения и не сохраняются в Git.
 
+## Развёртывание
+
+Как развернуть cyberfw на бесплатной VM (Oracle Cloud ARM, нативно aarch64) —
+через `uv`/`cyberfw init` или Docker (`Dockerfile` в корне) — см.
+[DEPLOY.md](DEPLOY.md).
+
 ## Лицензия
 
 MIT — см. [LICENSE](LICENSE).

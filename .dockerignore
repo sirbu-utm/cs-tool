@@ -1,0 +1,21 @@
+# Keep the build context small and reproducible: nothing machine-local or
+# downloaded is copied into the image (tools are fetched by `cyberfw init`).
+.git
+.github
+.venv
+tools_bin/
+reports/
+logs/
+bot/
+тз/
+__pycache__/
+*.pyc
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+htmlcov/
+.coverage
+*.sqlite3
+config.local.yaml
+.env
+*.stale-*
