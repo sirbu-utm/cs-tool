@@ -22,12 +22,14 @@ from rich import box
 from rich.console import Group, RenderableType
 from rich.table import Table
 from rich.text import Text
+from rich.tree import Tree
 
 from cyberfw.pipeline.engine import Node, StageEvent
 from cyberfw.pipeline.schemas import ToolRecord
-from cyberfw.ui import record_detail, record_style
+from cyberfw.tools.targets import hostname_of
+from cyberfw.ui import NEUTRAL_STYLE, SEVERITY_STYLES, STATUS_STYLES, record_detail, record_style
 
-__all__ = ["PipelineLiveView"]
+__all__ = ["PipelineLiveView", "TopologyView"]
 
 #: How many of the most recent findings to keep on screen.
 DEFAULT_TAIL = 8
@@ -198,3 +200,176 @@ class PipelineLiveView:
                 Text(record_detail(record), style=style),
             )
         return table
+
+
+#: Braille spinner frames for the running-stage indicator.
+_SPINNER = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+#: Seconds a freshly-touched node stays highlighted — the growth "pulse".
+_PULSE = 0.8
+#: Cap on hosts drawn, so a huge fan-out does not build a thousand-line tree.
+_MAX_HOSTS = 40
+#: Cap on vulnerabilities listed per host before they collapse to a count.
+_MAX_VULNS_PER_HOST = 6
+
+
+@dataclass
+class _HostNode:
+    """One host in the topology and everything discovered hanging off it."""
+
+    host: str
+    source: str = ""
+    live: bool = False
+    status_code: int = 0
+    title: str = ""
+    ports: set[str] = None  # type: ignore[assignment]
+    vulns: list[tuple[str, str]] = None  # type: ignore[assignment]
+    fuzz: int = 0
+    shots: int = 0
+    touched: float = 0.0
+
+    def __post_init__(self) -> None:
+        if self.ports is None:
+            self.ports = set()
+        if self.vulns is None:
+            self.vulns = []
+
+
+class TopologyView:
+    """A live, growing topology of a scan, rendered as a Rich tree.
+
+    The seed is the root; each discovered host is a branch, with its live HTTP
+    status, open ports, and vulnerabilities (severity-coloured) as leaves. Hosts
+    are keyed by hostname, so a nuclei finding on ``https://a.example.com/x``
+    attaches under the same node subfinder first discovered as ``a.example.com``.
+
+    Animation comes from :meth:`__rich__`: driven by a Rich ``Live`` with
+    auto-refresh, the running stage shows a spinner and nodes touched in the last
+    moment are highlighted, so the map visibly grows and pulses as results land.
+    ``clock`` is injectable for deterministic tests.
+    """
+
+    def __init__(
+        self,
+        nodes: Iterable[Node],
+        *,
+        seed: str | None = None,
+        clock: Callable[[], float] = time.monotonic,
+        title: str | None = None,
+    ) -> None:
+        self._clock = clock
+        self._seed = seed
+        self._title = title
+        self._tools = [node.tool for node in nodes]
+        self._hosts: dict[str, _HostNode] = {}
+        self._order: list[str] = []
+        self._active: str | None = None  # "tool" of the running stage
+        self._running = False
+
+    # -- engine hooks ---------------------------------------------------------
+    def on_stage(self, event: StageEvent) -> None:
+        if event.kind == "start":
+            self._active = event.tool
+            self._running = True
+        elif event.kind == "done":
+            if self._active == event.tool:
+                self._running = False
+
+    def on_record(self, record: ToolRecord) -> None:
+        """Fold one validated record into the topology, keyed by hostname."""
+        node = self._node_for(record)
+        if node is None:
+            return
+        kind = record.kind
+        if kind == "host":
+            node.source = str(getattr(record, "source", "") or node.source)
+        elif kind == "http":
+            node.live = True
+            node.status_code = int(getattr(record, "status_code", 0) or 0)
+            node.title = str(getattr(record, "title", "") or node.title)
+        elif kind == "vuln":
+            node.vulns.append(
+                (str(getattr(record, "severity", "") or "unknown"), str(getattr(record, "name", "") or ""))
+            )
+        elif kind == "port":
+            _, _, port = record.target.rpartition(":")
+            if port:
+                node.ports.add(port)
+        elif kind == "scan":
+            for port in str(getattr(record, "ports_list", "") or "").split(","):
+                if port.strip():
+                    node.ports.add(port.strip())
+        elif kind == "fuzz":
+            node.fuzz += 1
+        elif kind == "screenshot":
+            node.shots += 1
+        node.touched = self._clock()
+
+    def _node_for(self, record: ToolRecord) -> _HostNode | None:
+        host = hostname_of(record.target).strip() if record.target else ""
+        if not host:
+            return None
+        node = self._hosts.get(host)
+        if node is None:
+            node = self._hosts[host] = _HostNode(host=host)
+            self._order.append(host)
+        return node
+
+    # -- async adapters -------------------------------------------------------
+    async def stage_callback(self, event: StageEvent) -> None:
+        self.on_stage(event)
+
+    async def record_callback(self, record: ToolRecord) -> None:
+        self.on_record(record)
+
+    # -- rendering ------------------------------------------------------------
+    def __rich__(self) -> RenderableType:
+        return self.render()
+
+    def render(self) -> RenderableType:
+        now = self._clock()
+        vuln_total = sum(len(h.vulns) for h in self._hosts.values())
+        live_total = sum(1 for h in self._hosts.values() if h.live)
+        spin = _SPINNER[int(now * 10) % len(_SPINNER)] if self._running else "•"
+        header = Text.assemble(
+            (f"{spin} ", "info" if self._running else "muted"),
+            (self._title or "topology", "accent"),
+            ("   ", ""),
+            (f"{len(self._hosts)} hosts", "muted"),
+            ("  ·  ", "muted"),
+            (f"{live_total} live", "ok" if live_total else "muted"),
+            ("  ·  ", "muted"),
+            (f"{vuln_total} vulns", "err" if vuln_total else "muted"),
+        )
+        root = Tree(Text.assemble((str(self._seed or "scan"), "bold")), guide_style="muted")
+        for host in self._order[:_MAX_HOSTS]:
+            self._attach_host(root, self._hosts[host], now)
+        hidden = len(self._order) - _MAX_HOSTS
+        if hidden > 0:
+            root.add(Text(f"… +{hidden} more host(s)", style="muted"))
+        return Group(header, Text(""), root)
+
+    def _attach_host(self, root: Tree, node: _HostNode, now: float) -> None:
+        pulsing = (now - node.touched) < _PULSE
+        label = Text()
+        label.append("● " if node.live else "○ ", style="ok" if node.live else "muted")
+        label.append(node.host, style="bold" if pulsing else ("white" if node.live else "muted"))
+        if node.status_code:
+            label.append(f"  {node.status_code}", style=STATUS_STYLES.get(node.status_code // 100, NEUTRAL_STYLE))
+        if node.title:
+            label.append(f"  {node.title}", style="muted")
+        if node.source and not node.live:
+            label.append(f"  ({node.source})", style="muted")
+        branch = root.add(label)
+        if node.ports:
+            ports = ",".join(sorted(node.ports, key=lambda p: int(p) if p.isdigit() else 0))
+            branch.add(Text.assemble(("ports ", "muted"), (ports, "info")))
+        for severity, name in node.vulns[:_MAX_VULNS_PER_HOST]:
+            style = SEVERITY_STYLES.get(severity.lower(), "white")
+            branch.add(Text.assemble(("▲ ", style), (severity, style), ("  " + name if name else "", style)))
+        extra = len(node.vulns) - _MAX_VULNS_PER_HOST
+        if extra > 0:
+            branch.add(Text(f"▲ +{extra} more finding(s)", style="err"))
+        if node.fuzz:
+            branch.add(Text.assemble(("fuzz ", "muted"), (str(node.fuzz), "info")))
+        if node.shots:
+            branch.add(Text.assemble(("screenshots ", "muted"), (str(node.shots), "info")))

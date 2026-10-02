@@ -1135,6 +1135,34 @@ class TestLiveProgress:
         assert "Latest findings" not in result.stdout
         assert '{"host": "sub.example.com"' in result.stdout
 
+    def test_topology_shows_a_map_instead_of_the_stage_table(self) -> None:
+        result = runner.invoke(
+            app, ["pipeline", "recon-to-vuln", "-t", "example.com", "--topology", "--no-report"]
+        )
+
+        assert result.exit_code == 0, result.stdout
+        # The map, not the stage table: seed root, the discovered host, its finding.
+        assert "topology" in result.stdout
+        assert "example.com" in result.stdout and "sub.example.com" in result.stdout
+        assert "medium" in result.stdout  # the fake nuclei finding's severity
+        assert "Latest findings" not in result.stdout
+
+    def test_map_is_an_alias_for_topology(self) -> None:
+        result = runner.invoke(app, ["pipeline", "recon-to-vuln", "-t", "example.com", "--map", "--no-report"])
+
+        assert result.exit_code == 0, result.stdout
+        assert "sub.example.com" in result.stdout
+
+    def test_topology_is_ignored_in_verbose_mode_with_a_warning(self) -> None:
+        result = runner.invoke(
+            app,
+            ["pipeline", "recon-to-vuln", "-t", "example.com", "--topology", "--no-parse", "--no-report"],
+        )
+
+        assert result.exit_code == 0, result.stdout
+        assert "topology needs the parsed view" in result.stdout
+        assert '{"host": "sub.example.com"' in result.stdout  # fell back to the raw stream
+
 
 class TestRunSummary:
     def test_summary_panel_reports_status_totals_and_reports(self, tmp_path: Path) -> None:

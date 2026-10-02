@@ -26,7 +26,7 @@ from typing import Annotated
 import anyio
 import typer
 from rich import box
-from rich.console import Group
+from rich.console import Group, RenderableType
 from rich.live import Live
 from rich.panel import Panel
 from rich.prompt import Confirm, Prompt
@@ -40,7 +40,7 @@ from cyberfw.exceptions import (
     RegistryError,
     ToolNotFoundError,
 )
-from cyberfw.live_view import PipelineLiveView
+from cyberfw.live_view import PipelineLiveView, TopologyView
 from cyberfw.logging import console, ensure_utf8_stdio, get_logger, setup_logging
 from cyberfw.manager import ToolManager, load_registry
 from cyberfw.pipeline.context import SessionContext
@@ -967,6 +967,14 @@ def pipeline_cmd(
         bool,
         typer.Option("--force-start", help="Start even when a tool this pipeline needs is unavailable."),
     ] = False,
+    topology: Annotated[
+        bool,
+        typer.Option(
+            "--topology",
+            "--map",
+            help="Show a live, growing topology map (seed → hosts → ports/vulns) instead of the stage table.",
+        ),
+    ] = False,
     verbose: VerboseOption = False,
 ) -> None:
     """Run a ready-made pipeline and render HTML/JSON reports."""
@@ -1029,6 +1037,9 @@ def pipeline_cmd(
     # Stages are still parsed internally so results thread from one to the next.
     verbose = no_parse or not settings.parse
     run_engine = functools.partial(engine.run, extra_input=wordlist)
+    if topology and verbose:
+        why = "--no-parse" if no_parse else "config parse=false"
+        console.print(f"[warn]--topology needs the parsed view; ignored under {why}.[/warn]")
     if verbose:
         why = "--no-parse" if no_parse else "config parse=false"
         console.print(f"[muted]{why}: streaming raw stdout/stderr from every stage[/muted]")
@@ -1049,19 +1060,39 @@ def pipeline_cmd(
         finally:
             manager.close()
     else:
-        # The live table IS the stage table, so it is not reprinted afterwards:
+        # The live view IS the final frame, so it is not reprinted afterwards:
         # Live leaves its last frame on screen. On a non-TTY (CI, a pipe) Rich
         # prints that final frame once instead of redrawing.
-        view = PipelineLiveView(nodes, title=f"pipeline {name} · {target}")
-        with Live(view.render(), console=console, refresh_per_second=4, transient=False) as live:
+        #
+        # Topology map: a renderable object (``__rich__``) driven by auto-refresh,
+        # so the spinner and the growth pulse animate between events — callbacks
+        # only mutate state. The stage table is a static snapshot refreshed on
+        # each event instead.
+        view: PipelineLiveView | TopologyView
+        if topology and not verbose:
+            view = TopologyView(nodes, seed=target, title=f"topology {name} · {target}")
+            renderable: RenderableType = view
+            animate = True
+        else:
+            view = PipelineLiveView(nodes, title=f"pipeline {name} · {target}")
+            renderable = view.render()
+            animate = False
+        with Live(
+            renderable,
+            console=console,
+            refresh_per_second=12 if animate else 4,
+            transient=False,
+        ) as live:
 
             async def _on_record(record: ToolRecord) -> None:
                 view.on_record(record)
-                live.update(view.render())
+                if not animate:
+                    live.update(view.render())
 
             async def _on_stage(event: StageEvent) -> None:
                 view.on_stage(event)
-                live.update(view.render())
+                if not animate:
+                    live.update(view.render())
 
             engine.set_record_callback(_on_record)
             engine.set_stage_callback(_on_stage)
@@ -1072,7 +1103,10 @@ def pipeline_cmd(
                 raise typer.Exit(1) from exc
             finally:
                 manager.close()
-                live.update(view.render())
+                if animate:
+                    live.refresh()
+                else:
+                    live.update(view.render())
 
     if verbose:
         console.print(_node_table(result))

@@ -4,13 +4,15 @@ from __future__ import annotations
 
 from rich.console import Console
 
-from cyberfw.live_view import PipelineLiveView
+from cyberfw.live_view import PipelineLiveView, TopologyView
 from cyberfw.logging import THEME
 from cyberfw.pipeline.engine import Node, NodeResult, StageEvent
 from cyberfw.pipeline.schemas import (
     FfufResult,
     HttpxResult,
+    NaabuResult,
     NucleiResult,
+    RustscanResult,
     SubfinderResult,
     ToolRecord,
 )
@@ -233,3 +235,117 @@ class TestRecordTail:
 
         for line in _render(view, width=100).splitlines():
             assert len(line) <= 100
+
+
+def _render_topology(view: TopologyView, width: int = 110) -> str:
+    console = Console(theme=THEME, record=True, width=width, force_terminal=False)
+    console.print(view.render())
+    return console.export_text()
+
+
+class _Clock:
+    """A monotonic clock the test advances by hand, for deterministic animation."""
+
+    def __init__(self) -> None:
+        self.t = 1000.0
+
+    def __call__(self) -> float:
+        return self.t
+
+
+class TestTopologyView:
+    def _nodes(self) -> list[Node]:
+        return [_node("subfinder", "subdomains"), _node("httpx", "live_http"), _node("nuclei", "vulns")]
+
+    def test_seed_is_the_root(self) -> None:
+        view = TopologyView(self._nodes(), seed="example.com", title="topology")
+        assert "example.com" in _render_topology(view)
+
+    def test_a_discovered_host_becomes_a_branch(self) -> None:
+        view = TopologyView(self._nodes(), seed="example.com")
+        view.on_record(SubfinderResult.from_json("subfinder", '{"host": "a.example.com", "source": "crtsh"}', 1))
+
+        text = _render_topology(view)
+
+        assert "a.example.com" in text
+        assert "crtsh" in text  # source shown until the host is proven live
+        assert "1 hosts" in text
+
+    def test_findings_attach_under_the_same_host_by_hostname(self) -> None:
+        """subfinder finds the bare host; nuclei's URL finding must hang off the same node."""
+        view = TopologyView(self._nodes(), seed="example.com")
+        view.on_record(SubfinderResult.from_json("subfinder", '{"host": "a.example.com"}', 1))
+        view.on_record(HttpxResult.from_json("httpx", '{"url": "https://a.example.com/", "status_code": 200, "title": "Home"}', 1))
+        view.on_record(
+            NucleiResult.from_json(
+                "nuclei",
+                '{"template-id": "rce", "matched-at": "https://a.example.com/x", '
+                '"info": {"name": "Critical RCE", "severity": "critical"}}',
+                1,
+            )
+        )
+
+        text = _render_topology(view)
+
+        # One host node carrying its live status and the finding — not three nodes.
+        assert text.count("a.example.com") == 1
+        assert "200" in text and "Home" in text
+        assert "critical" in text and "Critical RCE" in text
+        assert "1 live" in text and "1 vulns" in text
+
+    def test_ports_from_naabu_and_rustscan(self) -> None:
+        view = TopologyView(self._nodes(), seed="example.com")
+        view.on_record(NaabuResult.from_json("naabu", '{"host": "a.example.com", "port": 443}', 1))
+        view.on_record(RustscanResult.from_json("rustscan", '{"host": "a.example.com", "ports_list": "22,80"}', 2))
+
+        text = _render_topology(view)
+
+        assert "ports" in text
+        for port in ("22", "80", "443"):
+            assert port in text
+
+    def test_hosts_are_capped_with_a_more_line(self) -> None:
+        view = TopologyView(self._nodes(), seed="example.com")
+        for i in range(45):
+            view.on_record(SubfinderResult(tool="subfinder", target=f"h{i}.example.com", kind="host"))
+
+        text = _render_topology(view)
+
+        assert "more host(s)" in text  # 45 > _MAX_HOSTS (40)
+
+    def test_vulns_per_host_are_capped(self) -> None:
+        view = TopologyView(self._nodes(), seed="example.com")
+        for i in range(9):
+            view.on_record(
+                NucleiResult.from_json(
+                    "nuclei",
+                    f'{{"template-id": "t{i}", "matched-at": "https://a.example.com/{i}", '
+                    '"info": {"name": "Issue", "severity": "low"}}',
+                    i,
+                )
+            )
+
+        text = _render_topology(view)
+
+        assert "more finding(s)" in text  # 9 > _MAX_VULNS_PER_HOST (6)
+
+    def test_spinner_animates_while_a_stage_runs_and_settles_when_idle(self) -> None:
+        clock = _Clock()
+        view = TopologyView(self._nodes(), seed="example.com", clock=clock)
+
+        # Idle before anything starts: a steady bullet, no spinner frame.
+        assert "•" in _render_topology(view)
+
+        view.on_stage(StageEvent(kind="start", stage="subdomains", tool="subfinder", total=1))
+        clock.t = 1000.0
+        frame_a = _render_topology(view)
+        clock.t = 1000.25  # advance time → the spinner frame must change
+        frame_b = _render_topology(view)
+        spinner = set("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏")
+        assert any(ch in spinner for ch in frame_a)
+        assert frame_a != frame_b
+
+        view.on_stage(
+            StageEvent(kind="done", stage="subdomains", tool="subfinder", result=NodeResult(node=_node("subfinder", "subdomains"), ok=True)),
+        )
+        assert "•" in _render_topology(view)
