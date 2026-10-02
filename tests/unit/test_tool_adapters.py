@@ -141,7 +141,19 @@ def test_gitleaks_empty_report_yields_no_records() -> None:
     assert adapter.parse_output("") == []  # type: ignore[attr-defined]
 
 
-def test_ffuf_without_wordlist_raises_clear_error() -> None:
+def test_ffuf_falls_back_to_the_bundled_wordlist(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """With no --wordlist, ffuf uses the bundled list instead of skipping the stage."""
+    bundled = tmp_path / "common.txt"
+    bundled.write_text("admin\nlogin\n", encoding="utf-8")
+    monkeypatch.setattr("cyberfw.tools.ffuf.default_wordlist", lambda: bundled)
+
+    command = _adapter("ffuf").build_cmd(ToolContext(target="https://example.com"))  # type: ignore[attr-defined]
+
+    assert "-w" in command and str(bundled) in command
+
+
+def test_ffuf_errors_only_when_there_is_no_wordlist_and_no_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("cyberfw.tools.ffuf.default_wordlist", lambda: None)
     with pytest.raises(ToolNotFoundError, match="wordlist"):
         _adapter("ffuf").build_cmd(ToolContext(target="https://example.com"))  # type: ignore[attr-defined]
 

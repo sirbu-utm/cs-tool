@@ -64,3 +64,28 @@ class TestPackagedData:
         assert (repo_root / "registry.yaml").is_file()
         assert (repo_root / "pipelines").is_dir()
         assert resources.packaged_data("registry.yaml") is None
+
+
+class TestDefaultWordlist:
+    def test_workspace_copy_wins(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        (tmp_path / "registry.yaml").write_text("{}\n", encoding="utf-8")
+        wl = tmp_path / "wordlists" / "common.txt"
+        wl.parent.mkdir()
+        wl.write_text("admin\n", encoding="utf-8")
+        monkeypatch.setattr(resources.Path, "cwd", classmethod(lambda cls: tmp_path))
+
+        assert resources.default_wordlist() == wl
+
+    def test_falls_back_to_the_packaged_copy(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(resources.Path, "cwd", classmethod(lambda cls: tmp_path))  # not a workspace
+        packaged = tmp_path / "pkg" / "data" / "wordlists" / "common.txt"
+        packaged.parent.mkdir(parents=True)
+        packaged.write_text("admin\n", encoding="utf-8")
+        monkeypatch.setattr(resources, "files", lambda package: tmp_path / "pkg")
+
+        assert resources.default_wordlist() == packaged
+
+    def test_the_repo_ships_the_bundled_wordlist(self) -> None:
+        repo_root = Path(__file__).resolve().parents[2]
+        wl = repo_root / "wordlists" / "common.txt"
+        assert wl.is_file() and wl.read_text(encoding="utf-8").strip(), "a non-empty bundled wordlist ships"

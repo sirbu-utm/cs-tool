@@ -57,7 +57,7 @@ from cyberfw.pipelines import PIPELINES, available_pipelines, build
 from cyberfw.report.html_report import generate_html_report
 from cyberfw.report.json_report import generate_json_report
 from cyberfw.report.run_info import RunInfo
-from cyberfw.resources import packaged_data
+from cyberfw.resources import default_wordlist, packaged_data
 from cyberfw.tools import adapter_class
 from cyberfw.tools.base import ToolContext
 from cyberfw.ui import banner, record_detail, record_style, state_style, tool_guide
@@ -439,27 +439,22 @@ def interactive_menu() -> None:
     finally:
         manager.close()
     while True:
-        # Settings-adjust cycle: the launcher panel is a Live region, so the
-        # p/l/f toggles redraw it in place instead of re-printing the whole
-        # panel and scrolling the terminal. We leave Live only once a real
-        # action (tool / pipeline / exit) is picked, so that action's output
-        # scrolls normally below the panel.
-        names: list[str] = []
-        with Live(console=console, auto_refresh=False, screen=False, vertical_overflow="visible") as live:
-            while True:
-                settings, manager = _bootstrap()
-                try:
-                    names = manager.registry.names()
-                    live.update(_launcher_view(manager, settings, states=known_states), refresh=True)
-                    known_states = None
-                finally:
-                    manager.close()
-                choice = _prompt_choice(names)
-                if choice in _SETTINGS_KEYS:
-                    _toggle_setting(choice, settings)
-                    continue  # stay inside Live → in-place refresh
-                break
-
+        # Re-bootstrap each loop so a p/l/f settings change — exported as a
+        # CYBERFW_* env var — takes effect on the next frame. The panel is
+        # printed fresh each time rather than updated inside a Rich ``Live``:
+        # a Live region sharing the console with an interactive ``Prompt.ask``
+        # double-painted the panel on some terminals.
+        settings, manager = _bootstrap()
+        try:
+            names = manager.registry.names()
+            console.print(_launcher_view(manager, settings, states=known_states))
+            known_states = None
+        finally:
+            manager.close()
+        choice = _prompt_choice(names)
+        if choice in _SETTINGS_KEYS:
+            _toggle_setting(choice, settings)
+            continue  # reprint the panel with the new setting
         try:
             if not _dispatch_choice(choice, names):
                 return
@@ -785,7 +780,7 @@ def status_cmd(verbose: VerboseOption = False) -> None:
             "stage_timeout",
             f"{settings.stage_timeout:g}s" if settings.stage_timeout else "[muted]unlimited[/muted]",
         )
-        cfg.add_row("wordlist", settings.wordlist or "[muted](unset — needed for ffuf)[/muted]")
+        cfg.add_row("wordlist", settings.wordlist or "[muted](unset → bundled common.txt)[/muted]")
         cfg.add_row("github_token", "[ok]set[/ok]" if settings.github_token else "[muted]unset (60 req/h)[/muted]")
         cfg.add_row("reports_dir", str(settings.reports_dir))
         cfg.add_row("logs_dir", str(settings.logs_dir))
@@ -1021,10 +1016,17 @@ def pipeline_cmd(
 
     wordlist = wordlist or settings.wordlist
     if ffuf and not wordlist:
-        console.print(
-            "[warn]--ffuf needs a wordlist; the fuzz stage will be skipped. "
-            "Re-run with --wordlist <path> to enable it.[/warn]"
-        )
+        bundled = default_wordlist()
+        if bundled is not None:
+            console.print(
+                f"[muted]--ffuf: no wordlist given, using the bundled {bundled.name} "
+                "(pass --wordlist <path> to override)[/muted]"
+            )
+        else:
+            console.print(
+                "[warn]--ffuf needs a wordlist and the bundled default was not found; "
+                "the fuzz stage will be skipped. Re-run with --wordlist <path>.[/warn]"
+            )
     session_id = session or _session_tag("pipeline", name)
     # Remember whether the directory is ours: declining to save may remove it,
     # and a --session pointing at an earlier run must never be deleted.
@@ -1076,7 +1078,7 @@ def pipeline_cmd(
         # each event instead.
         view: PipelineLiveView | TopologyView
         if use_topology:
-            view = TopologyView(nodes, seed=target, title=f"topology {name} · {target}")
+            view = TopologyView(nodes, seed=target, title=f"{name} · {target}")
             renderable: RenderableType = view
             animate = True
         else:

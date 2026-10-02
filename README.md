@@ -198,7 +198,8 @@ cyberfw run subfinder --target example.com --no-save
 # Запустить pipeline: Subfinder -> Httpx -> Nuclei
 cyberfw pipeline recon-to-vuln --target example.com
 
-# Дополнительные этапы pipeline
+# Дополнительные этапы pipeline (--ffuf берёт встроенный wordlists/common.txt,
+# если не передан свой --wordlist)
 cyberfw pipeline recon-to-vuln --target example.com --ffuf --gowitness
 
 # Pipeline из файла pipelines/<name>.yaml (см. раздел «Свои pipeline»)
@@ -480,7 +481,8 @@ view: topology
 log_level: INFO       # DEBUG / INFO / WARNING / ERROR
 log_to_file: true     # писать ли диагностику в logs/cyberfw.log
 
-# Вордлист для Ffuf (нужен для --ffuf в pipeline и `run ffuf`)
+# Вордлист для Ffuf. Не задан — используется встроенный wordlists/common.txt,
+# так что --ffuf и `run ffuf` работают из коробки; здесь можно указать свой.
 wordlist: C:\wordlists\common.txt
 
 # Каталог с pipeline-файлами <name>.yaml (по умолчанию pipelines/ в корне)

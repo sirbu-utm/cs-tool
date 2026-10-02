@@ -18,7 +18,7 @@ import sys
 from importlib.resources import files
 from pathlib import Path
 
-__all__ = ["APP_NAME", "packaged_data", "user_data_dir", "workspace_root"]
+__all__ = ["APP_NAME", "packaged_data", "user_data_dir", "workspace_root", "default_wordlist"]
 
 APP_NAME = "cyberfw"
 
@@ -50,3 +50,18 @@ def workspace_root(cwd: Path | None = None) -> Path | None:
     """``cwd`` when it is a cyberfw workspace (holds ``registry.yaml``), else ``None``."""
     root = cwd or Path.cwd()
     return root if (root / "registry.yaml").is_file() else None
+
+
+def default_wordlist() -> Path | None:
+    """The bundled Ffuf wordlist: the workspace copy, else the packaged one, else ``None``.
+
+    Ships at ``wordlists/common.txt`` (repo root) and as ``cyberfw/data/wordlists/
+    common.txt`` in the wheel, so ``--ffuf`` works out of the box; ``--wordlist``
+    / ``wordlist:`` still override it.
+    """
+    root = workspace_root()
+    if root is not None:
+        candidate = root / "wordlists" / "common.txt"
+        if candidate.is_file():
+            return candidate
+    return packaged_data("wordlists", "common.txt")

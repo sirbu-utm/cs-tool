@@ -2,9 +2,9 @@
 
 Ffuf targets a single URL template, so ``per_target`` fans the stage out across
 whatever live hosts the previous stage handed over. Ffuf cannot run without a
-wordlist (``-w``); one must be supplied via ``--wordlist`` (CLI) / ``wordlist``
-(config), since no dictionary ships with the framework and there is no portable
-default path across Windows/Linux/macOS.
+wordlist (``-w``): one may be supplied via ``--wordlist`` (CLI) / ``wordlist``
+(config), and otherwise the framework falls back to the small bundled list
+(``wordlists/common.txt``), so ``--ffuf`` works out of the box.
 """
 
 from __future__ import annotations
@@ -12,6 +12,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from cyberfw.exceptions import ToolNotFoundError
+from cyberfw.resources import default_wordlist
 from cyberfw.tools.base import BaseTool, ToolContext
 
 
@@ -26,9 +27,13 @@ class FfufTool(BaseTool):
             raise ToolNotFoundError("Ffuf needs at least one target URL.")
         wordlist = ctx.extra_input
         if not wordlist:
+            bundled = default_wordlist()
+            if bundled is not None:
+                wordlist = str(bundled)
+        if not wordlist:
             raise ToolNotFoundError(
-                "Ffuf needs a wordlist. Pass one with --wordlist <path> "
-                "(or set `wordlist:` in config.local.yaml)."
+                "Ffuf needs a wordlist and the bundled default was not found. "
+                "Pass one with --wordlist <path> (or set `wordlist:` in config.local.yaml)."
             )
         if not Path(wordlist).expanduser().is_file():
             raise ToolNotFoundError(f"Ffuf wordlist not found: {wordlist}")

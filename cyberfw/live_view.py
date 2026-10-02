@@ -332,7 +332,7 @@ class TopologyView:
         spin = _SPINNER[int(now * 10) % len(_SPINNER)] if self._running else "•"
         header = Text.assemble(
             (f"{spin} ", "info" if self._running else "muted"),
-            (self._title or "topology", "accent"),
+            (self._title or "scan", "accent"),
             ("   ", ""),
             (f"{len(self._hosts)} hosts", "muted"),
             ("  ·  ", "muted"),

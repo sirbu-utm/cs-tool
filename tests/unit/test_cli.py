@@ -566,11 +566,28 @@ class TestPipelineCommand:
         assert result.exit_code == 0
         assert "report.json" not in result.stdout
 
-    def test_pipeline_ffuf_without_wordlist_warns_and_does_not_crash(self, tmp_path: Path) -> None:
-        """--ffuf with no wordlist warns upfront and the fuzz stage skips cleanly."""
+    def test_pipeline_ffuf_uses_the_bundled_wordlist_when_none_given(self, tmp_path: Path) -> None:
+        """--ffuf with no --wordlist now falls back to the bundled list instead of skipping."""
+        (tmp_path / "wordlists").mkdir()
+        (tmp_path / "wordlists" / "common.txt").write_text("admin\nlogin\n", encoding="utf-8")
+
         result = runner.invoke(
             app, ["pipeline", "recon-to-vuln", "-t", "example.com", "--ffuf", "--no-report"]
         )
+
+        assert result.exit_code == 0, result.stdout
+        assert "bundled" in result.stdout  # the info line naming the default list
+        assert "Traceback" not in result.stdout
+
+    def test_pipeline_ffuf_warns_only_when_no_wordlist_and_no_default(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr("cyberfw.cli.default_wordlist", lambda: None)
+
+        result = runner.invoke(
+            app, ["pipeline", "recon-to-vuln", "-t", "example.com", "--ffuf", "--no-report"]
+        )
+
         assert "needs a wordlist" in result.stdout
         assert "Traceback" not in result.stdout
 
@@ -1142,7 +1159,7 @@ class TestLiveProgress:
 
         assert result.exit_code == 0, result.stdout
         # The map, not the stage table: seed root, the discovered host, its finding.
-        assert "topology" in result.stdout
+        assert "hosts" in result.stdout  # the map header counts line
         assert "example.com" in result.stdout and "sub.example.com" in result.stdout
         assert "medium" in result.stdout  # the fake nuclei finding's severity
         assert "Latest findings" not in result.stdout
@@ -1158,7 +1175,7 @@ class TestLiveProgress:
         result = runner.invoke(app, ["pipeline", "recon-to-vuln", "-t", "example.com", "--no-report"])
 
         assert result.exit_code == 0, result.stdout
-        assert "topology" in result.stdout and "sub.example.com" in result.stdout
+        assert "hosts" in result.stdout and "sub.example.com" in result.stdout
         assert "Latest findings" not in result.stdout
 
     def test_view_setting_can_restore_the_table_as_default(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1176,7 +1193,7 @@ class TestLiveProgress:
         )
 
         assert result.exit_code == 0, result.stdout
-        assert "topology" in result.stdout and "Latest findings" not in result.stdout
+        assert "hosts" in result.stdout and "Latest findings" not in result.stdout
 
     def test_topology_is_ignored_in_verbose_mode_with_a_warning(self) -> None:
         result = runner.invoke(

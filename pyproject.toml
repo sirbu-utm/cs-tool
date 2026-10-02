@@ -45,6 +45,7 @@ packages = ["cyberfw"]
 [tool.hatch.build.targets.wheel.force-include]
 "registry.yaml" = "cyberfw/data/registry.yaml"
 "pipelines" = "cyberfw/data/pipelines"
+"wordlists" = "cyberfw/data/wordlists"
 
 [tool.ruff]
 line-length = 100
