@@ -777,6 +777,7 @@ def status_cmd(verbose: VerboseOption = False) -> None:
         cfg.add_column("setting", style="tool")
         cfg.add_column("value")
         cfg.add_row("parse", "[ok]on[/ok]" if settings.parse else "[warn]off (raw output)[/warn]")
+        cfg.add_row("view", settings.view)
         cfg.add_row("log_level", settings.log_level)
         cfg.add_row("log_to_file", "on" if settings.log_to_file else "off")
         cfg.add_row("concurrency", str(settings.concurrency))
@@ -968,13 +969,14 @@ def pipeline_cmd(
         typer.Option("--force-start", help="Start even when a tool this pipeline needs is unavailable."),
     ] = False,
     topology: Annotated[
-        bool,
+        bool | None,
         typer.Option(
-            "--topology",
-            "--map",
-            help="Show a live, growing topology map (seed → hosts → ports/vulns) instead of the stage table.",
+            "--topology/--no-topology",
+            "--map/--no-map",
+            help="Live view: the topology map (seed → hosts → ports/vulns) or the stage table. "
+            "Default comes from the `view` setting; this overrides it for one run.",
         ),
-    ] = False,
+    ] = None,
     verbose: VerboseOption = False,
 ) -> None:
     """Run a ready-made pipeline and render HTML/JSON reports."""
@@ -1037,7 +1039,11 @@ def pipeline_cmd(
     # Stages are still parsed internally so results thread from one to the next.
     verbose = no_parse or not settings.parse
     run_engine = functools.partial(engine.run, extra_input=wordlist)
-    if topology and verbose:
+    # The flag overrides the `view` setting for this run; unset falls back to it.
+    use_topology = topology if topology is not None else settings.view == "topology"
+    if topology is True and verbose:
+        # Only when the user explicitly asked: the config default silently yields
+        # to the raw stream under --no-parse rather than nagging every run.
         why = "--no-parse" if no_parse else "config parse=false"
         console.print(f"[warn]--topology needs the parsed view; ignored under {why}.[/warn]")
     if verbose:
@@ -1069,7 +1075,7 @@ def pipeline_cmd(
         # only mutate state. The stage table is a static snapshot refreshed on
         # each event instead.
         view: PipelineLiveView | TopologyView
-        if topology and not verbose:
+        if use_topology:
             view = TopologyView(nodes, seed=target, title=f"topology {name} · {target}")
             renderable: RenderableType = view
             animate = True

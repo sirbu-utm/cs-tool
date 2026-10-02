@@ -309,6 +309,32 @@ Linux/macOS) передают аргументы командному режим
 сессии и пути к отчётам. Если вывод перенаправлен в файл или идёт в лог CI,
 таблица печатается один раз в финальном виде, а не мелькает кадрами.
 
+### Карта топологии (вид по умолчанию)
+
+По умолчанию `pipeline` показывает не таблицу, а **живую карту топологии**: seed
+— корень, каждый найденный хост — ветка, под ним live-статус HTTP, открытые
+порты и уязвимости (цвет по severity). Находки привязываются по hostname, так
+что находка nuclei на `https://a.example.com/x` садится под тот же узел, что
+subfinder нашёл как `a.example.com`. Пока идёт этап, в шапке крутится спиннер, а
+свежие узлы подсвечиваются — карта растёт на глазах.
+
+```text
+⠴ topology recon-to-vuln · example.com   3 hosts · 2 live · 2 vulns
+
+example.com
+├── ● api.example.com  200  API Gateway
+│   ├── ports 443,8080
+│   └── ▲ critical  Remote Code Execution
+├── ● www.example.com  403  Forbidden
+│   └── ▲ medium  Reflected XSS
+└── ○ dev.example.com  (bruteforce)
+```
+
+Вид выбирается настройкой `view` (`topology` по умолчанию, либо `table`) и
+переопределяется на один запуск флагом `--topology` / `--no-topology` (алиасы
+`--map` / `--no-map`). Под `--no-parse` карта недоступна (ей нужны разобранные
+записи) — прогон идёт в «подробном» режиме.
+
 ### Сохранять или нет — решает пользователь
 
 Когда прогон закончился и результат на экране, `run` и `pipeline` спрашивают
@@ -446,6 +472,10 @@ stage_timeout: 1800
 # как есть (эквивалент флага --no-parse, но по умолчанию для всех запусков).
 parse: false
 
+# Вид живого прогона pipeline: topology (карта, по умолчанию) или table.
+# Переопределяется флагом --topology / --no-topology на один запуск.
+view: topology
+
 # Логирование
 log_level: INFO       # DEBUG / INFO / WARNING / ERROR
 log_to_file: true     # писать ли диагностику в logs/cyberfw.log
@@ -458,7 +488,8 @@ pipelines_dir: pipelines
 ```
 
 Те же ключи доступны как переменные окружения: `CYBERFW_PARSE=false`,
-`CYBERFW_LOG_LEVEL=DEBUG`, `CYBERFW_LOG_TO_FILE=false` и т.д. Отключение
+`CYBERFW_VIEW=table`, `CYBERFW_LOG_LEVEL=DEBUG`, `CYBERFW_LOG_TO_FILE=false` и
+т.д. Отключение
 парсинга: глобально через `parse` в настройках, либо разово флагом `--no-parse`
 у `cyberfw run`. Уровень логирования и запись логов в файл управляются
 `log_level`/`log_to_file` (неверный уровень отклоняется с понятной ошибкой).

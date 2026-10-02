@@ -103,6 +103,17 @@ class TestSettingsEnv:
         with pytest.raises(ValidationError):
             Settings(root_dir=tmp_path, max_archive_size=0)
 
+    def test_view_defaults_to_topology(self, tmp_path: Path) -> None:
+        assert Settings(root_dir=tmp_path).view == "topology"
+
+    def test_view_via_env_is_case_insensitive(self, tmp_path: Path, monkeypatch) -> None:
+        monkeypatch.setenv("CYBERFW_VIEW", "Table")
+        assert Settings(root_dir=tmp_path).view == "table"
+
+    def test_invalid_view_is_rejected(self, tmp_path: Path) -> None:
+        with pytest.raises(ValidationError):
+            Settings(root_dir=tmp_path, view="fancy")
+
     def test_stage_timeout_defaults_to_unlimited(self, tmp_path: Path) -> None:
         assert Settings(root_dir=tmp_path).stage_timeout is None
 

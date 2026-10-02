@@ -10,7 +10,7 @@ from __future__ import annotations
 import logging
 import os
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import yaml
 from pydantic import Field, field_validator, model_validator
@@ -70,6 +70,11 @@ class Settings(BaseSettings):
         description="Validate tool stdout against Pydantic schemas. Set false (or pass --no-parse) "
         "to stream every raw stdout/stderr line exactly as the tool prints it.",
     )
+    view: Literal["table", "topology"] = Field(
+        default="topology",
+        description="Default live view for `pipeline`: 'topology' (animated map) or 'table' "
+        "(stage table). Override per run with --topology / --no-topology.",
+    )
     # Logging.
     log_level: str = Field(default="INFO", description="Console/file log level (DEBUG/INFO/WARNING/ERROR).")
     log_to_file: bool = Field(default=True, description="Also write diagnostics to logs/cyberfw.log.")
@@ -88,6 +93,12 @@ class Settings(BaseSettings):
         if isinstance(logging.getLevelName(name), int):
             return name
         raise ValueError(f"invalid log_level {value!r}; use DEBUG/INFO/WARNING/ERROR")
+
+    @field_validator("view", mode="before")
+    @classmethod
+    def _normalise_view(cls, value: object) -> str:
+        """Accept case-insensitive view names (CYBERFW_VIEW=Topology)."""
+        return str(value).strip().lower()
 
     @model_validator(mode="after")
     def _make_dirs_absolute(self) -> Settings:

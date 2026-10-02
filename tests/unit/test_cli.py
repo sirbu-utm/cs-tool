@@ -1081,7 +1081,7 @@ class TestLiveProgress:
     """The pipeline and single runs show a live stage table plus the latest findings."""
 
     def test_pipeline_shows_every_stage_with_its_outcome(self) -> None:
-        result = runner.invoke(app, ["pipeline", "recon-to-vuln", "-t", "example.com", "--no-report"])
+        result = runner.invoke(app, ["pipeline", "recon-to-vuln", "-t", "example.com", "--no-topology", "--no-report"])
 
         assert result.exit_code == 0, result.stdout
         for stage in ("subdomains", "live_http", "vulns"):
@@ -1090,14 +1090,14 @@ class TestLiveProgress:
         assert "pending" not in result.stdout, "every stage has finished by the time the run returns"
 
     def test_pipeline_shows_the_findings_as_they_arrive(self) -> None:
-        result = runner.invoke(app, ["pipeline", "recon-to-vuln", "-t", "example.com", "--no-report"])
+        result = runner.invoke(app, ["pipeline", "recon-to-vuln", "-t", "example.com", "--no-topology", "--no-report"])
 
         assert "Latest findings" in result.stdout
         assert "sub.example.com" in result.stdout
 
     def test_pipeline_stage_table_is_not_printed_twice(self) -> None:
         """The live table IS the stage table; repeating it after the run is noise."""
-        result = runner.invoke(app, ["pipeline", "recon-to-vuln", "-t", "example.com", "--no-report"])
+        result = runner.invoke(app, ["pipeline", "recon-to-vuln", "-t", "example.com", "--no-topology", "--no-report"])
 
         assert result.stdout.count("subdomains") == 1
 
@@ -1115,7 +1115,7 @@ class TestLiveProgress:
     def test_redirected_output_gets_one_frame_not_a_flipbook(self) -> None:
         """A pipe or a CI log is not a terminal: repainting there would dump the whole
         table once per update instead of updating it in place."""
-        result = runner.invoke(app, ["pipeline", "recon-to-vuln", "-t", "example.com", "--no-report"])
+        result = runner.invoke(app, ["pipeline", "recon-to-vuln", "-t", "example.com", "--no-topology", "--no-report"])
 
         assert result.stdout.count("Latest findings") == 1
 
@@ -1152,6 +1152,31 @@ class TestLiveProgress:
 
         assert result.exit_code == 0, result.stdout
         assert "sub.example.com" in result.stdout
+
+    def test_topology_is_the_default_view(self) -> None:
+        """With the shipped `view=topology`, a plain run shows the map, not the stage table."""
+        result = runner.invoke(app, ["pipeline", "recon-to-vuln", "-t", "example.com", "--no-report"])
+
+        assert result.exit_code == 0, result.stdout
+        assert "topology" in result.stdout and "sub.example.com" in result.stdout
+        assert "Latest findings" not in result.stdout
+
+    def test_view_setting_can_restore_the_table_as_default(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("CYBERFW_VIEW", "table")
+        result = runner.invoke(app, ["pipeline", "recon-to-vuln", "-t", "example.com", "--no-report"])
+
+        assert result.exit_code == 0, result.stdout
+        assert "Latest findings" in result.stdout and "subdomains" in result.stdout
+
+    def test_flag_overrides_the_view_setting(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """--topology wins even when the setting says table."""
+        monkeypatch.setenv("CYBERFW_VIEW", "table")
+        result = runner.invoke(
+            app, ["pipeline", "recon-to-vuln", "-t", "example.com", "--topology", "--no-report"]
+        )
+
+        assert result.exit_code == 0, result.stdout
+        assert "topology" in result.stdout and "Latest findings" not in result.stdout
 
     def test_topology_is_ignored_in_verbose_mode_with_a_warning(self) -> None:
         result = runner.invoke(
@@ -1386,7 +1411,7 @@ class TestPipelinePreFlight:
         (tmp_path / "tools_bin" / "nuclei").unlink()
 
         result = runner.invoke(
-            app, ["pipeline", "recon-to-vuln", "-t", "example.com", "--force-start", "--no-report"]
+            app, ["pipeline", "recon-to-vuln", "-t", "example.com", "--force-start", "--no-topology", "--no-report"]
         )
 
         assert result.exit_code == 1, "the nuclei stage still fails, but the run happened"
