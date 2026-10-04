@@ -10,6 +10,7 @@ from cyberfw.exceptions import ParseError
 from cyberfw.pipeline.schemas import (
     FfufResult,
     GitleaksResult,
+    GowitnessResult,
     HttpxResult,
     NaabuResult,
     NucleiResult,
@@ -59,6 +60,18 @@ class TestValidation:
         assert isinstance(rec, GitleaksResult)
         assert rec.file_path == "src/config.py"
         assert rec.kind == "secret"
+
+    def test_gowitness_v3_names(self) -> None:
+        """gowitness v3 writes ``file_name`` / ``response_code``, not ``filename`` / ``status_code``."""
+        line = _line({"url": "https://a.com", "file_name": "https-a.com.jpeg", "response_code": 302, "title": "A"})
+        rec = validate_record("gowitness", line, 1)
+        assert isinstance(rec, GowitnessResult)
+        assert (rec.filename, rec.status_code, rec.kind) == ("https-a.com.jpeg", 302, "screenshot")
+
+    def test_gowitness_legacy_names_still_read(self) -> None:
+        rec = validate_record("gowitness", _line({"url": "https://a.com", "filename": "a.png", "status_code": 200}), 1)
+        assert isinstance(rec, GowitnessResult)
+        assert (rec.filename, rec.status_code) == ("a.png", 200)
 
     def test_extra_fields_ignored(self) -> None:
         # Unknown keys are tolerated (extra="ignore"), e.g. subfinder "input".

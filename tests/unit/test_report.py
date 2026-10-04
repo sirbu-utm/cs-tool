@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import base64
+import hashlib
 import json
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -11,7 +14,7 @@ import pytest
 from cyberfw import __version__
 from cyberfw.exceptions import ReportError
 from cyberfw.pipeline.engine import Node, NodeResult, PipelineResult
-from cyberfw.pipeline.schemas import NucleiResult, SubfinderResult
+from cyberfw.pipeline.schemas import NucleiResult, SubfinderResult, ToolRecord, validate_record
 from cyberfw.report import generate_html_report, generate_json_report
 from cyberfw.report.html_report import generate_html_report as html_report_gen
 from cyberfw.report.json_report import generate_json_report as json_report_gen
@@ -107,7 +110,7 @@ class TestHtmlReport:
 
     def test_failed_status_pill(self, tmp_path: Path) -> None:
         text = html_report_gen(_failed_result(), output_path=tmp_path / "r.html").read_text(encoding="utf-8")
-        assert "class=\"pill failed\">failed" in text
+        assert '<span class="pill failed"><i></i>failed</span>' in text
 
     def test_empty_result_renders_placeholders(self, tmp_path: Path) -> None:
         empty = PipelineResult(nodes=[], records=[])
@@ -121,8 +124,8 @@ class TestHtmlReport:
             records=[SubfinderResult.from_json("subfinder", '{"host": "<script>x</script>"}', 1)],
         )
         text = html_report_gen(result, output_path=tmp_path / "x.html").read_text(encoding="utf-8")
-        assert "<script>" not in text
-        assert "&lt;script&gt;" in text
+        assert "<script>x</script>" not in text
+        assert "&lt;script&gt;x&lt;/script&gt;" in text
 
 
 class TestRunProvenance:
@@ -185,3 +188,112 @@ class TestRunProvenance:
         text = html_report_gen(_ok_result(), output_path=tmp_path / "r.html", run=run).read_text(encoding="utf-8")
         assert "<script>alert(1)</script>" not in text
         assert "&lt;script&gt;" in text
+
+
+def _rec(tool: str, obj: dict[str, object], lineno: int = 1) -> ToolRecord:
+    return validate_record(tool, json.dumps(obj), lineno)
+
+
+def _scan_result() -> PipelineResult:
+    """A recon-to-vuln shaped run: subfinder → httpx → (nuclei, gowitness) fan-out, plus gitleaks."""
+    records = [
+        _rec("subfinder", {"host": "a.example.com", "source": "crtsh"}),
+        _rec("subfinder", {"host": "b.example.com", "source": "crtsh"}, 2),
+        _rec("httpx", {"url": "https://a.example.com", "status_code": 200, "title": "<img src=x onerror=alert(1)>"}),
+        _rec("nuclei", {"template-id": "CVE-2024-1", "matched-at": "https://a.example.com/x",
+                        "info": {"name": "Bad Thing", "severity": "critical",
+                                 "classification": {"cve-id": ["CVE-2024-1"], "cvss-score": 9.8}}}),
+        _rec("nuclei", {"template-id": "t2", "matched-at": "javascript:alert(1)", "info": {"severity": "info"}}, 2),
+        _rec("gowitness", {"url": "https://a.example.com", "file_name": "dir/https a.example.com.jpeg", "response_code": 200}),
+        _rec("gitleaks", {"RuleID": "aws-key", "Description": "AWS key", "File": "src/config.py"}),
+    ]
+    nodes = [
+        NodeResult(node=Node(tool="subfinder", stage="subs"), ok=True, count=2),
+        NodeResult(node=Node(tool="httpx", stage="live"), ok=True, count=1),
+        NodeResult(node=Node(tool="nuclei", stage="vulns", input_from="live"), ok=True, count=2),
+        NodeResult(node=Node(tool="gowitness", stage="shots", input_from="live"), ok=False, skipped=True, error="skipped"),
+        NodeResult(node=Node(tool="gitleaks", stage="leaks"), ok=True, count=1),
+    ]
+    return PipelineResult(nodes=nodes, records=records)
+
+
+class TestHtmlDashboard:
+    @staticmethod
+    def _page(tmp_path: Path, result: PipelineResult | None = None, run: RunInfo | None = None) -> str:
+        path = html_report_gen(result or _scan_result(), output_path=tmp_path / "r.html", run=run)
+        return path.read_text(encoding="utf-8")
+
+    def test_csp_admits_exactly_the_inline_scripts(self, tmp_path: Path) -> None:
+        """Editing a script without its hash would silently switch the page's JS off."""
+        text = self._page(tmp_path)
+        csp = re.search(r'http-equiv="Content-Security-Policy" content="([^"]+)"', text)
+        assert csp is not None
+        scripts = re.findall(r"<script>(.*?)</script>", text, flags=re.S)
+        assert len(scripts) == 2
+        for script in scripts:
+            digest = base64.b64encode(hashlib.sha256(script.encode("utf-8")).digest()).decode("ascii")
+            assert f"'sha256-{digest}'" in csp.group(1)
+        assert "'unsafe-inline'" not in csp.group(1).split("script-src", 1)[1].split(";", 1)[0]
+
+    def test_scan_data_is_escaped_and_only_web_urls_are_links(self, tmp_path: Path) -> None:
+        text = self._page(tmp_path)
+        assert "<img src=x onerror" not in text
+        assert "&lt;img src=x onerror=alert(1)&gt;" in text
+        assert 'href="javascript:' not in text
+        assert '<a href="https://a.example.com/x" target="_blank" rel="noopener noreferrer">' in text
+
+    def test_hosts_fold_findings_onto_the_discovered_host(self, tmp_path: Path) -> None:
+        text = self._page(tmp_path)
+        hosts = text.split('<table class="hosts">', 1)[1].split("</table>", 1)[0]
+        assert hosts.count("a.example.com") == 1  # subfinder, httpx, nuclei and gowitness on one row
+        assert '<span class="sevn sev-critical" title="critical">1 crit</span>' in hosts
+        assert "b.example.com" in hosts
+        assert '<i class="ld"></i>src</td>' not in hosts  # a gitleaks file path is not a host
+
+    def test_severity_donut_and_cards(self, tmp_path: Path) -> None:
+        text = self._page(tmp_path)
+        assert text.count('class="seg sev-') == 2  # critical + info
+        assert '<b data-count="2">2</b><span>findings</span>' in text
+        card = text.split('<article class="card sev-critical"', 1)[1].split("</article>", 1)[0]
+        assert "Bad Thing" in card and "CVSS 9.8" in card
+        assert card.count("CVE-2024-1") == 1  # the template id is not repeated as a CVE chip
+        assert '<h4>aws-key</h4>' in text
+
+    def test_clean_state_only_when_nuclei_actually_ran(self, tmp_path: Path) -> None:
+        ran = PipelineResult(nodes=[NodeResult(node=Node(tool="nuclei", stage="v"), ok=True, count=0)])
+        assert "No vulnerabilities found" in self._page(tmp_path, ran)
+        skipped = PipelineResult(
+            nodes=[NodeResult(node=Node(tool="nuclei", stage="v"), ok=False, skipped=True, error="skipped")]
+        )
+        assert "No vulnerabilities found" not in self._page(tmp_path, skipped)
+
+    def test_pipeline_graph_follows_input_from(self, tmp_path: Path) -> None:
+        text = self._page(tmp_path, run=RunInfo(seed="example.com"))
+        flow = text.split('<div class="panel flow">', 1)[1].split("</svg>", 1)[0]
+        assert flow.count('class="fn st-') == 5 and 'class="fn seed"' in flow
+        assert flow.count('class="edge ') == 5  # one edge into every stage
+        # nuclei and gowitness both read httpx, so their edges start at the same point
+        starts = re.findall(r'class="edge (\w+)" pathLength="1" d="M([\d.,]+) ', flow)
+        assert starts[2][1] == starts[3][1]
+        assert starts[3][0] == "skip"
+        assert '<g class="fn st-skipped"' in flow
+
+    def test_screenshot_gallery_links_into_the_session(self, tmp_path: Path) -> None:
+        text = self._page(tmp_path)
+        assert 'src="screenshots/https%20a.example.com.jpeg"' in text
+        assert 'id="lightbox"' in text
+        assert 'id="lightbox"' not in self._page(tmp_path, _ok_result())
+
+    def test_every_record_is_in_the_page_without_javascript(self, tmp_path: Path) -> None:
+        records = [_rec("subfinder", {"host": f"h{i}.example.com"}, i) for i in range(1, 1201)]
+        result = PipelineResult(nodes=[NodeResult(node=Node(tool="subfinder", stage="s"), count=1200)], records=records)
+        text = self._page(tmp_path, result)
+        table = text.split('<table id="record-table">', 1)[1].split("</table>", 1)[0]
+        assert table.count('<tr data-tool="subfinder"') == 1200
+        assert '<button id="more" class="more-btn" type="button" hidden>' in text
+
+    def test_tiles_count_what_was_found(self, tmp_path: Path) -> None:
+        text = self._page(tmp_path)
+        assert '<span class="lbl">findings</span><b class="num"><span data-count="2">2</span></b>' in text
+        assert '<span class="lbl">stages</span><b class="num"><span data-count="4">4</span><span class="of">/5</span>' in text
+        assert '<span class="lbl">secrets</span>' in text

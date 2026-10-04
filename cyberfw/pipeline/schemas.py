@@ -12,7 +12,7 @@ from __future__ import annotations
 import json
 from typing import Any, cast
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field
 
 from cyberfw.exceptions import ParseError
 
@@ -189,12 +189,16 @@ class GitleaksResult(ToolRecord):
 
 # -- Gowitness -----------------------------------------------------------------
 class GowitnessResult(ToolRecord):
-    """Headless browser screenshot: ``{"url", "title", "filename"}``."""
+    """Headless browser screenshot: ``{"url", "title", "file_name", "response_code"}``.
+
+    gowitness v3 names the image ``file_name`` and the HTTP status
+    ``response_code``; the v2-era ``filename`` / ``status_code`` are still read.
+    """
 
     url: str = ""
     title: str = ""
-    filename: str = ""
-    status_code: int = Field(default=0, validation_alias="status_code", alias="status_code")
+    filename: str = Field(default="", validation_alias=AliasChoices("file_name", "filename"))
+    status_code: int = Field(default=0, validation_alias=AliasChoices("response_code", "status_code"))
 
     @classmethod
     def from_json(cls, tool: str, text: str, lineno: int) -> GowitnessResult:
