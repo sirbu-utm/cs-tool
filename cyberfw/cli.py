@@ -18,10 +18,12 @@ from __future__ import annotations
 import functools
 import os
 import shutil
+import time
+from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
 from time import strftime
-from typing import Annotated
+from typing import Annotated, Protocol
 
 import anyio
 import typer
@@ -33,6 +35,7 @@ from rich.prompt import Confirm, Prompt
 from rich.table import Table
 from rich.text import Text
 
+from cyberfw import motion
 from cyberfw.config import Settings, load_settings
 from cyberfw.exceptions import (
     ChromiumUnsupportedError,
@@ -60,7 +63,7 @@ from cyberfw.report.run_info import RunInfo
 from cyberfw.resources import default_wordlist, packaged_data
 from cyberfw.tools import adapter_class
 from cyberfw.tools.base import ToolContext
-from cyberfw.ui import banner, record_detail, record_style, state_style, tool_guide
+from cyberfw.ui import PIP, banner, record_detail, record_style, state_style, tool_guide
 
 LOG = get_logger("cli")
 
@@ -280,18 +283,36 @@ def _preflight(
 
 
 def _run_summary(
-    result: PipelineResult, *, name: str, session_id: str, reports: list[tuple[str, Path]]
+    result: PipelineResult,
+    *,
+    name: str,
+    session_id: str,
+    reports: list[tuple[str, Path]],
+    progress: float = 1.0,
 ) -> Panel:
-    """Closing panel: did it work, what came out of it, where the artefacts are."""
+    """Closing panel: did it work, what came out of it, where the artefacts are.
+
+    ``progress`` below 1 is a frame of its entrance: the numbers count up.
+    """
     ok = result.succeeded()
-    totals = "  ".join(f"{tool} [accent]{count}[/accent]" for tool, count in result.totals_by_tool.items())
+    scale = motion.ease_out(progress)
+
+    def counted(value: float) -> float:
+        return value if progress >= 1 else value * scale
+
+    totals = "  ".join(
+        f"{tool} [accent]{round(counted(count))}[/accent]" for tool, count in result.totals_by_tool.items()
+    )
+    elapsed = (
+        f"elapsed {counted(result.duration_s):.1f}s" if result.duration_s is not None else "elapsed n/a"
+    )
     lines = [
         Text.assemble(
             ("success" if ok else "failed", "ok" if ok else "err"),
             ("  ·  ", "muted"),
-            (f"{len(result.records)} record(s)", "white"),
+            (f"{round(counted(len(result.records)))} record(s)", "white"),
             ("  ·  ", "muted"),
-            (f"elapsed {result.duration_s:.1f}s" if result.duration_s is not None else "elapsed n/a", "white"),
+            (elapsed, "white"),
         ),
         Text.from_markup(totals or "[muted]no records[/muted]"),
     ]
@@ -315,6 +336,11 @@ def _run_summary(
         padding=(1, 2),
         expand=False,
     )
+
+
+def _live_fps(settings: Settings) -> int:
+    """Redraws per second for a live view: smooth when animating, else just current."""
+    return 12 if settings.animations else 4
 
 
 def _session_tag(kind: str, name: str) -> str:
@@ -424,6 +450,13 @@ def _toggle_setting(action: str, settings: Settings) -> None:
     elif action == "l":
         current = settings.log_level if settings.log_level in _LOG_LEVELS else "INFO"
         os.environ["CYBERFW_LOG_LEVEL"] = _LOG_LEVELS[(_LOG_LEVELS.index(current) + 1) % len(_LOG_LEVELS)]
+    elif action == "a":
+        os.environ["CYBERFW_ANIMATIONS"] = "false" if settings.animations else "true"
+
+
+def _show_banner(states: list[str], platform: str, *, animate: bool) -> None:
+    """The banner, played in with its intro when the terminal allows it."""
+    motion.play(console, functools.partial(banner, states, platform), duration=1.1, animate=animate)
 
 
 def interactive_menu() -> None:
@@ -434,7 +467,7 @@ def interactive_menu() -> None:
         # One inventory pass serves the banner and the first launcher frame;
         # later frames recompute, since a tool can change state mid-session.
         startup_states = _tool_states(manager, settings.tools_dir)
-        console.print(banner(startup_states, manager.mapping.label))
+        _show_banner(startup_states, manager.mapping.label, animate=settings.animations)
         known_states: list[str] | None = startup_states
     finally:
         manager.close()
@@ -470,7 +503,7 @@ def interactive_menu() -> None:
 #: ninth registry entry would collide with.
 _PIPELINE_KEY = "r"
 _EXIT_KEYS = frozenset({"0", "q"})
-_SETTINGS_KEYS = frozenset({"p", "l", "f"})
+_SETTINGS_KEYS = frozenset({"p", "l", "f", "a"})
 
 
 def _tool_range(names: list[str]) -> str:
@@ -482,7 +515,7 @@ def _prompt_choice(names: list[str]) -> str:
     """Prompt for a menu choice, with an on-brand hint on invalid input.
 
     Returns a normalised token: a tool number, the pipeline key, an exit key
-    or a settings hotkey (``p``/``l``/``f``). Anything else re-prompts with a
+    or a settings hotkey (``p``/``l``/``f``/``a``). Anything else re-prompts with a
     plain explanation instead of Rich's generic "not a valid integer" loop.
     """
     valid = {str(index) for index in range(1, len(names) + 1)} | {_PIPELINE_KEY} | _EXIT_KEYS | _SETTINGS_KEYS
@@ -492,7 +525,7 @@ def _prompt_choice(names: list[str]) -> str:
             return raw
         console.print(
             f"[warn]Type {_tool_range(names)} for a tool, {_PIPELINE_KEY} pipeline, 0 exit, "
-            "or p/l/f to change settings.[/warn]"
+            "or p/l/f/a to change settings.[/warn]"
         )
 
 
@@ -534,6 +567,8 @@ def _launcher_view(manager: ToolManager, settings: Settings, *, states: list[str
     sidebar.add_row(Text.assemble(("  l  log level  ", "dim"), (settings.log_level, "info")))
     file_text, file_style = _flag(settings.log_to_file)
     sidebar.add_row(Text.assemble(("  f  log file   ", "dim"), (file_text, file_style)))
+    anim_text, anim_style = _flag(settings.animations)
+    sidebar.add_row(Text.assemble(("  a  animations ", "dim"), (anim_text, anim_style)))
 
     content, _states = _inventory_table(manager, settings.tools_dir, numbered=True, states=states)
 
@@ -637,25 +672,23 @@ def init_cmd(
             (f"Installing {len(targets)} tool(s) into ", "info"), (str(settings.tools_dir), "tool")
         )
     )
-    # Not expanded, and the detail is relative to tools_dir: an absolute
-    # Windows path is ~90 characters and squeezes every other column away.
-    table = Table(box=box.SIMPLE_HEAD, pad_edge=False)
-    table.add_column("tool", style="tool", no_wrap=True)
-    table.add_column("version", style="muted", no_wrap=True)
-    table.add_column("state", no_wrap=True)
-    table.add_column("detail", style="muted", overflow="ellipsis")
+    with_chromium = chromium and "gowitness" in targets and "gowitness" in manager.registry.names()
+    progress = _InstallProgress(len(targets) + with_chromium, animate=settings.animations)
     ok, failed = 0, 0
     try:
-        with console.status("", spinner="dots") as spinner:
+        # The table grows a row per tool inside the live region, over the
+        # progress line; the last frame is the table alone (all a pipe sees).
+        with Live(progress, console=console, refresh_per_second=_live_fps(settings), transient=False) as live:
             for name in targets:
                 spec = manager.spec(name)
                 wanted = spec.version if spec.version != "latest" else "latest release"
-                spinner.update(f"[info]checking[/info] {name} ({spec.repo}, {wanted}) ...")
+                progress.update(f"[info]checking[/info] {name} ({spec.repo}, {wanted}) ...")
                 try:
                     result = manager.install(name, force=force)
                 except CyberfwError as exc:
                     failed += 1
-                    table.add_row(name, "—", Text("failed", style="err"), str(exc))
+                    progress.add_row(name, "—", Text("failed", style="err"), str(exc))
+                    progress.advance()
                     continue
                 ok += 1
                 state = (
@@ -663,21 +696,86 @@ def init_cmd(
                     if result.up_to_date
                     else Text("installed", style="ok")
                 )
-                table.add_row(name, result.version, state, _relative_to(result.binary, settings.tools_dir))
-            if chromium and "gowitness" in targets and "gowitness" in manager.registry.names():
-                failed += _provision_chromium(manager, settings, table, force=force, spinner=spinner)
+                progress.add_row(name, result.version, state, _relative_to(result.binary, settings.tools_dir))
+                progress.advance()
+            if with_chromium:
+                failed += _provision_chromium(manager, settings, progress, force=force, spinner=progress)
+                progress.advance()
+            live.update(progress.table(), refresh=True)
     finally:
         manager.close()
 
-    console.print(table)
     if failed:
         console.print(f"[warn]{ok} ready, {failed} failed.[/warn]")
         raise typer.Exit(1)
     console.print(f"[ok]Done: {ok} tool(s) ready.[/ok]")
 
 
+class _RowSink(Protocol):
+    """Where a result row goes: a Rich ``Table`` or :class:`_InstallProgress`."""
+
+    def add_row(self, *cells: RenderableType | None) -> None: ...
+
+
+class _InstallProgress:
+    """``init``'s live frame: the result table, a row per finished tool, over a
+    progress line (spinner, bar, ``3/8`` and what is being fetched now).
+
+    :meth:`update` takes the markup message ``console.status`` used to, so
+    :func:`_provision_chromium` reports through it unchanged. Rows are kept as
+    a list and every frame builds its own table from a copy: ``Live`` renders
+    on its refresh thread while rows are being added.
+    """
+
+    def __init__(self, total: int, *, animate: bool, clock: Callable[[], float] = time.monotonic) -> None:
+        self.rows: list[tuple[RenderableType | None, ...]] = []
+        self.total = total
+        self.done = 0
+        self.message = ""
+        self._animate = animate
+        self._clock = clock
+
+    def update(self, message: str) -> None:
+        self.message = message
+
+    def advance(self) -> None:
+        self.done += 1
+
+    def add_row(self, *cells: RenderableType | None) -> None:
+        self.rows.append(cells)
+
+    def table(self) -> Table:
+        """The result table so far."""
+        # Not expanded, and the detail is relative to tools_dir: an absolute
+        # Windows path is ~90 characters and squeezes every other column away.
+        table = Table(box=box.SIMPLE_HEAD, pad_edge=False)
+        table.add_column("tool", style="tool", no_wrap=True)
+        table.add_column("version", style="muted", no_wrap=True)
+        table.add_column("state", no_wrap=True)
+        table.add_column("detail", style="muted", overflow="ellipsis")
+        for row in list(self.rows):
+            table.add_row(*row)
+        return table
+
+    def __rich__(self) -> RenderableType:
+        now = self._clock()
+        line = Text()
+        line.append(f"{motion.spinner(now) if self._animate else PIP} ", style="info")
+        line.append_text(
+            motion.bar(
+                self.done / self.total if self.total else 1.0,
+                20,
+                style="accent",
+                shine=(now % 1.5) / 1.5 if self._animate else None,
+            )
+        )
+        line.append(f" {self.done}/{self.total}  ", style="muted")
+        line.append_text(Text.from_markup(self.message))
+        return Group(self.table(), line) if self.rows else line
+
+
 def _provision_chromium(
-    manager: ToolManager, settings: Settings, table: Table, *, force: bool, spinner: object
+    manager: ToolManager, settings: Settings, table: _RowSink, *, force: bool, spinner: object
 ) -> int:
     """Download a portable Chromium for gowitness; add one row. Returns failures (0/1).
 
@@ -750,7 +848,7 @@ def status_cmd(verbose: VerboseOption = False) -> None:
     settings, manager = _bootstrap(verbose=verbose)
     try:
         tools, states = _inventory_table(manager, settings.tools_dir)
-        console.print(banner(states, manager.mapping.label))
+        _show_banner(states, manager.mapping.label, animate=settings.animations)
         # The banner already carries the readiness and the platform; what it
         # cannot show is where the binaries are looked for.
         console.print(
@@ -773,6 +871,7 @@ def status_cmd(verbose: VerboseOption = False) -> None:
         cfg.add_column("value")
         cfg.add_row("parse", "[ok]on[/ok]" if settings.parse else "[warn]off (raw output)[/warn]")
         cfg.add_row("view", settings.view)
+        cfg.add_row("animations", "on" if settings.animations else "off")
         cfg.add_row("log_level", settings.log_level)
         cfg.add_row("log_to_file", "on" if settings.log_to_file else "off")
         cfg.add_row("concurrency", str(settings.concurrency))
@@ -880,16 +979,18 @@ def run_cmd(
             manager.close()
         console.print(f"[info]{len(records)} line(s) captured[/info]")
     else:
-        view = PipelineLiveView([Node(tool=tool, stage=tool)], title=f"{tool} · {target_label}")
-        with Live(view.render(), console=console, refresh_per_second=4, transient=False) as live:
+        view = PipelineLiveView(
+            [Node(tool=tool, stage=tool)], title=f"{tool} · {target_label}", animate=settings.animations
+        )
+        # The view is a renderable (``__rich__``) on auto-refresh: callbacks only
+        # change its state, and the spinner, bars and timer move between them.
+        with Live(view, console=console, refresh_per_second=_live_fps(settings), transient=False) as live:
 
             async def _on_record(record: ToolRecord) -> None:
                 view.on_record(record)
-                live.update(view.render())
 
             async def _on_stage(event: StageEvent) -> None:
                 view.on_stage(event)
-                live.update(view.render())
 
             engine.set_record_callback(_on_record)
             engine.set_stage_callback(_on_stage)
@@ -897,7 +998,8 @@ def run_cmd(
                 node_result, records = anyio.run(_run_single, engine, ctx, tool, True)
             finally:
                 manager.close()
-                live.update(view.render())
+                view.finish()
+                live.refresh()
         if records:
             console.print(_record_table(records))
         else:
@@ -1072,35 +1174,21 @@ def pipeline_cmd(
         # Live leaves its last frame on screen. On a non-TTY (CI, a pipe) Rich
         # prints that final frame once instead of redrawing.
         #
-        # Topology map: a renderable object (``__rich__``) driven by auto-refresh,
-        # so the spinner and the growth pulse animate between events — callbacks
-        # only mutate state. The stage table is a static snapshot refreshed on
-        # each event instead.
+        # Both views are renderable objects (``__rich__``) driven by
+        # auto-refresh, so spinners, bars, timers and the growth pulse animate
+        # between events — callbacks only mutate state.
         view: PipelineLiveView | TopologyView
         if use_topology:
-            view = TopologyView(nodes, seed=target, title=f"{name} · {target}")
-            renderable: RenderableType = view
-            animate = True
+            view = TopologyView(nodes, seed=target, title=f"{name} · {target}", animate=settings.animations)
         else:
-            view = PipelineLiveView(nodes, title=f"pipeline {name} · {target}")
-            renderable = view.render()
-            animate = False
-        with Live(
-            renderable,
-            console=console,
-            refresh_per_second=12 if animate else 4,
-            transient=False,
-        ) as live:
+            view = PipelineLiveView(nodes, title=f"pipeline {name} · {target}", animate=settings.animations)
+        with Live(view, console=console, refresh_per_second=_live_fps(settings), transient=False) as live:
 
             async def _on_record(record: ToolRecord) -> None:
                 view.on_record(record)
-                if not animate:
-                    live.update(view.render())
 
             async def _on_stage(event: StageEvent) -> None:
                 view.on_stage(event)
-                if not animate:
-                    live.update(view.render())
 
             engine.set_record_callback(_on_record)
             engine.set_stage_callback(_on_stage)
@@ -1111,10 +1199,8 @@ def pipeline_cmd(
                 raise typer.Exit(1) from exc
             finally:
                 manager.close()
-                if animate:
-                    live.refresh()
-                else:
-                    live.update(view.render())
+                view.finish()
+                live.refresh()
 
     if verbose:
         console.print(_node_table(result))
@@ -1144,7 +1230,14 @@ def pipeline_cmd(
     # A blank line: Live's last frame ends without one, so the panel would
     # otherwise start on the same line as the table's bottom edge.
     console.print()
-    console.print(_run_summary(result, name=name, session_id=session_id, reports=written))
+    motion.play(
+        console,
+        lambda progress: _run_summary(
+            result, name=name, session_id=session_id, reports=written, progress=progress
+        ),
+        duration=0.7,
+        animate=settings.animations,
+    )
 
     if not result.succeeded():
         raise typer.Exit(1)

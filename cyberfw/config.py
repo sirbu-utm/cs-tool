@@ -75,6 +75,11 @@ class Settings(BaseSettings):
         description="Default live view for `pipeline`: 'topology' (animated map) or 'table' "
         "(stage table). Override per run with --topology / --no-topology.",
     )
+    animations: bool = Field(
+        default=True,
+        description="Animate the terminal UI: the banner intro, spinners, progress bars and "
+        "counters. Off — or on a pipe, in CI, on a dumb terminal — only the final frames are printed.",
+    )
     # Logging.
     log_level: str = Field(default="INFO", description="Console/file log level (DEBUG/INFO/WARNING/ERROR).")
     log_to_file: bool = Field(default=True, description="Also write diagnostics to logs/cyberfw.log.")

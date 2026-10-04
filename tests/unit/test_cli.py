@@ -411,7 +411,7 @@ class TestSettingsToggle:
 
     @pytest.fixture(autouse=True)
     def _isolate_env(self) -> Iterator[None]:
-        keys = ("CYBERFW_PARSE", "CYBERFW_LOG_TO_FILE", "CYBERFW_LOG_LEVEL")
+        keys = ("CYBERFW_PARSE", "CYBERFW_LOG_TO_FILE", "CYBERFW_LOG_LEVEL", "CYBERFW_ANIMATIONS")
         saved = {k: os.environ.get(k) for k in keys}
         for k in keys:
             os.environ.pop(k, None)
@@ -447,6 +447,14 @@ class TestSettingsToggle:
         monkeypatch.delenv("CYBERFW_LOG_LEVEL", raising=False)
         _toggle_setting("l", self._settings(tmp_path, log_level="INFO"))
         assert os.environ["CYBERFW_LOG_LEVEL"] == "WARNING"
+
+    def test_a_toggles_animations(self, tmp_path: Path) -> None:
+        from cyberfw.cli import _toggle_setting
+
+        _toggle_setting("a", self._settings(tmp_path, animations=True))
+        assert os.environ["CYBERFW_ANIMATIONS"] == "false"
+        _toggle_setting("a", self._settings(tmp_path, animations=False))
+        assert os.environ["CYBERFW_ANIMATIONS"] == "true"
 
 
 class TestRunCommand:
@@ -786,6 +794,7 @@ class TestStatusCommand:
         assert "Effective settings" in result.stdout
         assert "log_level" in result.stdout
         assert "stage_timeout" in result.stdout
+        assert "animations" in result.stdout
 
     def test_doctor_is_an_alias_for_status(self) -> None:
         assert runner.invoke(app, ["doctor"]).exit_code == 0

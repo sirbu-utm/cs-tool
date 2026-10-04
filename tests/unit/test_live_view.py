@@ -6,6 +6,7 @@ from rich.console import Console
 
 from cyberfw.live_view import PipelineLiveView, TopologyView
 from cyberfw.logging import THEME
+from cyberfw.motion import SPINNER
 from cyberfw.pipeline.engine import Node, NodeResult, StageEvent
 from cyberfw.pipeline.schemas import (
     FfufResult,
@@ -341,7 +342,7 @@ class TestTopologyView:
         frame_a = _render_topology(view)
         clock.t = 1000.25  # advance time → the spinner frame must change
         frame_b = _render_topology(view)
-        spinner = set("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏")
+        spinner = set(SPINNER)
         assert any(ch in spinner for ch in frame_a)
         assert frame_a != frame_b
 

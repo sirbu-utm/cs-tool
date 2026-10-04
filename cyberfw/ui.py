@@ -11,7 +11,8 @@ literal ``ESC`` control byte does not survive a plain-text paste.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+import functools
+from collections.abc import Iterator, Sequence
 
 from rich import box
 from rich.cells import cell_len
@@ -25,6 +26,7 @@ from rich.style import Style
 from rich.text import Text
 
 from cyberfw import __version__
+from cyberfw.motion import NOISE, phase
 from cyberfw.pipeline.schemas import ToolRecord
 
 CS_TOOL_LOGO = "\x1b[0m" """\x1b[0;37m  \x1b[0;90m▄\x1b[0;37m▄\x1b[0;97m▄▄▄▄▄\x1b[0;37m▄\x1b[0;90m▄\x1b[0;37m   \x1b[0;90m▄\x1b[0;37m▄\x1b[0;97m▄▄▄▄▄\x1b[0;37m▄      \x1b[0;97m▄▄▄▄▄▄▄▄▄▄▄\x1b[0;37m   \x1b[0;90m▄\x1b[0;37m▄\x1b[0;97m▄▄▄▄\x1b[0;37m▄\x1b[0;90m▄\x1b[0;37m     \x1b[0;90m▄\x1b[0;37m▄\x1b[0;97m▄▄▄▄\x1b[0;37m▄\x1b[0;90m▄\x1b[0;37m   \x1b[0;97m▄▄▄▄▄\x1b[0;37m      \x1b[0m
@@ -172,7 +174,13 @@ class GradientRule:
     A renderable rather than a pre-coloured string, so it follows the terminal:
     a smooth per-cell ramp in truecolor, even bands from the palette the
     terminal really has otherwise, and a plain line when there is no colour.
+
+    ``progress`` below 1 draws only the leading part of the rule, tipped with a
+    bright cell — the banner's intro draws the line from left to right.
     """
+
+    def __init__(self, progress: float = 1.0) -> None:
+        self.progress = progress
 
     def __rich_measure__(self, console: Console, options: ConsoleOptions) -> Measurement:
         width = min(options.max_width, _RULE_MAX_WIDTH)
@@ -180,6 +188,17 @@ class GradientRule:
 
     def __rich_console__(self, console: Console, options: ConsoleOptions) -> RenderResult:
         width = max(1, min(options.max_width, _RULE_MAX_WIDTH))
+        if self.progress >= 1:
+            yield from self._cells(console, width)
+        else:
+            drawn = int(width * max(self.progress, 0.0))
+            cells = [(char, segment.style) for segment in self._cells(console, width) for char in segment.text]
+            for index, (char, style) in enumerate(cells[:drawn]):
+                yield Segment(char, _RULE_TIP if index == drawn - 1 else style)
+        yield Segment.line()
+
+    @staticmethod
+    def _cells(console: Console, width: int) -> Iterator[Segment]:
         if console.color_system == "256":
             yield from _bands(_RULE_BANDS_256, width)
         elif console.color_system in ("standard", "windows"):
@@ -190,10 +209,13 @@ class GradientRule:
             for index in range(width):
                 colour = Color.from_triplet(blend_rgb(_RULE_FROM, _RULE_TO, index / last))
                 yield Segment(RULE_CHAR, Style(color=colour))
-        yield Segment.line()
 
 
-def _bands(colours: Sequence[Color], width: int) -> RenderResult:
+#: The bright leading cell of a rule that is still being drawn.
+_RULE_TIP = Style(color="bright_white", bold=True)
+
+
+def _bands(colours: Sequence[Color], width: int) -> Iterator[Segment]:
     """``width`` rule cells split into near-equal runs, one per colour, in order."""
     for index, colour in enumerate(colours):
         start = width * index // len(colours)
@@ -207,34 +229,103 @@ def gradient_rule() -> GradientRule:
     return GradientRule()
 
 
-def _status_strip(states: Sequence[str], platform: str) -> Panel:
-    """The HUD under the wordmark: one pip per tool, then how many can run."""
+def _status_strip(states: Sequence[str], platform: str, progress: float = 1.0) -> Panel:
+    """The HUD under the wordmark: one pip per tool, then how many can run.
+
+    Below ``progress`` 1 the pips light up one by one (the newest flashes) and
+    the counter counts the ready ones lit so far.
+    """
+    lit = len(states) if progress >= 1 else int(len(states) * max(progress, 0.0))
     pips = Text()
-    for state in states:
-        pips.append(PIP, style=state_style(state))
-    parts = [pips, readiness(states), Text(platform, style="muted"), Text(f"v{__version__}", style="muted")]
+    for index, state in enumerate(states):
+        if index >= lit:
+            pips.append(PIP, style="muted")
+        else:
+            pips.append(PIP, style="bold bright_white" if progress < 1 and index == lit - 1 else state_style(state))
+    if progress >= 1:
+        counter = readiness(states)
+    else:
+        counter = Text(f"{sum(1 for state in states[:lit] if state == 'ready')}/{len(states)} ready", style="muted")
+    parts = [pips, counter, Text(platform, style="muted"), Text(f"v{__version__}", style="muted")]
     # An unstyled separator: Text.join takes the joiner as the base style of the
     # result, so a styled one would tint every pip and the counter with it.
     line = Text("   ").join(part for part in parts if part.plain)
     return Panel(line, border_style="accent", box=box.SQUARE, padding=(0, 2), expand=False)
 
 
-def banner(states: Sequence[str], platform: str) -> RenderableType:
+def banner(states: Sequence[str], platform: str, progress: float = 1.0) -> RenderableType:
     """The startup banner: wordmarks, a gradient rule and the status strip.
 
     ``states`` is one ``ready`` / ``blocked`` / ``not installed`` per registered
     tool — the same states the inventory table shows — so the strip answers
     "is this thing ready to run" without a separate command.
+
+    ``progress`` (0..1) is a frame of the intro: the wordmark materialises out
+    of noise left to right, the rule draws itself, the pips light up. Every
+    frame has the final banner's size, so nothing below it jumps. At 1 it is
+    the banner.
     """
     return Group(
-        Text.from_ansi(CS_TOOL_LOGO),
+        _materialise(CS_TOOL_LOGO, phase(progress, 0.0, 0.6)),
         Text(""),
-        gradient_rule(),
-        _status_strip(states, platform),
+        GradientRule(phase(progress, 0.3, 0.7)),
+        _status_strip(states, platform, phase(progress, 0.55, 0.95)),
         Text(""),
-        Text.from_ansi(UNIV_LOGO),
+        _materialise(UNIV_LOGO, phase(progress, 0.4, 0.95)),
         Text(""),
     )
+
+
+#: How far ahead of a wordmark cell settling it starts to flicker.
+_FLICKER = 0.18
+#: How long a cell that just settled stays bright: the decoding edge.
+_EDGE = 0.06
+_EDGE_STYLE = Style(color="bright_white", bold=True)
+
+
+@functools.lru_cache(maxsize=4)
+def _wordmark_cells(ansi: str) -> tuple[tuple[str, Style, float], ...]:
+    """Each character of a wordmark with its style and the moment (0..1) it settles.
+
+    Left to right with a little scatter, so the art resolves like a scan
+    rather than a wipe; the scatter is a fixed hash, so every run looks alike.
+    """
+    text = Text.from_ansi(ansi)
+    styles = [Style.null()] * len(text.plain)
+    for span in text.spans:
+        style = span.style if isinstance(span.style, Style) else Style.parse(span.style)
+        for index in range(span.start, min(span.end, len(styles))):
+            styles[index] = styles[index] + style
+    width = max(cell_len(line) for line in text.plain.splitlines()) or 1
+    cells: list[tuple[str, Style, float]] = []
+    column = row = 0
+    for char, style in zip(text.plain, styles, strict=True):
+        if char == "\n":
+            cells.append((char, style, 0.0))
+            column, row = 0, row + 1
+            continue
+        scatter = (column * 7919 + row * 104729) % 997 / 997
+        cells.append((char, style, (1 - _FLICKER) * (0.75 * column / width + 0.25 * scatter)))
+        column += 1
+    return tuple(cells)
+
+
+def _materialise(ansi: str, progress: float) -> Text:
+    """A wordmark at ``progress``: settled cells as drawn (the newest ones bright),
+    the next ones flickering through shades, the rest still blank."""
+    if progress >= 1:
+        return Text.from_ansi(ansi)
+    frame = Text()
+    for index, (char, style, settles) in enumerate(_wordmark_cells(ansi)):
+        if char in "\n " or progress <= 0:
+            frame.append(char if char == "\n" else " ")
+        elif progress >= settles:
+            frame.append(char, _EDGE_STYLE if progress - settles < _EDGE else style)
+        elif progress >= settles - _FLICKER:
+            frame.append(NOISE[(index + int(progress * 60)) % len(NOISE)], "accent")
+        else:
+            frame.append(" ")
+    return frame
 
 
 #: How a finding's severity reads at a glance. Unlisted values (including
