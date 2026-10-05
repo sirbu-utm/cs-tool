@@ -120,6 +120,36 @@ class ScanStore:
                 ),
             )
 
+    async def reclaim_orphans(self, reason: str) -> list[Scan]:
+        """Mark every still-``queued``/``running`` scan failed and return them.
+
+        Meant to run at startup: a scan can only be unfinished in the table if a
+        crash or restart killed the in-process task driving it, so there is no
+        live work to disturb. Returning the affected scans lets the bot tell those
+        chats the truth instead of leaving a request forever "queued".
+        """
+        return await asyncio.to_thread(self._reclaim_orphans_sync, reason)
+
+    def _reclaim_orphans_sync(self, reason: str) -> list[Scan]:
+        finished_at = _iso(datetime.now(timezone.utc))
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM scans WHERE status IN ('queued', 'running')"
+            ).fetchall()
+            conn.execute(
+                "UPDATE scans SET status = 'failed', error = ?, finished_at = ? "
+                "WHERE status IN ('queued', 'running')",
+                (reason, finished_at),
+            )
+        scans: list[Scan] = []
+        for row in rows:
+            scan = _row_to_scan(row)
+            scan.status = "failed"
+            scan.error = reason
+            scan.finished_at = _parse_iso(finished_at)
+            scans.append(scan)
+        return scans
+
     # -- reads ---------------------------------------------------------------
     async def get(self, scan_id: str) -> Scan | None:
         return await asyncio.to_thread(self._get_sync, scan_id)

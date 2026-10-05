@@ -143,6 +143,21 @@ def build_application(config: BotConfig, store: ScanStore, service: ScanService)
     # these only catch an unknown command or a plain, non-command message.
     application.add_handler(MessageHandler(filters.COMMAND, unknown_cmd))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_fallback))
+
+    async def _post_init(_app: Application) -> None:
+        """Ready the store, then settle scans a crash/restart left in limbo.
+
+        A scan still ``queued``/``running`` at startup cannot be live (its task
+        died with the previous process), so mark it failed and tell its chat —
+        otherwise the request would sit "queued" forever.
+        """
+        await store.init()
+        for scan in await store.reclaim_orphans(
+            "interrupted by a bot restart — please resend the scan."
+        ):
+            await notify(scan)
+
+    application.post_init = _post_init
     return application
 
 

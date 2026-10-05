@@ -63,3 +63,37 @@ async def test_recent_is_scoped_to_the_user_and_ordered(tmp_path: Path) -> None:
     ids = {s.id for s in recent}
     assert ids == {"one", "two"}
     assert all(s.user_id == 42 for s in recent)
+
+
+async def test_reclaim_orphans_marks_unfinished_as_failed_and_returns_them(tmp_path: Path) -> None:
+    store = await _store(tmp_path)
+    await store.create(Scan(id="q1", user_id=1, chat_id=7, target="a.com"))  # queued
+    await store.create(Scan(id="r1", user_id=1, chat_id=7, target="b.com"))
+    await store.mark_running("r1")  # running
+
+    reclaimed = await store.reclaim_orphans("interrupted by a restart")
+
+    assert {s.id for s in reclaimed} == {"q1", "r1"}
+    assert all(s.status == "failed" and s.error == "interrupted by a restart" for s in reclaimed)
+    for sid in ("q1", "r1"):
+        scan = await store.get(sid)
+        assert scan is not None
+        assert scan.status == "failed"
+        assert scan.error == "interrupted by a restart"
+        assert scan.finished_at is not None
+
+
+async def test_reclaim_orphans_leaves_finished_scans_untouched(tmp_path: Path) -> None:
+    store = await _store(tmp_path)
+    await store.create(Scan(id="d1", user_id=1, chat_id=7, target="c.com"))
+    await store.finish(
+        "d1", status="done", exit_code=0, error=None,
+        report_json=None, report_html=None, summary=None,
+    )
+
+    reclaimed = await store.reclaim_orphans("interrupted by a restart")
+
+    assert reclaimed == []
+    done = await store.get("d1")
+    assert done is not None
+    assert done.status == "done"

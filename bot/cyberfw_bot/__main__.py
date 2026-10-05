@@ -37,10 +37,6 @@ def main() -> None:
     service = ScanService(config, store)
     application = build_application(config, store, service)
 
-    async def _post_init(app: object) -> None:
-        await store.init()
-
-    application.post_init = _post_init
     log.info("cyberfw_bot starting; workspace=%s pipeline=%s", config.workspace, config.pipeline)
     application.run_polling()
 
