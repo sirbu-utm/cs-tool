@@ -17,7 +17,11 @@ __all__ = [
     "queued_message",
     "scan_line",
     "status_message",
+    "animation_frame",
+    "did_you_mean_text",
     "HELP_TEXT",
+    "UNKNOWN_COMMAND_TEXT",
+    "UNRECOGNIZED_TEXT",
 ]
 
 _SEVERITY_EMOJI = {
@@ -100,6 +104,40 @@ def status_message(scans: list[Scan]) -> str:
     if not scans:
         return "No scans yet. Start one with <code>/scan example.com</code>."
     return "<b>Your recent scans</b>:\n" + "\n".join(scan_line(s) for s in scans)
+
+
+#: Spinner frames cycled while a scan runs (see :func:`animation_frame`).
+_SPINNER = ("🛰️", "📡", "🔭", "🔎")
+
+
+def animation_frame(status: str, target: str, scan_id: str, tick: int, elapsed_s: int) -> str:
+    """One frame of the in-chat waiting animation, edited into the queued message.
+
+    ``queued`` shows a steady hourglass; ``running`` cycles a spinner by ``tick``
+    and shows elapsed seconds. ``target`` is validated before a scan starts, but
+    it is escaped here anyway — every dynamic value in a message is.
+    """
+    safe_id = escape(scan_id)
+    safe_target = escape(target)
+    if status == "queued":
+        hourglass = ("⏳", "⌛")[tick % 2]
+        return f"{hourglass} Queued <code>{safe_id}</code> — <b>{safe_target}</b>…"
+    spinner = _SPINNER[tick % len(_SPINNER)]
+    return f"{spinner} Scanning <code>{safe_id}</code> — <b>{safe_target}</b> … {elapsed_s}s"
+
+
+def did_you_mean_text(target: str) -> str:
+    """Nudge a plain message that looks like a host toward the real command."""
+    safe = escape(target)
+    return f"🤔 Did you mean <code>/scan {safe}</code>? Send that to scan <b>{safe}</b>."
+
+
+UNKNOWN_COMMAND_TEXT = "🤷 I don't know that command. Send /help for the list of commands."
+
+UNRECOGNIZED_TEXT = (
+    "🤔 I only understand commands. Send /help for the list, "
+    "or <code>/scan &lt;domain&gt;</code> to scan a host."
+)
 
 
 HELP_TEXT = (

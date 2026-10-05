@@ -20,7 +20,7 @@ import ipaddress
 import re
 from urllib.parse import urlsplit
 
-__all__ = ["ValidationError", "validate_target"]
+__all__ = ["ValidationError", "validate_target", "suggest_target"]
 
 
 class ValidationError(ValueError):
@@ -97,3 +97,19 @@ def validate_target(raw: str, *, block_private: bool = True) -> str:
             f"{host!r} is not a valid domain, URL or IP. Give one host, e.g. example.com."
         )
     return target
+
+
+def suggest_target(text: str, *, block_private: bool = True) -> str | None:
+    """Return the first whitespace-separated token that is a valid scan target.
+
+    ``None`` when the text holds no plausible single host. Used to turn a mistyped
+    or plain message (``example.com`` or ``scan example.com``) into a
+    "did you mean ``/scan <host>``?" hint, reusing :func:`validate_target` so the
+    suggestion can never be something a real ``/scan`` would reject.
+    """
+    for token in text.split():
+        try:
+            return validate_target(token, block_private=block_private)
+        except ValidationError:
+            continue
+    return None

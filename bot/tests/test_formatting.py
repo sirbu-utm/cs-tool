@@ -4,6 +4,10 @@ from __future__ import annotations
 
 from _helpers import SAMPLE_REPORT
 from cyberfw_bot.formatting import (
+    UNKNOWN_COMMAND_TEXT,
+    UNRECOGNIZED_TEXT,
+    animation_frame,
+    did_you_mean_text,
     failed_message,
     queued_message,
     status_message,
@@ -63,3 +67,39 @@ def test_queued_message_names_the_scan_and_target() -> None:
 def test_status_lists_scans_or_says_empty() -> None:
     assert "No scans yet" in status_message([])
     assert "ab12" in status_message([_scan()])
+
+
+def test_did_you_mean_suggests_the_scan_command_and_escapes_target() -> None:
+    text = did_you_mean_text("a&b.com")
+    assert "/scan a&amp;b.com" in text
+    assert "a&b.com" not in text  # raw ampersand must be escaped
+
+
+def test_fallback_texts_point_at_help() -> None:
+    assert "/help" in UNKNOWN_COMMAND_TEXT
+    assert "/help" in UNRECOGNIZED_TEXT
+
+
+def test_animation_frame_queued_names_scan_and_target() -> None:
+    text = animation_frame("queued", "example.com", "ab12", tick=0, elapsed_s=0)
+    assert "ab12" in text
+    assert "example.com" in text
+
+
+def test_animation_frame_running_shows_elapsed_and_cycles_spinner() -> None:
+    first = animation_frame("running", "example.com", "ab12", tick=0, elapsed_s=12)
+    second = animation_frame("running", "example.com", "ab12", tick=1, elapsed_s=12)
+    assert "12s" in first
+    assert first[0] != second[0]  # spinner advances with the tick
+
+
+def test_animation_frame_spinner_wraps_on_tick() -> None:
+    a = animation_frame("running", "example.com", "ab12", tick=0, elapsed_s=0)
+    b = animation_frame("running", "example.com", "ab12", tick=4, elapsed_s=0)
+    assert a[0] == b[0]  # 4 spinner frames → tick 0 and 4 share the same emoji
+
+
+def test_animation_frame_escapes_target() -> None:
+    text = animation_frame("running", "a&b.com", "ab12", tick=0, elapsed_s=0)
+    assert "a&amp;b.com" in text
+    assert "a&b.com" not in text

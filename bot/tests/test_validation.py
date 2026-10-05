@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import pytest
-from cyberfw_bot.validation import ValidationError, validate_target
+from cyberfw_bot.validation import ValidationError, suggest_target, validate_target
 
 
 @pytest.mark.parametrize(
@@ -54,3 +54,26 @@ def test_blocks_private_and_loopback_by_default(target: str) -> None:
 @pytest.mark.parametrize("target", ["127.0.0.1", "192.168.1.10", "localhost"])
 def test_private_allowed_when_block_disabled(target: str) -> None:
     assert validate_target(target, block_private=False) == target
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("example.com", "example.com"),
+        ("scan example.com", "example.com"),  # first token that validates
+        ("check http://example.com/path please", "http://example.com/path"),
+        ("93.184.216.34", "93.184.216.34"),
+    ],
+)
+def test_suggest_target_finds_a_plausible_host(text: str, expected: str) -> None:
+    assert suggest_target(text) == expected
+
+
+@pytest.mark.parametrize("text", ["", "   ", "привет", "just some words", "-oJ/tmp/x"])
+def test_suggest_target_returns_none_for_non_targets(text: str) -> None:
+    assert suggest_target(text) is None
+
+
+def test_suggest_target_respects_block_private() -> None:
+    assert suggest_target("10.0.0.5") is None
+    assert suggest_target("10.0.0.5", block_private=False) == "10.0.0.5"

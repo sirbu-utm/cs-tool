@@ -8,16 +8,30 @@ result is pushed to the chat by the notifier built in :func:`build_application`.
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import time
 from pathlib import Path
 
-from telegram import Update
+from telegram import Message, Update
 from telegram.constants import ParseMode
-from telegram.ext import Application, ApplicationBuilder, CommandHandler, ContextTypes
+from telegram.error import BadRequest, RetryAfter
+from telegram.ext import (
+    Application,
+    ApplicationBuilder,
+    CommandHandler,
+    ContextTypes,
+    MessageHandler,
+    filters,
+)
 
 from cyberfw_bot.config import BotConfig
 from cyberfw_bot.formatting import (
     HELP_TEXT,
+    UNKNOWN_COMMAND_TEXT,
+    UNRECOGNIZED_TEXT,
+    animation_frame,
+    did_you_mean_text,
     failed_message,
     queued_message,
     status_message,
@@ -26,7 +40,10 @@ from cyberfw_bot.formatting import (
 from cyberfw_bot.models import Scan
 from cyberfw_bot.service import AuthorizationError, ScanService
 from cyberfw_bot.storage import ScanStore
-from cyberfw_bot.validation import ValidationError
+from cyberfw_bot.validation import ValidationError, suggest_target
+
+#: Seconds between waiting-animation frame edits.
+_ANIMATION_INTERVAL_S = 5.0
 
 LOG = logging.getLogger("cyberfw_bot")
 
@@ -70,7 +87,18 @@ def build_application(config: BotConfig, store: ScanStore, service: ScanService)
         except ValidationError as exc:
             await _reply(update, f"⚠️ {exc}")
         else:
-            await _reply(update, queued_message(scan))
+            sent = await message.reply_text(queued_message(scan), parse_mode=_HTML)
+            application.create_task(_animate(store, scan, sent))
+
+    async def unknown_cmd(update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        await _reply(update, UNKNOWN_COMMAND_TEXT)
+
+    async def text_fallback(update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        message = update.effective_message
+        if message is None or not message.text:
+            return
+        target = suggest_target(message.text, block_private=config.block_private)
+        await _reply(update, did_you_mean_text(target) if target else UNRECOGNIZED_TEXT)
 
     async def status_cmd(update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> None:
         user = update.effective_user
@@ -111,12 +139,51 @@ def build_application(config: BotConfig, store: ScanStore, service: ScanService)
     application.add_handler(CommandHandler("scan", scan_cmd))
     application.add_handler(CommandHandler("status", status_cmd))
     application.add_handler(CommandHandler("report", report_cmd))
+    # Fallbacks run last: a known command matches its handler above first, so
+    # these only catch an unknown command or a plain, non-command message.
+    application.add_handler(MessageHandler(filters.COMMAND, unknown_cmd))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_fallback))
     return application
 
 
 async def _reply(update: Update, text: str) -> None:
     if update.effective_message is not None:
         await update.effective_message.reply_text(text, parse_mode=_HTML)
+
+
+async def _animate(store: ScanStore, scan: Scan, sent: Message) -> None:
+    """Edit ``sent`` with a waiting animation until the scan reaches a terminal state.
+
+    Lives entirely in the bot layer: it polls the store for the scan's status and
+    never touches the service. Any Telegram hiccup is swallowed so a cosmetic
+    animation can never crash the worker or the final result delivery.
+    """
+    start = time.monotonic()
+    tick = 0
+    try:
+        while True:
+            current = await store.get(scan.id)
+            if current is None or current.status in {"done", "failed"}:
+                break
+            text = animation_frame(
+                current.status, scan.target, scan.id, tick, int(time.monotonic() - start)
+            )
+            try:
+                await sent.edit_text(text, parse_mode=_HTML)
+            except RetryAfter as exc:
+                await asyncio.sleep(float(exc.retry_after) + 1.0)
+                continue
+            except BadRequest as exc:
+                if "not modified" not in str(exc).lower():
+                    return  # message deleted or uneditable — stop quietly
+            tick += 1
+            await asyncio.sleep(_ANIMATION_INTERVAL_S)
+        try:
+            await sent.edit_text("📨 Scan finished — sending results…", parse_mode=_HTML)
+        except BadRequest:
+            pass
+    except Exception:  # noqa: BLE001 - a cosmetic animation must never crash the worker
+        LOG.exception("waiting animation for scan %s crashed", scan.id)
 
 
 async def _send_report(application: Application, scan: Scan) -> None:
