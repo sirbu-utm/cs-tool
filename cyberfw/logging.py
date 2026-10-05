@@ -26,7 +26,10 @@ THEME = Theme(
         "err": "bold red",
         "warn": "bold yellow",
         "info": "cyan",
-        "muted": "bright_black",
+        # A grey of its own, not bright black: Solarized Dark draws colour 8
+        # in its background colour. 256 colours get 246; the classic Windows
+        # console gets bright black (Rich lowers it), which it draws, unlike dim.
+        "muted": "grey58",
         "tool": "bold cyan",
         "accent": "bold green",
     }

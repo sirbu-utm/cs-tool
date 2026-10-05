@@ -11,12 +11,13 @@ from pathlib import Path
 
 import pytest
 from rich.cells import cell_len
-from rich.color import Color
+from rich.color import Color, ColorSystem
 from rich.console import Console, RenderableType
 from rich.segment import Segment
 from rich.text import Text
 
-from cyberfw import cli
+import cyberfw.logging
+from cyberfw import __version__, cli
 from cyberfw.config import Settings
 from cyberfw.hud import BRAND, KEY, ByWidth, HudFrame, Pane, PathText, hud_table, keycap
 from cyberfw.live_view import PipelineLiveView
@@ -97,6 +98,20 @@ def _render(renderable: RenderableType, *, width: int, colors: str | None = None
     return plain, segments
 
 
+def _assert_joints_meet(lines: list[str]) -> None:
+    """Every ``│`` in a body has a ``╤`` / ``╧`` / ``╪`` in the borders above
+    and below it: no tag, meta or footer sits on a joint."""
+    borders = [i for i, line in enumerate(lines) if line[:1] in ("╔", "╠", "╚")]
+    for row, line in enumerate(lines):
+        for x, char in enumerate(line):
+            if char != "│":
+                continue
+            above = max(i for i in borders if i < row)
+            below = min(i for i in borders if i > row)
+            assert lines[above][x] in "╤╪", f"no joint above column {x}: {lines[above]!r}"
+            assert lines[below][x] in "╧╪", f"no joint below column {x}: {lines[below]!r}"
+
+
 class TestEveryScreen:
     """Rendered the way a pipe and an old console get them."""
 
@@ -158,6 +173,43 @@ class TestFrame:
 
         assert "│" not in plain and lines[1].startswith("║ left") and lines[3].startswith("║ right")
         assert all(cell_len(line) == 40 for line in lines)
+
+    @pytest.mark.parametrize("title", ["例え.jp scan", "scan 🔥 done", "café menu"])
+    def test_wide_and_combining_characters_keep_the_frame_whole(self, title: str) -> None:
+        """A tag, meta or footer is laid out per screen cell, not per character."""
+        frame = HudFrame([Pane(Text("body"), title=title, meta="メタ")], footer="フッター")
+        plain, _ = _render(frame, width=40)
+        lines = plain.splitlines()
+
+        assert all(cell_len(line) == 40 for line in lines), [cell_len(line) for line in lines]
+        assert lines[0].endswith("╗") and lines[-1].endswith("╝")
+        assert title in lines[0] and "メタ" in lines[0] and "フッター" in lines[-1]
+
+    def test_tags_never_cover_a_joint(self) -> None:
+        frame = HudFrame(
+            [
+                [Pane(Text("a"), title="Alpha", width=8), Pane(Text("b"), title="Gamma")],
+                Pane(Text("c"), title="Example long tag"),
+            ]
+        )
+        plain, _ = _render(frame, width=40)
+        lines = plain.splitlines()
+
+        assert "│" in lines[1]
+        _assert_joints_meet(lines)
+        assert "Alpha" in lines[0] and "Gamma" in lines[0]
+        divider = lines[2]
+        assert "Example long tag" in divider, "the tag moves past the joint, it is not dropped"
+        assert divider.index("╧") < divider.index("Example long tag")
+
+    def test_a_footer_that_would_cover_a_joint_is_left_out(self) -> None:
+        row = [Pane(Text("left")), Pane(Text("right"), width=8)]
+        covering, _ = _render(HudFrame([row], footer="everything is nominal here"), width=40)
+        clear, _ = _render(HudFrame([row], footer="ok"), width=40)
+
+        assert "nominal" not in covering and "╧" in covering.splitlines()[-1]
+        _assert_joints_meet(covering.splitlines())
+        assert clear.splitlines()[-1].endswith(" ok ═╝")
 
     def test_border_runs_are_merged(self) -> None:
         """One segment per cell costs a console write each on conhost."""
@@ -254,6 +306,28 @@ class TestScreens:
         plain, _ = _render(Masthead(["ready", "blocked"], "linux/amd64"), width=80)
         assert "1/2 ready" in plain and "1 blocked" not in plain
 
+    @pytest.mark.parametrize("tools", [4, 8, 20])
+    def test_masthead_drops_art_rather_than_clip_it(self, tools: int) -> None:
+        states = (["ready", "blocked", "not installed", "ready"] * 5)[:tools]
+        count = f"{states.count('ready')}/{tools} ready"
+        for width in range(30, 121):
+            plain, _ = _render(Masthead(states, "windows/amd64", subtitle="status"), width=width)
+
+            assert "…" not in plain, f"clipped at {width}"
+            assert max(cell_len(line) for line in plain.splitlines()) <= width, f"too wide at {width}"
+            assert count in plain and f"v{__version__}" in plain, f"readout lost at {width}"
+
+    @pytest.mark.parametrize("width", [40, 44, 50, 60, 80])
+    def test_tool_card_holds_its_frame_in_a_narrow_window(self, width: int) -> None:
+        card = tool_guide("subfinder", state="ready", version="v2.6.3", repo="projectdiscovery/subfinder")
+        plain, _ = _render(card, width=width)
+        lines = plain.splitlines()
+
+        assert all(cell_len(line) == width for line in lines), [cell_len(line) for line in lines]
+        assert all(line[-1] in "║╗╝╣" for line in lines)
+        assert "Subdomain" in plain, "the description wraps between words"
+        assert "v2.6.3" in plain and "projectdiscovery/subfinder" in plain
+
     def test_banner_plate_says_what_needs_attention(self) -> None:
         plain, _ = _render(banner(["ready", "blocked", "not installed"], "linux/amd64"), width=110)
         assert "1/3 ready" in plain and "1 blocked · 1 not installed" in plain
@@ -276,9 +350,16 @@ class TestScreens:
         assert "nuclei" in final and "nuclei" not in halfway
         assert len(final.splitlines()) == len(halfway.splitlines())
 
-    def test_unavailable_tools_are_greyed_with_bright_black_not_dim(self, tmp_path: Path) -> None:
-        """The classic console ignores dim; bright black it draws."""
-        assert THEME.styles["muted"].color == Color.parse("bright_black")
+    def test_unavailable_tools_are_greyed_with_a_real_grey(self, tmp_path: Path) -> None:
+        """The classic console ignores dim, and Solarized Dark draws bright black
+        in its background colour: muted is a grey, which Rich lowers to bright
+        black (colour 8) on the classic console."""
+        muted = THEME.styles["muted"]
+        assert not muted.dim and muted.color is not None and muted.color != Color.parse("bright_black")
+        # Downgraded directly: a theme style caches its first rendering's codes.
+        assert muted.color.downgrade(ColorSystem.WINDOWS).number == 8, "bright black on the classic console"
+        assert muted.color.downgrade(ColorSystem.EIGHT_BIT).number == 246
+
         table = cli._tools_table(_ROWS, numbered=True, capability=False)
         name_cells = list(table.columns[1].cells)
         assert str(name_cells[1].style) == "muted" and str(name_cells[0].style) == "tool"
@@ -312,6 +393,25 @@ class TestScreens:
 
     def test_failed_summary_wears_the_alert_ramp(self) -> None:
         assert cli._run_summary(_failed_run(), name="r", session_id="s", reports=[]).palette is not BRAND
+
+    def test_failed_summary_tags_are_not_on_dark_red_in_16_colours(self) -> None:
+        """Black on dark red is about 2:1 on the classic console palette."""
+        summary = cli._run_summary(_failed_run(), name="recon", session_id="s1", reports=[])
+        _, segments = _render(summary, width=80, colors="standard")
+        tags = [s for s in segments if s.style and s.style.bgcolor and s.style.color == Color.parse("black")]
+
+        assert {s.text.strip() for s in tags} >= {"recon", "Issues", "Output"}
+        assert all(s.style and s.style.bgcolor and s.style.bgcolor.name != "red" for s in tags)
+
+    @pytest.mark.parametrize("width", [20, 36, 40])
+    def test_narrow_summary_keeps_every_count(self, width: int) -> None:
+        plain, _ = _render(cli._run_summary(_failed_run(), name="recon", session_id="s1", reports=[]), width=width)
+        lines = plain.splitlines()
+
+        assert all(cell_len(line) == width for line in lines)
+        for tool, count in (("subfinder", 2), ("httpx", 0), ("nuclei", 0)):
+            line = next(line for line in lines if line.startswith(f"║  {tool} "))
+            assert line.rstrip("║ ").endswith(f" {count}"), line
 
     def test_summary_paths_keep_the_file_name_whole(self, tmp_path: Path) -> None:
         report = tmp_path / ("very-long-directory-name-" * 3) / "pipeline-x-20261005-120000" / "report.html"
@@ -347,11 +447,43 @@ class TestScreens:
         assert len(plain.splitlines()) < 20
         assert "h29.example.com" in plain and "h0.example.com" not in plain
 
+    def test_the_settled_live_frame_keeps_every_finding(self) -> None:
+        """``Live`` prints its last frame in full; with ``--no-report`` the tail
+        is the only place the findings are shown."""
+        view = PipelineLiveView([Node("subfinder", "subs")])
+        view.on_stage(StageEvent(kind="start", stage="subs", tool="subfinder", total=1))
+        for i in range(8):
+            view.on_record(SubfinderResult(tool="subfinder", target=f"h{i}.example.com", kind="host"))
+
+        def shown() -> str:
+            buffer = io.StringIO()
+            short = Console(file=buffer, theme=THEME, width=110, height=12, force_terminal=True, color_system=None)
+            short.print(view)
+            return buffer.getvalue()
+
+        assert "h0.example.com" not in shown(), "a running frame keeps to the window"
+        view.finish()
+        settled = shown()
+        assert all(f"h{i}.example.com" in settled for i in range(8))
+
 
 class TestPrompts:
     def test_questions_open_with_the_lead_in(self) -> None:
         assert cli.Prompt("Target").make_prompt("").plain.startswith("» Target")
         assert cli.Confirm("Save?").make_prompt(True).plain.startswith("» Save?")
+
+    def test_questions_are_asked_on_the_themed_console(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Rich's global console has no theme: the lead-in's style would drop."""
+        assert cli.Prompt("x").console is cyberfw.logging.console
+        assert cli.Confirm("x").console is cyberfw.logging.console
+
+        buffer = io.StringIO()
+        themed = Console(file=buffer, theme=THEME, force_terminal=True, color_system="truecolor", no_color=False)
+        monkeypatch.setattr(cli, "console", themed)
+        prompt = cli.Prompt("x")
+        assert prompt.console is themed, "looked up when asked, not at import"
+        prompt.console.print(prompt.make_prompt(None), end="")
+        assert re.match(r"\x1b\[[0-9;]+m» ", buffer.getvalue()), repr(buffer.getvalue())
 
 
 class TestStartScreen:

@@ -28,6 +28,7 @@ from typing import Annotated, Any, Protocol
 
 import anyio
 import typer
+from rich.cells import cell_len
 from rich.console import Console, ConsoleOptions, Group, RenderableType, RenderResult
 from rich.live import Live
 from rich.prompt import Confirm as _RichConfirm
@@ -419,18 +420,28 @@ def _run_summary(
     )
     totals = result.totals_by_tool
     peak = max(totals.values(), default=0) or 1
-    yields = Table.grid(padding=(0, 1))
-    yields.add_column(style="tool", no_wrap=True, min_width=10)
-    yields.add_column(no_wrap=True)
-    yields.add_column(justify="right", no_wrap=True)
-    for tool, count in totals.items():
-        shown = counted(count)
-        yields.add_row(
-            tool,
-            motion.bar(shown / peak, 24, style="accent" if count else "muted"),
-            Text(str(round(shown)), style="bold white" if count else "muted"),
-        )
-    rows = [Pane(Group(Text(""), headline, Text(""), yields), title=Text(name), pad=2)]
+
+    def yields(width: int) -> Table:
+        # The name and the count always show; the bar takes what is left (up
+        # to 24 cells) and is left out below 4, rather than push the count off.
+        name_w = max([10, *(cell_len(tool) for tool in totals)])
+        digits = max((len(str(count)) for count in totals.values()), default=1)
+        bar_w = min(24, width - name_w - digits - 2)
+        table = Table.grid(padding=(0, 1))
+        table.add_column(style="tool", no_wrap=True, min_width=10)
+        if bar_w >= 4:
+            table.add_column(no_wrap=True)
+        table.add_column(justify="right", no_wrap=True)
+        for tool, count in totals.items():
+            shown = counted(count)
+            cells: list[str | Text] = [tool]
+            if bar_w >= 4:
+                cells.append(motion.bar(shown / peak, bar_w, style="accent" if count else "muted"))
+            cells.append(Text(str(round(shown)), style="bold white" if count else "muted"))
+            table.add_row(*cells)
+        return table
+
+    rows = [Pane(Group(Text(""), headline, Text(""), ByWidth(yields)), title=Text(name), pad=2)]
 
     # Name the stages that did not deliver, and why the failed ones failed: the
     # frame is the last thing on screen, and the live table cuts long reasons off.
@@ -557,8 +568,10 @@ def _tool_rows(manager: ToolManager, tools_dir: Path, states: list[str] | None =
 def _tools_table(rows: list[_ToolRow], *, numbered: bool, capability: bool, reveal: float = 1.0) -> Table:
     """The tool inventory: number, tool, what it does, version, state, source.
 
-    A tool that cannot run is greyed out (``muted`` is bright black, which the
-    classic Windows console draws — it ignores ``dim``). ``reveal`` below 1 is a
+    A tool that cannot run is greyed out with ``muted``: a real grey, not
+    ``dim``, which the classic Windows console ignores, and not bright black,
+    which Solarized Dark draws in its background colour. On the classic
+    console Rich lowers the grey to bright black itself. ``reveal`` below 1 is a
     frame of the launcher's entrance: the rows type in top to bottom, the
     newest one lit; a row not in yet is blank but as wide as it will be, so the
     columns stand still.

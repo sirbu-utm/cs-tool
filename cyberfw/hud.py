@@ -39,6 +39,7 @@ __all__ = [
     "HEAD",
     "KEY",
     "EdgeRule",
+    "Flow",
     "HudFrame",
     "Palette",
     "Pane",
@@ -502,3 +503,30 @@ def join(parts: Iterable[Text], separator: str = "   ") -> Text:
     """Join texts with an unstyled separator: ``Text.join`` would take a styled
     joiner as the base style of the result and tint every part with it."""
     return Text(separator).join(part for part in parts if part.plain)
+
+
+class Flow:
+    """Texts side by side, as :func:`join` sets them, that wrap only between
+    parts: ``10/20 ready`` moves to the next line whole instead of leaving
+    ``ready`` behind. A part wider than the line still wraps on its own."""
+
+    def __init__(self, parts: Iterable[Text], separator: str = "   ") -> None:
+        self.parts = [part for part in parts if part.plain]
+        self.separator = separator
+
+    def __rich_measure__(self, console: Console, options: ConsoleOptions) -> Measurement:
+        widest = max((part.cell_len for part in self.parts), default=0)
+        return Measurement(widest, join(self.parts, self.separator).cell_len)
+
+    def __rich_console__(self, console: Console, options: ConsoleOptions) -> RenderResult:
+        lines: list[list[Text]] = [[]]
+        used = 0
+        for part in self.parts:
+            gap = len(self.separator) if lines[-1] else 0
+            if lines[-1] and used + gap + part.cell_len > options.max_width:
+                lines.append([])
+                used, gap = 0, 0
+            lines[-1].append(part)
+            used += gap + part.cell_len
+        for line in lines:
+            yield join(line, self.separator)

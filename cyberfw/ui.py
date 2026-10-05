@@ -25,7 +25,7 @@ from rich.table import Table
 from rich.text import Text
 
 from cyberfw import __version__
-from cyberfw.hud import EdgeRule, HudFrame, Pane, join
+from cyberfw.hud import EdgeRule, Flow, HudFrame, Pane, join
 from cyberfw.motion import NOISE, phase
 from cyberfw.pipeline.schemas import ToolRecord
 
@@ -355,16 +355,19 @@ class Masthead:
         cs = _mini_wordmark("CS TOOL", ("bold bright_cyan", "bold green"), phase(progress, 0.0, 0.55))
         utm = _mini_wordmark("UTM", ("bold white", "bold white"), phase(progress, 0.25, 0.7))
         pips, counter = _pips(self.states, phase(progress, 0.45, 0.9))
-        top = join([pips, counter])
-        bottom = join([Text(self.platform, style="muted"), Text(f"v{__version__}", style="muted")])
-        if self.subtitle:
-            bottom.append(f"   {self.subtitle}", style="accent")
         issues = attention(self.states)
         width = options.max_width
-        if issues.plain and width >= 100:
-            top = join([top, issues])
+        # Flow, not one Text: a wrap moves "10/20 ready" down whole.
+        top = Flow([pips, counter, issues if width >= 100 else Text()])
+        bottom = Flow(
+            [
+                Text(self.platform, style="muted"),
+                Text(f"v{__version__}", style="muted"),
+                Text(self.subtitle or "", style="accent"),
+            ]
+        )
         # The art is never cut: drop UTM, then the wordmark, as the window
-        # narrows; the readout comes last and wraps rather than lose a word.
+        # narrows; the readout comes last and wraps between its parts.
         art = [cs, [Text("│", style="muted")] * 2, utm]
         while True:
             grid = Table.grid(padding=(0, 2))
