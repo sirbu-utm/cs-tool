@@ -14,18 +14,18 @@ from __future__ import annotations
 import functools
 from collections.abc import Iterator, Sequence
 
-from rich import box
 from rich.cells import cell_len
 from rich.color import Color, blend_rgb
 from rich.color_triplet import ColorTriplet
 from rich.console import Console, ConsoleOptions, Group, RenderableType, RenderResult
 from rich.measure import Measurement
-from rich.panel import Panel
 from rich.segment import Segment
 from rich.style import Style
+from rich.table import Table
 from rich.text import Text
 
 from cyberfw import __version__
+from cyberfw.hud import EdgeRule, HudFrame, Pane, join
 from cyberfw.motion import NOISE, phase
 from cyberfw.pipeline.schemas import ToolRecord
 
@@ -91,26 +91,39 @@ TOOL_GUIDES: dict[str, tuple[str, str, str]] = {
 }
 
 
-def tool_guide(name: str) -> Panel:
-    """Render a compact usage guide for one registered tool."""
+def tool_guide(
+    name: str, *, state: str | None = None, version: str | None = None, repo: str | None = None
+) -> HudFrame:
+    """The card shown after picking a tool: what it does, where it stands and
+    how it is called. ``state`` / ``version`` / ``repo`` come from the
+    launcher's inventory pass; without a state the facts pane is left out."""
     title, description, example = TOOL_GUIDES.get(
         name,
         ("Security utility", "Runs the selected registered security tool.", f"cs-tool run {name} -t example.com"),
     )
-    content = Text.assemble(
-        (f"{title}\n", "accent"),
-        (f"{description}\n\n", "white"),
-        ("example  ", "muted"),
-        (example, "bold white"),
-    )
-    return Panel(
-        content,
-        title=f"[bold]{name}[/bold]",
-        border_style="accent",
-        box=box.ROUNDED,
-        padding=(1, 2),
-        expand=False,
-    )
+    about = Group(Text(title, style="accent"), Text(description, style="white"))
+    top = [Pane(about, title=Text(name))]
+    if state is not None:
+        facts = Table.grid(padding=(0, 2))
+        facts.add_column(style="muted", no_wrap=True)
+        facts.add_column(no_wrap=True, overflow="ellipsis")
+        facts.add_row("state", pip_word(state, state_style(state)))
+        facts.add_row("version", Text(version or "—"))
+        if repo:
+            facts.add_row("source", Text(repo, style="muted"))
+        top.append(Pane(facts, title="Tool", width=max(26, 10 + len(repo or ""))))
+    command, _, rest = example.partition(" ")
+    call = Text.assemble(("$ ", "muted"), (command, "bold bright_cyan"), (f" {rest}", "white"))
+    return HudFrame([top, Pane(call, title="Example")])
+
+
+def pip_word(word: str, style: str) -> Text:
+    """``■ ready`` — the banner's pip in the state's colour, then the word.
+
+    The style is the Text's own rather than a span's, so a table cell holding
+    it still reports the state's style.
+    """
+    return Text(f"{PIP} {word}", style=style)
 
 
 # Glyphs are limited to what both classic Windows console fonts carry (checked
@@ -229,12 +242,17 @@ def gradient_rule() -> GradientRule:
     return GradientRule()
 
 
-def _status_strip(states: Sequence[str], platform: str, progress: float = 1.0) -> Panel:
-    """The HUD under the wordmark: one pip per tool, then how many can run.
+def attention(states: Sequence[str]) -> Text:
+    """``1 blocked · 2 not installed`` in the states' colours; empty when all run."""
+    counts = {state: sum(1 for s in states if s == state) for state in ("blocked", "not installed")}
+    return Text(" · ").join(
+        Text(f"{count} {state}", style=state_style(state)) for state, count in counts.items() if count
+    )
 
-    Below ``progress`` 1 the pips light up one by one (the newest flashes) and
-    the counter counts the ready ones lit so far.
-    """
+
+def _pips(states: Sequence[str], progress: float = 1.0) -> tuple[Text, Text]:
+    """One pip per tool and the ready count. Below ``progress`` 1 the pips light
+    up one by one (the newest flashes) and the counter counts those lit so far."""
     lit = len(states) if progress >= 1 else int(len(states) * max(progress, 0.0))
     pips = Text()
     for index, state in enumerate(states):
@@ -246,11 +264,15 @@ def _status_strip(states: Sequence[str], platform: str, progress: float = 1.0) -
         counter = readiness(states)
     else:
         counter = Text(f"{sum(1 for state in states[:lit] if state == 'ready')}/{len(states)} ready", style="muted")
-    parts = [pips, counter, Text(platform, style="muted"), Text(f"v{__version__}", style="muted")]
-    # An unstyled separator: Text.join takes the joiner as the base style of the
-    # result, so a styled one would tint every pip and the counter with it.
-    line = Text("   ").join(part for part in parts if part.plain)
-    return Panel(line, border_style="accent", box=box.SQUARE, padding=(0, 2), expand=False)
+    return pips, counter
+
+
+def _status_strip(states: Sequence[str], platform: str, progress: float = 1.0) -> HudFrame:
+    """The plate under the wordmark: one pip per tool, how many can run, what
+    needs attention, the platform and the version — in the frame language."""
+    pips, counter = _pips(states, progress)
+    parts = [pips, counter, attention(states), Text(platform, style="muted"), Text(f"v{__version__}", style="muted")]
+    return HudFrame([Pane(join(parts), pad=2)], expand=False)
 
 
 def banner(states: Sequence[str], platform: str, progress: float = 1.0) -> RenderableType:
@@ -274,6 +296,80 @@ def banner(states: Sequence[str], platform: str, progress: float = 1.0) -> Rende
         _materialise(UNIV_LOGO, phase(progress, 0.4, 0.95)),
         Text(""),
     )
+
+
+#: A two-row wordmark font, built from the same half blocks as the big one.
+_MINI_FONT: dict[str, tuple[str, str]] = {
+    "C": ("█▀▀", "█▄▄"),
+    "S": ("█▀▀", "▄▄█"),
+    "T": ("▀█▀", " █ "),
+    "O": ("█▀█", "█▄█"),
+    "L": ("█  ", "█▄▄"),
+    "U": ("█ █", "█▄█"),
+    "M": ("█▀▄▀█", "█ ▀ █"),
+    " ": (" ", " "),
+}
+
+
+def _mini_wordmark(word: str, styles: tuple[str, str], progress: float = 1.0) -> list[Text]:
+    """``word`` two rows tall. Below ``progress`` 1 the letters resolve left to
+    right out of ``░▒▓``, the way the big wordmark does."""
+    rows = [" ".join(_MINI_FONT[char][row] for char in word) for row in (0, 1)]
+    width = max(len(row) for row in rows)
+    lines = []
+    for row_index, (chars, style) in enumerate(zip(rows, styles, strict=True)):
+        line = Text()
+        for column, char in enumerate(chars):
+            settles = 0.8 * column / width
+            if progress >= 1 or char == " ":
+                line.append(char, style)
+            elif progress >= settles:
+                line.append(char, "bold bright_white" if progress - settles < 0.08 else style)
+            elif progress > 0 and progress >= settles - _FLICKER:
+                line.append(NOISE[(column + row_index + int(progress * 60)) % len(NOISE)], "accent")
+            else:
+                line.append(" ")
+        lines.append(line)
+    return lines
+
+
+class Masthead:
+    """The banner in three rows, for a terminal too short for the big one and
+    for inner screens (``status``): ``CS TOOL │ UTM`` two rows tall, the
+    readiness readout beside it, the ramp underneath.
+
+    ``progress`` below 1 plays the big banner's intro in miniature. The
+    attention words (``1 blocked``) are shown only when the line has room.
+    """
+
+    def __init__(
+        self, states: Sequence[str], platform: str, *, subtitle: str | None = None, progress: float = 1.0
+    ) -> None:
+        self.states = list(states)
+        self.platform = platform
+        self.subtitle = subtitle
+        self.progress = progress
+
+    def __rich_console__(self, console: Console, options: ConsoleOptions) -> RenderResult:
+        progress = self.progress
+        cs = _mini_wordmark("CS TOOL", ("bold bright_cyan", "bold green"), phase(progress, 0.0, 0.55))
+        utm = _mini_wordmark("UTM", ("bold white", "bold white"), phase(progress, 0.25, 0.7))
+        pips, counter = _pips(self.states, phase(progress, 0.45, 0.9))
+        top = join([pips, counter])
+        bottom = join([Text(self.platform, style="muted"), Text(f"v{__version__}", style="muted")])
+        if self.subtitle:
+            bottom.append(f"   {self.subtitle}", style="accent")
+        issues = attention(self.states)
+        if issues.plain and options.max_width >= 100:
+            top = join([top, issues])
+        grid = Table.grid(padding=(0, 2))
+        for _ in range(4):
+            grid.add_column(no_wrap=True)
+        rule = Text("│", style="muted")
+        grid.add_row(cs[0], rule, utm[0], top)
+        grid.add_row(cs[1], rule, utm[1], bottom)
+        yield grid
+        yield EdgeRule("▄", progress=phase(progress, 0.2, 0.75))
 
 
 #: How far ahead of a wordmark cell settling it starts to flicker.

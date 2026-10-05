@@ -20,18 +20,18 @@ import os
 import shutil
 import time
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from time import strftime
-from typing import Annotated, Protocol
+from typing import Annotated, Any, Protocol
 
 import anyio
 import typer
-from rich import box
-from rich.console import Group, RenderableType
+from rich.console import Console, ConsoleOptions, Group, RenderableType, RenderResult
 from rich.live import Live
-from rich.panel import Panel
-from rich.prompt import Confirm, Prompt
+from rich.prompt import Confirm as _RichConfirm
+from rich.prompt import Prompt as _RichPrompt
 from rich.table import Table
 from rich.text import Text
 
@@ -42,6 +42,18 @@ from cyberfw.exceptions import (
     CyberfwError,
     RegistryError,
     ToolNotFoundError,
+)
+from cyberfw.hud import (
+    ALERT,
+    BRAND,
+    KEY,
+    ByWidth,
+    HudFrame,
+    Pane,
+    PathText,
+    hud_table,
+    join,
+    keycap,
 )
 from cyberfw.live_view import PipelineLiveView, TopologyView
 from cyberfw.logging import console, ensure_utf8_stdio, get_logger, setup_logging
@@ -63,9 +75,39 @@ from cyberfw.report.run_info import RunInfo
 from cyberfw.resources import default_wordlist, packaged_data
 from cyberfw.tools import adapter_class
 from cyberfw.tools.base import ToolContext
-from cyberfw.ui import PIP, banner, record_detail, record_style, state_style, tool_guide
+from cyberfw.ui import (
+    NEUTRAL_STYLE,
+    PIP,
+    SEVERITY_STYLES,
+    TOOL_GUIDES,
+    Masthead,
+    banner,
+    pip_word,
+    record_detail,
+    record_style,
+    state_style,
+    tool_guide,
+)
 
 LOG = get_logger("cli")
+
+
+class Prompt(_RichPrompt):
+    """Every question asked the same way: ``» Target (domain, URL or host):``.
+
+    Callers still pass the plain wording (it comes from the adapters), so a
+    test that patches ``cyberfw.cli.Prompt.ask`` sees exactly that wording.
+    """
+
+    def make_prompt(self, default: Any) -> Text:
+        return Text.assemble(("» ", "accent"), super().make_prompt(default))
+
+
+class Confirm(_RichConfirm):
+    """A yes/no question with the same ``» `` lead-in as :class:`Prompt`."""
+
+    def make_prompt(self, default: Any) -> Text:
+        return Text.assemble(("» ", "accent"), super().make_prompt(default))
 
 app = typer.Typer(
     name="cyberfw",
@@ -153,56 +195,103 @@ def _sorted_ports(ports_list: str) -> list[str]:
     return sorted(ports, key=lambda p: int(p) if p.isdigit() else 0)
 
 
-def _record_table(records: list[ToolRecord]) -> Table:
-    """A Rich table summarising validated records for a stage.
+#: Severities in the order the record table tallies them.
+_SEVERITY_ORDER = ("critical", "high", "medium", "low", "info")
+
+
+def _severity_cell(severity: str) -> Text:
+    """``critical`` as a solid badge that cannot be missed; the rest as pip and word."""
+    if severity == "critical":
+        return Text(" critical ", style="bold bright_white on red")
+    return pip_word(severity, SEVERITY_STYLES.get(severity, NEUTRAL_STYLE))
+
+
+def _finding_detail(record: ToolRecord) -> str:
+    """The detail cell. A finding with a severity shows its name: the severity
+    has a column of its own."""
+    name = getattr(record, "name", "")
+    if getattr(record, "severity", None) and name:
+        return str(name)
+    return record_detail(record)
+
+
+def _record_table(records: list[ToolRecord], *, tool: str | None = None, target: str | None = None) -> HudFrame:
+    """Validated records in the frame: one row each, a severity column and a
+    tally in the bottom border when the records carry severities.
 
     A record carrying ``ports_list`` (RustScan's one-line-per-host summary)
     is expanded into one row per port — otherwise a dozen open ports collapse
     into an unreadable comma blob crammed into a single "detail" cell.
     """
-    table = Table(title="Validated records", title_style="accent", box=box.SIMPLE_HEAD)
-    table.add_column("#", style="muted", justify="right")
-    table.add_column("target", overflow="fold")
-    table.add_column("kind", style="muted")
-    table.add_column("detail", overflow="fold")
-    index = 0
+    rows: list[tuple[ToolRecord, str, str, str]] = []  # record, target, kind, detail
     for record in records:
-        style = record_style(record)
         ports_list = getattr(record, "ports_list", "")
         if ports_list:
             state = getattr(record, "port_state", "open")
-            for port in _sorted_ports(ports_list):
-                index += 1
-                table.add_row(str(index), Text(f"{record.target}:{port}", style=style), "port", state)
-            continue
-        index += 1
-        table.add_row(
-            str(index),
-            Text(record.target, style=style),
-            record.kind,
-            Text(record_detail(record), style=style),
+            rows += [(record, f"{record.target}:{port}", "port", state) for port in _sorted_ports(ports_list)]
+        else:
+            rows.append((record, record.target, record.kind, _finding_detail(record)))
+    severities = [str(getattr(record, "severity", "") or "").lower() for record, *_rest in rows]
+    with_severity = any(severities)
+    kinds = sorted({kind for _record, _target, kind, _detail in rows})
+    table = hud_table()
+    table.add_column("#", style="muted", justify="right", no_wrap=True)
+    if with_severity:
+        table.add_column("severity", no_wrap=True)
+    table.add_column("target", ratio=3)
+    if len(kinds) > 1:
+        table.add_column("kind", style="muted", no_wrap=True)
+    table.add_column("detail", overflow="fold", ratio=2)
+    for index, ((record, row_target, kind, detail), severity) in enumerate(zip(rows, severities, strict=True), 1):
+        style = record_style(record)
+        cells: list[RenderableType] = [str(index)]
+        if with_severity:
+            cells.append(_severity_cell(severity))
+        cells.append(PathText(row_target, style=style))
+        if len(kinds) > 1:
+            cells.append(Text(kind))
+        cells.append(Text(detail, style=style))
+        table.add_row(*cells)
+    meta = [Text(f"{len(rows)} record(s)", style="white")]
+    if len(kinds) == 1:
+        meta.append(Text.assemble(("kind ", "muted"), (kinds[0], "white")))
+    if tool:
+        meta.insert(0, Text.assemble((tool, "tool"), (f" · {target}" if target else "", "white")))
+    footer = None
+    if with_severity:
+        counts = {level: severities.count(level) for level in (*_SEVERITY_ORDER, "unknown")}
+        footer = join(
+            (Text.assemble((f"{level} ", SEVERITY_STYLES.get(level, NEUTRAL_STYLE)), (str(n), "bold white"))
+             for level, n in counts.items() if n),
+            "  ",
         )
-    return table
+    return HudFrame([Pane(table, title="Validated records", meta=join(meta, " · "), pad=0)], footer=footer)
 
 
-def _node_table(result: PipelineResult) -> Table:
-    """A Rich table of per-stage results."""
-    table = Table(title="Pipeline stages", box=box.ROUNDED)
-    table.add_column("tool", style="tool")
-    table.add_column("stage")
-    table.add_column("status")
-    table.add_column("records", justify="right")
-    table.add_column("error", style="err", overflow="fold")
+def _node_table(result: PipelineResult) -> HudFrame:
+    """Per-stage results (the raw-output mode's closing table)."""
+    table = hud_table()
+    table.add_column("tool", style="tool", no_wrap=True)
+    table.add_column("stage", no_wrap=True)
+    table.add_column("status", no_wrap=True)
+    table.add_column("records", justify="right", no_wrap=True)
+    table.add_column("error", style="err", overflow="fold", ratio=1)
     for node_result in result.nodes:
-        status = "[ok]ok[/ok]" if node_result.ok else "[err]failed[/err]"
+        state = _stage_outcome(node_result)
         table.add_row(
             node_result.node.tool,
             node_result.node.stage,
-            status,
+            pip_word(state, {"ok": "ok", "failed": "err", "skipped": "warn"}[state]),
             str(node_result.count),
             node_result.error or "",
         )
-    return table
+    return HudFrame([Pane(table, title="Pipeline stages", pad=0)])
+
+
+def _stage_outcome(node_result: NodeResult) -> str:
+    if node_result.ok:
+        return "ok"
+    return "skipped" if node_result.skipped else "failed"
 
 
 def _is_interactive() -> bool:
@@ -289,10 +378,12 @@ def _run_summary(
     session_id: str,
     reports: list[tuple[str, Path]],
     progress: float = 1.0,
-) -> Panel:
-    """Closing panel: did it work, what came out of it, where the artefacts are.
+) -> HudFrame:
+    """Closing frame: the verdict, the yield per tool, what did not deliver and
+    why, then where the artefacts are. Green-to-cyan for a clean run,
+    red-to-amber for one that failed.
 
-    ``progress`` below 1 is a frame of its entrance: the numbers count up.
+    ``progress`` below 1 is a frame of its entrance: the numbers and bars count up.
     """
     ok = result.succeeded()
     scale = motion.ease_out(progress)
@@ -300,42 +391,76 @@ def _run_summary(
     def counted(value: float) -> float:
         return value if progress >= 1 else value * scale
 
-    totals = "  ".join(
-        f"{tool} [accent]{round(counted(count))}[/accent]" for tool, count in result.totals_by_tool.items()
+    verdict = Text(" success ", style="black on green") if ok else Text(" failed ", style="bold bright_white on red")
+    duration = result.duration_s
+    if duration is None:
+        elapsed = "elapsed n/a"
+    else:
+        elapsed = f"elapsed {counted(duration):.1f}s" + (f" ({_clock_text(duration)})" if duration >= 60 else "")
+    headline = Text.assemble(
+        verdict,
+        ("   ", ""),
+        (f"{round(counted(len(result.records)))} record(s)", "bold white"),
+        ("   ·   ", "muted"),
+        (elapsed, "bold white"),
     )
-    elapsed = (
-        f"elapsed {counted(result.duration_s):.1f}s" if result.duration_s is not None else "elapsed n/a"
-    )
-    lines = [
-        Text.assemble(
-            ("success" if ok else "failed", "ok" if ok else "err"),
-            ("  ·  ", "muted"),
-            (f"{round(counted(len(result.records)))} record(s)", "white"),
-            ("  ·  ", "muted"),
-            (elapsed, "white"),
-        ),
-        Text.from_markup(totals or "[muted]no records[/muted]"),
-    ]
-    # Name the stages that did not deliver: the panel is the last thing on
-    # screen, and scrolling back through a long run to find out which one it
-    # was is exactly what the summary exists to save.
-    for label, style, entries in (
-        ("failed ", "err", [n for n in result.nodes if not n.ok and not n.skipped]),
-        ("skipped", "warn", [n for n in result.nodes if n.skipped]),
-    ):
-        if entries:
-            named = ", ".join(f"{n.node.stage} ({n.node.tool})" for n in entries)
-            lines.append(Text.assemble((f"{label}  ", style), (named, "white")))
-    lines.append(Text.assemble(("session  ", "muted"), (session_id, "white")))
-    lines += [Text.assemble((f"{label:<8} ", "muted"), (str(path), "white")) for label, path in reports]
-    return Panel(
-        Group(*lines),
-        title=f"[bold]{name}[/bold]",
-        border_style="ok" if ok else "err",
-        box=box.ROUNDED,
-        padding=(1, 2),
-        expand=False,
-    )
+    totals = result.totals_by_tool
+    peak = max(totals.values(), default=0) or 1
+    yields = Table.grid(padding=(0, 1))
+    yields.add_column(style="tool", no_wrap=True, min_width=10)
+    yields.add_column(no_wrap=True)
+    yields.add_column(justify="right", no_wrap=True)
+    for tool, count in totals.items():
+        shown = counted(count)
+        yields.add_row(
+            tool,
+            motion.bar(shown / peak, 24, style="accent" if count else "muted"),
+            Text(str(round(shown)), style="bold white" if count else "muted"),
+        )
+    rows = [Pane(Group(Text(""), headline, Text(""), yields), title=Text(name), pad=2)]
+
+    # Name the stages that did not deliver, and why the failed ones failed: the
+    # frame is the last thing on screen, and the live table cuts long reasons off.
+    issues: list[Text] = []
+    for node_result in result.nodes:
+        if node_result.ok or node_result.skipped:
+            continue
+        node = node_result.node
+        reason = (node_result.error or "").removeprefix(f"{node.tool} ")
+        issues.append(
+            Text.assemble(pip_word("failed ", "err"), "  ", (f"{node.stage} ({node.tool})", "white"), (f"  {reason}", "muted"))
+        )
+    skipped = [n for n in result.nodes if n.skipped]
+    if skipped:
+        named = ", ".join(f"{n.node.stage} ({n.node.tool})" for n in skipped)
+        issues.append(Text.assemble(pip_word("skipped", "warn"), "  ", (named, "white")))
+    if issues:
+        rows.append(Pane(Group(*issues), title="Issues", pad=2))
+
+    artefacts = Table.grid(padding=(0, 2), expand=True)
+    artefacts.add_column(style="muted", no_wrap=True)
+    artefacts.add_column(ratio=1)
+    artefacts.add_row("session", Text(session_id, style="bold white"))
+    for label, path in reports:
+        artefacts.add_row(label, PathText(path))
+    rows.append(Pane(artefacts, title="Output", pad=2))
+    return HudFrame(rows, palette=BRAND if ok else ALERT)
+
+
+def _clock_text(seconds: float) -> str:
+    """``12m34s`` — a long run read at a glance (the seconds stay alongside)."""
+    minutes, rest = divmod(int(round(seconds)), 60)
+    if minutes < 60:
+        return f"{minutes}m{rest:02d}s"
+    hours, minutes = divmod(minutes, 60)
+    return f"{hours}h{minutes:02d}m"
+
+
+def _after_live() -> None:
+    """``Live`` leaves its last frame on screen; on a pipe that frame ends
+    without a newline, and the next line would be glued to its last row."""
+    if not console.is_terminal:
+        console.line()
 
 
 def _live_fps(settings: Settings) -> int:
@@ -394,34 +519,69 @@ def _tool_states(manager: ToolManager, tools_dir: Path) -> list[str]:
     return [_tool_state(manager, name, tools_dir) for name in manager.registry.names()]
 
 
-def _inventory_table(
-    manager: ToolManager, tools_dir: Path, *, numbered: bool = False, states: list[str] | None = None
-) -> tuple[Table, list[str]]:
-    """The tool inventory shared by the launcher and ``status``.
+@dataclass
+class _ToolRow:
+    """One registered tool as the launcher and ``status`` show it."""
 
-    Returns the table and the per-tool states, so the caller can render the
-    readiness summary without computing them twice; ``states`` passes in an
-    inventory pass the caller already made (registry order).
-    """
-    table = Table(title="TOOLS", title_style="accent", box=box.SIMPLE_HEAD, expand=True, pad_edge=False)
-    if numbered:
-        table.add_column("#", style="accent", justify="right", width=2)
-    table.add_column("tool", style="tool", no_wrap=True)
-    table.add_column("version", style="muted", no_wrap=True)
-    table.add_column("state", no_wrap=True)
-    table.add_column("source", style="muted", overflow="ellipsis", no_wrap=True)
+    name: str
+    version: str
+    state: str
+    repo: str
+
+
+def _tool_rows(manager: ToolManager, tools_dir: Path, states: list[str] | None = None) -> list[_ToolRow]:
+    """Every registered tool, in registry order. ``states`` reuses an inventory
+    pass the caller already made."""
     names = manager.registry.names()
     if states is None or len(states) != len(names):
         states = _tool_states(manager, tools_dir)
-    for index, (name, state) in enumerate(zip(names, states, strict=True), start=1):
-        row: list[str | Text] = [
-            name,
-            _tool_version(manager, name) or "—",
-            Text(state, style=state_style(state)),
-            manager.spec(name).repo,
-        ]
-        table.add_row(*([str(index), *row] if numbered else row))
-    return table, states
+    return [
+        _ToolRow(name, _tool_version(manager, name), state, manager.spec(name).repo)
+        for name, state in zip(names, states, strict=True)
+    ]
+
+
+def _tools_table(rows: list[_ToolRow], *, numbered: bool, capability: bool, reveal: float = 1.0) -> Table:
+    """The tool inventory: number, tool, what it does, version, state, source.
+
+    A tool that cannot run is greyed out (``muted`` is bright black, which the
+    classic Windows console draws — it ignores ``dim``). ``reveal`` below 1 is a
+    frame of the launcher's entrance: the rows type in top to bottom, the
+    newest one lit; a row not in yet is blank but as wide as it will be, so the
+    columns stand still.
+    """
+    table = hud_table()
+    if numbered:
+        table.add_column("#", justify="right", no_wrap=True, width=2)
+    table.add_column("tool", no_wrap=True)
+    if capability:
+        table.add_column("capability", no_wrap=True, overflow="ellipsis")
+    table.add_column("version", style="muted", no_wrap=True)
+    table.add_column("state", no_wrap=True)
+    table.add_column("source", style="muted", no_wrap=True, overflow="ellipsis")
+    shown = len(rows) if reveal >= 1 else int(len(rows) * max(reveal, 0.0))
+    for index, row in enumerate(rows, start=1):
+        ready = row.state == "ready"
+        cells: list[Text] = []
+        if numbered:
+            cells.append(Text(str(index), style="bold bright_green" if ready else "muted"))
+        fresh = reveal < 1 and index == shown
+        cells.append(Text(row.name, style="bold bright_white" if fresh else ("tool" if ready else "muted")))
+        if capability:
+            cells.append(Text(TOOL_GUIDES.get(row.name, ("",))[0], style="white" if ready else "muted"))
+        cells += [Text(row.version or "—"), pip_word(row.state, state_style(row.state)), Text(row.repo)]
+        if index > shown:
+            cells = [Text(" " * cell.cell_len) for cell in cells]
+        table.add_row(*cells)
+    return table
+
+
+def _inventory_table(
+    manager: ToolManager, tools_dir: Path, *, numbered: bool = False, states: list[str] | None = None
+) -> tuple[Table, list[str]]:
+    """The tool inventory, and the per-tool states it was built from."""
+    rows = _tool_rows(manager, tools_dir, states)
+    return _tools_table(rows, numbered=numbered, capability=False), [row.state for row in rows]
 
 
 def _tool_menu(manager: ToolManager) -> Table:
@@ -454,9 +614,39 @@ def _toggle_setting(action: str, settings: Settings) -> None:
         os.environ["CYBERFW_ANIMATIONS"] = "false" if settings.animations else "true"
 
 
-def _show_banner(states: list[str], platform: str, *, animate: bool) -> None:
-    """The banner, played in with its intro when the terminal allows it."""
-    motion.play(console, functools.partial(banner, states, platform), duration=1.1, animate=animate)
+def _start_screen(rows: list[_ToolRow], platform: str, settings: Settings) -> None:
+    """The banner and the launcher, played in as one intro.
+
+    The big banner when banner and launcher fit the window together, else the
+    three-row masthead. Where not even that fits, only the masthead plays and
+    the launcher is printed under it — the intro is never silently dropped.
+    """
+    states = [row.state for row in rows]
+
+    def full(progress: float) -> RenderableType:
+        return Group(
+            banner(states, platform, motion.phase(progress, 0.0, 0.6)),
+            _LauncherView(rows, settings, progress=motion.phase(progress, 0.45, 1.0)),
+        )
+
+    def compact(progress: float) -> RenderableType:
+        return Group(
+            Masthead(states, platform, progress=motion.phase(progress, 0.0, 0.55)),
+            Text(""),
+            _LauncherView(rows, settings, progress=motion.phase(progress, 0.35, 1.0)),
+        )
+
+    def fits(frame: Callable[[float], RenderableType]) -> bool:
+        # One row stays free for the prompt under the screen.
+        return len(console.render_lines(frame(1.0), pad=False)) < console.size.height - 1
+
+    if fits(full):
+        motion.play(console, full, duration=1.6, animate=settings.animations)
+    elif fits(compact):
+        motion.play(console, compact, duration=1.3, animate=settings.animations)
+    else:
+        motion.play(console, lambda p: Masthead(states, platform, progress=p), duration=0.8, animate=settings.animations)
+        console.print(_LauncherView(rows, settings))
 
 
 def interactive_menu() -> None:
@@ -466,11 +656,10 @@ def interactive_menu() -> None:
     try:
         # One inventory pass serves the banner and the first launcher frame;
         # later frames recompute, since a tool can change state mid-session.
-        startup_states = _tool_states(manager, settings.tools_dir)
-        _show_banner(startup_states, manager.mapping.label, animate=settings.animations)
-        known_states: list[str] | None = startup_states
+        _start_screen(_tool_rows(manager, settings.tools_dir), manager.mapping.label, settings)
     finally:
         manager.close()
+    first = True
     while True:
         # Re-bootstrap each loop so a p/l/f settings change — exported as a
         # CYBERFW_* env var — takes effect on the next frame. The panel is
@@ -480,10 +669,11 @@ def interactive_menu() -> None:
         settings, manager = _bootstrap()
         try:
             names = manager.registry.names()
-            console.print(_launcher_view(manager, settings, states=known_states))
-            known_states = None
+            if not first:  # the start screen already showed this frame
+                console.print(_launcher_view(manager, settings))
         finally:
             manager.close()
+        first = False
         choice = _prompt_choice(names)
         if choice in _SETTINGS_KEYS:
             _toggle_setting(choice, settings)
@@ -541,39 +731,76 @@ def _dispatch_choice(choice: str, names: list[str]) -> bool:
     return True
 
 
-def _launcher_view(manager: ToolManager, settings: Settings, *, states: list[str] | None = None) -> Table:
-    """Render the compact two-column launcher workspace.
+def _launcher_view(
+    manager: ToolManager, settings: Settings, *, states: list[str] | None = None, progress: float = 1.0
+) -> _LauncherView:
+    """The launcher workspace for the current registry and settings.
 
-    ``states`` reuses an inventory pass the caller already made (the banner's);
-    the ready count itself is left to the banner, so it is shown once.
+    ``states`` reuses an inventory pass the caller already made; the ready
+    count itself is left to the banner, so it is shown once.
     """
-    table = Table.grid(expand=True, padding=(0, 2))
-    table.add_column(width=28, no_wrap=True, vertical="top")
-    table.add_column(ratio=1, vertical="top")
+    return _LauncherView(_tool_rows(manager, settings.tools_dir, states), settings, progress=progress)
 
-    def _flag(value: bool) -> tuple[str, str]:
-        return ("on", "ok") if value else ("off", "warn")
 
-    names = manager.registry.names()
-    sidebar = Table.grid(padding=(0, 0))
-    sidebar.add_row(Text("SHORTCUTS", style="accent"))
-    sidebar.add_row(Text(f"  {_tool_range(names):<4} select tool", style="dim"))
-    sidebar.add_row(Text(f"  {_PIPELINE_KEY:<4} run pipeline", style="dim"))
-    sidebar.add_row(Text("  0    exit", style="dim"))
-    sidebar.add_row("")
-    sidebar.add_row(Text("SETTINGS", style="accent"))
-    parse_text, parse_style = _flag(settings.parse)
-    sidebar.add_row(Text.assemble(("  p  parse      ", "dim"), (parse_text, parse_style)))
-    sidebar.add_row(Text.assemble(("  l  log level  ", "dim"), (settings.log_level, "info")))
-    file_text, file_style = _flag(settings.log_to_file)
-    sidebar.add_row(Text.assemble(("  f  log file   ", "dim"), (file_text, file_style)))
-    anim_text, anim_style = _flag(settings.animations)
-    sidebar.add_row(Text.assemble(("  a  animations ", "dim"), (anim_text, anim_style)))
+class _LauncherView:
+    """The launcher: the tools, then a row of keys, then the live settings.
 
-    content, _states = _inventory_table(manager, settings.tools_dir, numbered=True, states=states)
+    A renderable rather than a fixed table, so it lays itself out for the width
+    it gets: the capability column only where there is room (80 columns keeps
+    every column shown today, unsqueezed). ``progress`` below 1 is a frame of
+    its entrance: the frame is in place from the first frame (nothing below it
+    jumps), the rows type in, then the keys, the settings and the footer hint.
+    """
 
-    table.add_row(Panel(sidebar, border_style="accent", padding=(1, 1), box=box.ROUNDED), content)
-    return table
+    def __init__(self, rows: list[_ToolRow], settings: Settings, *, progress: float = 1.0) -> None:
+        self.rows = rows
+        self.settings = settings
+        self.progress = progress
+
+    def __rich_console__(self, console: Console, options: ConsoleOptions) -> RenderResult:
+        names = [row.name for row in self.rows]
+        keys = join(
+            [
+                keycap(_tool_range(names), "select tool"),
+                keycap(_PIPELINE_KEY, "run pipeline"),
+                Text.assemble((" 0 ", KEY), " ", (" q ", KEY), " ", ("exit", "muted")),
+            ]
+        )
+        toggles = self._toggles(compact=False)
+        if toggles.cell_len > options.max_width - 4:
+            toggles = self._toggles(compact=True)
+        progress = self.progress
+        table = _tools_table(
+            self.rows, numbered=True, capability=options.max_width >= 100, reveal=motion.phase(progress, 0.0, 0.7)
+        )
+        yield HudFrame(
+            [
+                Pane(table, title="Tools", pad=0),
+                Pane(keys if progress >= 0.8 else Text(""), title="Keys"),
+                Pane(toggles if progress >= 0.9 else Text(""), title="Settings"),
+            ],
+            footer=Text("type a key, then Enter", style="muted") if progress >= 1 else None,
+        )
+
+    def _toggles(self, *, compact: bool) -> Text:
+        """The four settings on one line, each behind the key that flips it.
+        ``compact`` (a narrow terminal) drops the pips; the coloured words stay."""
+
+        def flag(value: bool) -> Text:
+            word, style = ("on", "ok") if value else ("off", "warn")
+            return Text(word, style=style) if compact else pip_word(word, style)
+
+        settings = self.settings
+        items = [
+            ("p", "parse", flag(settings.parse)),
+            ("l", "log level", Text(settings.log_level, style="info")),
+            ("f", "log file", flag(settings.log_to_file)),
+            ("a", "animations", flag(settings.animations)),
+        ]
+        return join(
+            (Text.assemble(keycap(key, label, slot=2, label_style="muted"), " ", value) for key, label, value in items),
+            "  " if compact else "   ",
+        )
 
 
 def _ensure_tools() -> None:
@@ -602,13 +829,30 @@ def _interactive_run(tool: str) -> None:
     The wording comes from the adapter (``target_prompt`` / ``extra_input_prompt``),
     so a new tool needs no launcher changes.
     """
-    console.print(tool_guide(tool))
+    console.print(tool_guide(tool, **_tool_facts(tool)))
     adapter = adapter_class(tool)
     target = Prompt.ask(adapter.target_prompt)
     wordlist: str | None = None
     if adapter.extra_input_prompt is not None:
         wordlist = Prompt.ask(adapter.extra_input_prompt, default="") or None
     run_cmd(tool, target=target, wordlist=wordlist)
+
+
+def _tool_facts(tool: str) -> dict[str, str | None]:
+    """State, version and source for the tool card; nothing for a tool the
+    registry does not list."""
+    settings, manager = _bootstrap()
+    try:
+        if tool not in manager.registry.names():
+            return {}
+        version = _tool_version(manager, tool)
+        return {
+            "state": _tool_state(manager, tool, settings.tools_dir),
+            "version": version or None,
+            "repo": manager.spec(tool).repo,
+        }
+    finally:
+        manager.close()
 
 
 def _interactive_pipeline() -> None:
@@ -702,6 +946,7 @@ def init_cmd(
                 failed += _provision_chromium(manager, settings, progress, force=force, spinner=progress)
                 progress.advance()
             live.update(progress.table(), refresh=True)
+        _after_live()
     finally:
         manager.close()
 
@@ -744,18 +989,18 @@ class _InstallProgress:
     def add_row(self, *cells: RenderableType | None) -> None:
         self.rows.append(cells)
 
-    def table(self) -> Table:
-        """The result table so far."""
-        # Not expanded, and the detail is relative to tools_dir: an absolute
-        # Windows path is ~90 characters and squeezes every other column away.
-        table = Table(box=box.SIMPLE_HEAD, pad_edge=False)
+    def table(self) -> HudFrame:
+        """The result table so far, in the frame."""
+        # The detail is relative to tools_dir: an absolute Windows path is ~90
+        # characters and squeezes every other column away.
+        table = hud_table()
         table.add_column("tool", style="tool", no_wrap=True)
         table.add_column("version", style="muted", no_wrap=True)
         table.add_column("state", no_wrap=True)
-        table.add_column("detail", style="muted", overflow="ellipsis")
+        table.add_column("detail", style="muted", overflow="ellipsis", ratio=1)
         for row in list(self.rows):
             table.add_row(*row)
-        return table
+        return HudFrame([Pane(table, title="Install", pad=0)])
 
     def __rich__(self) -> RenderableType:
         now = self._clock()
@@ -812,10 +1057,10 @@ def _relative_to(path: Path, root: Path) -> str:
         return str(path)
 
 
-def _dep_row(label: str, found: str | None, needed_by: str) -> tuple[str, str, str]:
+def _dep_row(label: str, found: str | None, needed_by: str) -> tuple[str, Text, RenderableType]:
     if found:
-        return (label, "[ok]found[/ok]", found)
-    return (label, "[warn]missing[/warn]", f"needed by {needed_by}")
+        return (label, pip_word("found", "ok"), PathText(found, style="muted"))
+    return (label, pip_word("missing", "warn"), Text(f"needed by {needed_by}", style="muted"))
 
 
 def _binary_on_disk(tools_dir: Path, name: str, binary_hint: str | None) -> bool:
@@ -847,45 +1092,84 @@ def status_cmd(verbose: VerboseOption = False) -> None:
 
     settings, manager = _bootstrap(verbose=verbose)
     try:
-        tools, states = _inventory_table(manager, settings.tools_dir)
-        _show_banner(states, manager.mapping.label, animate=settings.animations)
-        # The banner already carries the readiness and the platform; what it
-        # cannot show is where the binaries are looked for.
-        console.print(
-            Text.assemble(("tools dir  ", "muted"), (str(settings.tools_dir), "white"))
+        rows = _tool_rows(manager, settings.tools_dir)
+        states = [row.state for row in rows]
+        platform = manager.mapping.label
+        motion.play(
+            console,
+            lambda p: Masthead(states, platform, subtitle="status", progress=p),
+            duration=0.8,
+            animate=settings.animations,
         )
-        console.print(tools)
-
-        deps = Table(title="External dependencies", box=box.SIMPLE_HEAD, expand=True)
-        deps.add_column("dependency", style="tool")
-        deps.add_column("state")
-        deps.add_column("detail", style="muted", overflow="fold")
-        deps.add_row(*_dep_row("nmap", shutil.which("nmap"), "rustscan (service/version detection)"))
-        deps.add_row(
-            *_dep_row("chrome/chromium", _find_chrome(settings.tools_dir), "gowitness (screenshots)")
-        )
-        console.print(deps)
-
-        cfg = Table(title="Effective settings", box=box.SIMPLE_HEAD, expand=True)
-        cfg.add_column("setting", style="tool")
-        cfg.add_column("value")
-        cfg.add_row("parse", "[ok]on[/ok]" if settings.parse else "[warn]off (raw output)[/warn]")
-        cfg.add_row("view", settings.view)
-        cfg.add_row("animations", "on" if settings.animations else "off")
-        cfg.add_row("log_level", settings.log_level)
-        cfg.add_row("log_to_file", "on" if settings.log_to_file else "off")
-        cfg.add_row("concurrency", str(settings.concurrency))
-        cfg.add_row(
-            "stage_timeout",
-            f"{settings.stage_timeout:g}s" if settings.stage_timeout else "[muted]unlimited[/muted]",
-        )
-        cfg.add_row("wordlist", settings.wordlist or "[muted](unset → bundled common.txt)[/muted]")
-        cfg.add_row("github_token", "[ok]set[/ok]" if settings.github_token else "[muted]unset (60 req/h)[/muted]")
-        cfg.add_row("reports_dir", str(settings.reports_dir))
-        cfg.add_row("logs_dir", str(settings.logs_dir))
-        console.print(cfg)
+        console.print(_status_view(rows, settings, chrome=_find_chrome(settings.tools_dir)))
     finally:
         manager.close()
+
+
+def _status_view(rows: list[_ToolRow], settings: Settings, *, chrome: str | None) -> HudFrame:
+    """``status`` as one panel: the tools (and where they are looked for), the
+    external dependencies, the effective settings."""
+    tools_dir = Table.grid(padding=(0, 1), pad_edge=True, expand=True)
+    tools_dir.add_column(style="muted", no_wrap=True)
+    tools_dir.add_column(ratio=1)
+    tools_dir.add_row("tools dir", PathText(settings.tools_dir))
+    tools = ByWidth(lambda width: Group(_tools_table(rows, numbered=False, capability=width >= 100), tools_dir))
+
+    deps = hud_table()
+    deps.add_column("dependency", style="tool", no_wrap=True)
+    deps.add_column("state", no_wrap=True)
+    deps.add_column("detail", ratio=1)
+    deps.add_row(*_dep_row("nmap", shutil.which("nmap"), "rustscan (service/version detection)"))
+    deps.add_row(*_dep_row("chrome/chromium", chrome, "gowitness (screenshots)"))
+
+    def flag(value: bool, off: str = "off") -> Text:
+        return pip_word("on", "ok") if value else pip_word(off, "warn")
+
+    pairs: list[tuple[str, RenderableType]] = [
+        ("parse", flag(settings.parse, "off (raw output)")),
+        ("view", Text(settings.view)),
+        ("animations", flag(settings.animations)),
+        ("log_level", Text(settings.log_level, style="info")),
+        ("log_to_file", flag(settings.log_to_file)),
+        ("concurrency", Text(str(settings.concurrency))),
+        (
+            "stage_timeout",
+            Text(f"{settings.stage_timeout:g}s") if settings.stage_timeout else Text("unlimited", style="muted"),
+        ),
+        ("github_token", pip_word("set", "ok") if settings.github_token else Text("unset (60 req/h)", style="muted")),
+    ]
+    paths: list[tuple[str, RenderableType]] = [
+        ("wordlist", PathText(settings.wordlist) if settings.wordlist else Text("(unset → bundled common.txt)", style="muted")),
+        ("reports_dir", PathText(settings.reports_dir)),
+        ("logs_dir", PathText(settings.logs_dir)),
+    ]
+
+    def effective(width: int) -> RenderableType:
+        columns = 2 if width >= 100 else 1
+        grid = Table.grid(padding=(0, 2), expand=True)
+        for _ in range(columns):
+            grid.add_column(style="tool", no_wrap=True, min_width=13)
+            grid.add_column(ratio=1)
+        for start in range(0, len(pairs), columns):
+            cells: list[RenderableType] = []
+            for key, value in pairs[start : start + columns]:
+                cells += [key, value]
+            grid.add_row(*cells)
+        where = Table.grid(padding=(0, 2), expand=True)
+        where.add_column(style="tool", no_wrap=True, min_width=13)
+        where.add_column(ratio=1)
+        for key, value in paths:
+            where.add_row(key, value)
+        return Group(grid, Text(""), where)
+
+    return HudFrame(
+        [
+            Pane(tools, title="Tools", pad=0),
+            Pane(deps, title="External dependencies", pad=0),
+            Pane(ByWidth(effective), title="Effective settings"),
+        ],
+        footer=Text("cyberfw status", style="muted"),
+    )
 
 
 @app.command("run")
@@ -1000,8 +1284,9 @@ def run_cmd(
                 manager.close()
                 view.finish()
                 live.refresh()
+        _after_live()
         if records:
-            console.print(_record_table(records))
+            console.print(_record_table(records, tool=tool, target=target_label))
         else:
             console.print("[muted]No records found.[/muted]")
     finished_at = datetime.now(timezone.utc)
@@ -1201,6 +1486,7 @@ def pipeline_cmd(
                 manager.close()
                 view.finish()
                 live.refresh()
+        _after_live()
 
     if verbose:
         console.print(_node_table(result))

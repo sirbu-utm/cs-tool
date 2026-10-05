@@ -27,12 +27,12 @@ from collections import deque
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 
-from rich import box
-from rich.console import Group, RenderableType
+from rich.console import Console, ConsoleOptions, Group, RenderableType, RenderResult
 from rich.table import Table
 from rich.text import Text
 from rich.tree import Tree
 
+from cyberfw.hud import HudFrame, Pane, hud_table
 from cyberfw.motion import bar, fade_mark, scanner, spinner
 from cyberfw.pipeline.engine import Node, NodeResult, StageEvent
 from cyberfw.pipeline.schemas import ToolRecord
@@ -177,13 +177,30 @@ class PipelineLiveView:
         self.on_record(record)
 
     # -- rendering ------------------------------------------------------------
-    def __rich__(self) -> RenderableType:
-        return self.render()
+    def __rich_console__(self, console: Console, options: ConsoleOptions) -> RenderResult:
+        # In a terminal, keep the frame within the window: ``Live`` crops what
+        # does not fit to an ellipsis, so the findings tail gives way first.
+        yield self.render(height=options.size.height if console.is_terminal else None)
 
-    def render(self) -> RenderableType:
+    def render(self, height: int | None = None) -> RenderableType:
+        """The stages and the latest findings in one frame; the stage pips ride
+        in its top border. ``height`` caps the frame at that many rows."""
         with self._lock:
             now = self._clock()
-            return Group(self._stage_table(now), Text(""), self._tail_table(now))
+            pips = Text()
+            for stage in self._stages.values():
+                pips.append(PIP, style=_STATUS_STYLES[stage.status])
+            tail = list(self._tail)
+            if height is not None:
+                # borders and the two header rows, plus a free row for Live
+                room = height - len(self._stages) - 6
+                tail = tail[-max(room, 1) :]
+            return HudFrame(
+                [
+                    Pane(self._stage_table(now), title=self._title or "Pipeline", meta=pips, pad=0),
+                    Pane(self._tail_table(now, tail), title="Latest findings", pad=0),
+                ]
+            )
 
     def _stage_table(self, now: float) -> Table:
         stages = list(self._stages.values())
@@ -191,17 +208,10 @@ class PipelineLiveView:
         # 80-100 column terminal, and the first to be squeezed are the ones that
         # identify the row ("nucl…"). "note" is shown only once something went wrong.
         with_note = any(stage.note for stage in stages)
-        # Not expanded: the stage table is narrow, and stretching it to the
-        # terminal width scatters "records/targets/time" across the screen.
-        table = Table(
-            title=self._title or "Pipeline",
-            title_style="accent",
-            box=box.SIMPLE_HEAD,
-            pad_edge=False,
-        )
-        # min_width on the identifying columns and a cap on the free-text note:
-        # without both, a one-sentence note claims the width and Rich shrinks
-        # the tool and stage names to "nucl…" / "vul…".
+        table = hud_table()
+        # min_width on the identifying columns and an ellipsis on the free-text
+        # note: without both, a one-sentence note claims the width and Rich
+        # shrinks the tool and stage names to "nucl…" / "vul…".
         table.add_column("tool", style="tool", no_wrap=True, min_width=10)
         table.add_column("stage", no_wrap=True, min_width=10)
         table.add_column("status", no_wrap=True, min_width=9)
@@ -209,7 +219,7 @@ class PipelineLiveView:
         table.add_column("progress", no_wrap=True, min_width=_BAR)
         table.add_column("time", justify="right", no_wrap=True, min_width=5)
         if with_note:
-            table.add_column("note", style="err", overflow="ellipsis", no_wrap=True, max_width=40)
+            table.add_column("note", style="err", overflow="ellipsis", no_wrap=True, ratio=1)
         for stage in stages:
             elapsed = stage.elapsed(now)
             row: list[str | Text] = [
@@ -266,24 +276,18 @@ class PipelineLiveView:
             cell.append(f" {stage.done}/{stage.total}", style="muted")
         return cell
 
-    def _tail_table(self, now: float) -> Table:
-        table = Table(
-            title="Latest findings",
-            title_style="accent",
-            box=box.SIMPLE_HEAD,
-            expand=True,
-            pad_edge=False,
-        )
+    def _tail_table(self, now: float, tail: list[tuple[ToolRecord, float]]) -> Table:
+        table = hud_table()
         # A one-cell gutter where each new finding's mark fades: █ ▓ ▒ ░.
         table.add_column("", no_wrap=True, width=1)
         table.add_column("tool", style="tool", no_wrap=True)
         table.add_column("kind", no_wrap=True)
         table.add_column("target", overflow="ellipsis", no_wrap=True, ratio=3)
         table.add_column("detail", overflow="ellipsis", no_wrap=True, ratio=2)
-        if not self._tail:
+        if not tail:
             table.add_row("", Text("no records yet", style="muted"), "", "", "")
             return table
-        for record, arrived in self._tail:
+        for record, arrived in tail:
             style = record_style(record)
             table.add_row(
                 Text(fade_mark(now - arrived) if self._moving else " ", style=style),

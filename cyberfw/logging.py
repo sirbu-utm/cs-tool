@@ -26,7 +26,7 @@ THEME = Theme(
         "err": "bold red",
         "warn": "bold yellow",
         "info": "cyan",
-        "muted": "dim",
+        "muted": "bright_black",
         "tool": "bold cyan",
         "accent": "bold green",
     }
