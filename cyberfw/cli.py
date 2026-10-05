@@ -33,7 +33,7 @@ from rich.live import Live
 from rich.prompt import Confirm as _RichConfirm
 from rich.prompt import Prompt as _RichPrompt
 from rich.table import Table
-from rich.text import Text
+from rich.text import Text, TextType
 
 from cyberfw import motion
 from cyberfw.config import Settings, load_settings
@@ -97,7 +97,12 @@ class Prompt(_RichPrompt):
 
     Callers still pass the plain wording (it comes from the adapters), so a
     test that patches ``cyberfw.cli.Prompt.ask`` sees exactly that wording.
+    Questions go to the app's console unless told otherwise: Rich's global
+    console has no theme, and the lead-in's style would quietly drop.
     """
+
+    def __init__(self, prompt: TextType = "", *, console: Console | None = None, **kwargs: Any) -> None:
+        super().__init__(prompt, console=console or _app_console(), **kwargs)
 
     def make_prompt(self, default: Any) -> Text:
         return Text.assemble(("» ", "accent"), super().make_prompt(default))
@@ -106,8 +111,16 @@ class Prompt(_RichPrompt):
 class Confirm(_RichConfirm):
     """A yes/no question with the same ``» `` lead-in as :class:`Prompt`."""
 
+    def __init__(self, prompt: TextType = "", *, console: Console | None = None, **kwargs: Any) -> None:
+        super().__init__(prompt, console=console or _app_console(), **kwargs)
+
     def make_prompt(self, default: Any) -> Text:
         return Text.assemble(("» ", "accent"), super().make_prompt(default))
+
+
+def _app_console() -> Console:
+    """The themed console, looked up at call time (tests swap it)."""
+    return console
 
 app = typer.Typer(
     name="cyberfw",

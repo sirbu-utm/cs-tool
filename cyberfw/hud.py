@@ -20,7 +20,7 @@ bold black as grey, which is what made the first prototype's tags hard to read.
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Iterator, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from rich.cells import cell_len
 from rich.color import Color, blend_rgb
@@ -101,7 +101,9 @@ ALERT = Palette(
     ColorTriplet(0xFF, 0x4D, 0x4D),
     ColorTriplet(0xFF, 0xA5, 0x3D),
     tuple(Color.from_ansi(n) for n in (196, 202, 208, 214)),
-    tuple(Color.parse(n) for n in ("red", "bright_red", "bright_red", "yellow")),
+    # Black text sits on these (tags, header bands): dark red would leave it at
+    # about 2:1 on the classic console palette, bright red keeps it above 5:1.
+    tuple(Color.parse(n) for n in ("bright_red", "bright_red", "yellow", "yellow")),
 )
 
 #: The background a :data:`HEAD` band is marked with. A frame repaints exactly
@@ -179,42 +181,69 @@ class HudFrame:
         width = options.max_width if self.expand else Measurement.get(console, options, self).maximum
         colours = [self.palette.at(console, x, width) for x in range(width)]
         line_styles = [Style(color=colour) if colour else Style() for colour in colours]
-        layouts = [self._layout(row, width) for row in self.rows]
+        rows = self._fit(width)
+        layouts = [self._layout(row, width) for row in rows]
         splits = [[x for x, _w, _p in layout[1:]] for layout in layouts]
 
-        for index, (row, layout) in enumerate(zip(self.rows, layouts, strict=True)):
+        for index, (row, layout) in enumerate(zip(rows, layouts, strict=True)):
             above = splits[index - 1] if index else []
             left, right = ("╔", "╗") if index == 0 else ("╠", "╣")
             border = _border(width, left, right, above, splits[index], line_styles)
+            # A tag or meta never covers a joint: neither this row's nor the one above.
+            joints = sorted({*above, *splits[index], width - 1})
             for pane, (x, w, _p) in zip(row, layout, strict=True):
                 span = w + 2 * pane.pad  # border cells above this pane
-                tag_end = _overlay_tag(console, border, pane.title, x + 2, span - 3, colours)
+                tag_x, room = _tag_slot(x + 2, x + span, joints, cell_len(_plain(pane.title)) + 2)
+                tag_end = _overlay_tag(console, border, pane.title, tag_x, room, colours)
                 if pane.meta:
                     meta_x = x + span - cell_len(_plain(pane.meta)) - 1
                     if meta_x > tag_end + 2:  # the tag wins; the meta is the extra
-                        _overlay_text(console, border, pane.meta, meta_x)
+                        _overlay_text(console, border, pane.meta, meta_x, joints=joints)
             yield from _emit(border)
             yield from self._body(console, options, row, layout, width, line_styles)
-        bottom = _border(width, "╚", "╝", splits[-1] if splits else [], [], line_styles)
+        last = splits[-1] if splits else []
+        bottom = _border(width, "╚", "╝", last, [], line_styles)
         if self.footer:
-            _overlay_text(console, bottom, self.footer, width - 3 - cell_len(_plain(self.footer)))
+            footer_x = width - 3 - cell_len(_plain(self.footer))
+            _overlay_text(console, bottom, self.footer, footer_x, joints=[*last, width - 1])
         yield from _emit(bottom)
+
+    def _fit(self, width: int) -> list[list[Pane]]:
+        """The rows as drawn at ``width``: panes side by side stack one under
+        another when the shared panes would be left too narrow to read (a
+        description one word, or one letter, wide). A stacked pane gives up its
+        fixed width and spans the frame."""
+        rows: list[list[Pane]] = []
+        for row in self.rows:
+            fixed = sum(pane.width for pane in row if pane.width is not None)
+            flexible = sum(1 for pane in row if pane.width is None)
+            room = width - self._overhead(row) - fixed
+            if len(row) > 1 and room < max(flexible * _MIN_SHARED, 0):
+                rows.extend([replace(pane, width=None)] for pane in row)
+            else:
+                rows.append(row)
+        return rows
 
     @staticmethod
     def _layout(row: list[Pane], width: int) -> list[tuple[int, int, int]]:
-        """``(x of the pane's left line, body width, pad)`` per pane."""
+        """``(x of the pane's left line, body width, pad)`` per pane. The bodies
+        always add up to the frame: the last pane takes what is left over or
+        gives up what does not fit."""
         free = width - HudFrame._overhead(row)
         fixed = sum(pane.width for pane in row if pane.width is not None)
         flexible = sum(1 for pane in row if pane.width is None)
         share, extra = divmod(max(free - fixed, 0), max(flexible, 1))
-        layout: list[tuple[int, int, int]] = []
-        x = 0
+        bodies: list[int] = []
         for pane in row:
             if pane.width is not None:
-                body = pane.width
+                bodies.append(pane.width)
             else:
-                body = share + (1 if extra > 0 else 0)
+                bodies.append(share + (1 if extra > 0 else 0))
                 extra -= 1
+        bodies[-1] = max(bodies[-1] + free - sum(bodies), 0)
+        layout: list[tuple[int, int, int]] = []
+        x = 0
+        for pane, body in zip(row, bodies, strict=True):
             layout.append((x, body, pane.pad))
             x += 1 + 2 * pane.pad + body
         return layout
@@ -231,6 +260,8 @@ class HudFrame:
         rendered = []
         for pane, (x, body, pad) in zip(row, layout, strict=True):
             lines = console.render_lines(pane.body, options.update(width=max(body, 1), height=None), pad=True)
+            # Exactly ``body`` cells, so a body line is never wider than its border.
+            lines = [Segment.adjust_line_length(line, body) for line in lines]
             rendered.append([self._paint_band(console, line, x + 1 + pad, width) for line in lines])
         height = max(len(lines) for lines in rendered)
         for line_no in range(height):
@@ -263,6 +294,10 @@ class HudFrame:
         return list(Segment.simplify(painted))
 
 
+#: The narrowest a shared pane may get beside a fixed one before the row stacks.
+_MIN_SHARED = 24
+
+
 def _plain(value: str | Text | None) -> str:
     if value is None:
         return ""
@@ -290,16 +325,29 @@ def _border(
     return cells
 
 
+def _tag_slot(start: int, end: int, joints: list[int], need: int) -> tuple[int, int]:
+    """Where a tag ``need`` cells wide goes between ``start`` and ``end`` (the
+    first cell it must not touch), and how much room it gets there: as far
+    left as it fits whole, else the widest gap, always one ``═`` clear of a joint."""
+    starts = [start, *(joint + 2 for joint in joints if start <= joint < end)]
+    slots = [(at, min([end, *(joint for joint in joints if joint >= at)]) - at - 1) for at in starts]
+    for at, room in slots:
+        if room >= need:
+            return at, room
+    return max(slots, key=lambda slot: slot[1])
+
+
 def _overlay_tag(
     console: Console, cells: list[tuple[str, Style]], title: str | Text | None, x: int, room: int, colours: list[Color | None]
 ) -> int:
     """Draw `` title `` as a tag at ``x`` (dark text on the border's colour, or
     reverse video without colour); returns where it ends. A title longer than
-    ``room`` is shortened with an ellipsis, never dropped."""
-    if not title:
+    ``room`` is shortened with an ellipsis; with no room for even `` … `` the
+    border is left whole."""
+    if not title or room < 3:
         return x
     text = (title if isinstance(title, Text) else Text(title)).copy()
-    text.truncate(max(room - 2, 1), overflow="ellipsis")
+    text.truncate(room - 2, overflow="ellipsis")
     colour = colours[min(x, len(colours) - 1)]
     tag = Style(color="black", bgcolor=colour) if colour else Style(reverse=True)
     padded = Text(" ") + text + Text(" ")
@@ -309,14 +357,35 @@ def _overlay_tag(
 
 
 def _overlay_text(
-    console: Console, cells: list[tuple[str, Style]], text: str | Text, x: int, *, air: bool = True
+    console: Console,
+    cells: list[tuple[str, Style]],
+    text: str | Text,
+    x: int,
+    *,
+    air: bool = True,
+    joints: Iterable[int] = (),
 ) -> None:
     """Write ``text`` over border cells from ``x``. ``air`` keeps a blank cell
     either side (plain text); a tag carries its own padding. Text that does not
-    fit is left out: the border stays whole rather than clipped."""
+    fit, or would cover one of ``joints``, is left out: the border stays whole
+    rather than clipped."""
     text = text if isinstance(text, Text) else Text(text)
-    flat = [(char, segment.style or Style()) for segment in text.render(console, end="") for char in segment.text]
+    # One entry per screen cell: a wide character is followed by an empty
+    # placeholder, a combining mark joins the character before it.
+    flat: list[tuple[str, Style]] = []
+    for segment in text.render(console, end=""):
+        style = segment.style or Style()
+        for char in segment.text:
+            width = cell_len(char)
+            if width == 0:
+                if flat:
+                    flat[-1] = (flat[-1][0] + char, flat[-1][1])
+                continue
+            flat.append((char, style))
+            flat.extend([("", style)] * (width - 1))
     if x < 2 or x + len(flat) + 2 > len(cells):
+        return
+    if any(x - 1 <= joint <= x + len(flat) for joint in joints):
         return
     if air:
         cells[x - 1] = (" ", cells[x - 1][1])

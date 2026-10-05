@@ -10,6 +10,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
+from rich.cells import cell_len
 from rich.color import Color
 from rich.console import Console, RenderableType
 from rich.segment import Segment
@@ -145,10 +146,18 @@ class TestFrame:
 
     def test_side_by_side_panes_join_the_borders(self) -> None:
         frame = HudFrame([[Pane(Text("left")), Pane(Text("right"), width=10)], Pane(Text("below"))])
-        plain, _ = _render(frame, width=40)
+        plain, _ = _render(frame, width=50)
         lines = plain.splitlines()
 
         assert "╤" in lines[0] and "│" in lines[1] and "╧" in lines[2]
+
+    def test_side_by_side_panes_stack_when_the_shared_one_would_be_too_narrow(self) -> None:
+        frame = HudFrame([[Pane(Text("left")), Pane(Text("right"), width=10)], Pane(Text("below"))])
+        plain, _ = _render(frame, width=40)
+        lines = plain.splitlines()
+
+        assert "│" not in plain and lines[1].startswith("║ left") and lines[3].startswith("║ right")
+        assert all(cell_len(line) == 40 for line in lines)
 
     def test_border_runs_are_merged(self) -> None:
         """One segment per cell costs a console write each on conhost."""

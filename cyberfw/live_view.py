@@ -180,7 +180,10 @@ class PipelineLiveView:
     def __rich_console__(self, console: Console, options: ConsoleOptions) -> RenderResult:
         # In a terminal, keep the frame within the window: ``Live`` crops what
         # does not fit to an ellipsis, so the findings tail gives way first.
-        yield self.render(height=options.size.height if console.is_terminal else None)
+        # Once settled the frame is the one left in scrollback, printed in
+        # full when ``Live`` stops, so it keeps every finding.
+        fit = console.is_terminal and not self._settled
+        yield self.render(height=options.size.height if fit else None)
 
     def render(self, height: int | None = None) -> RenderableType:
         """The stages and the latest findings in one frame; the stage pips ride

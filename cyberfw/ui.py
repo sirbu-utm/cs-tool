@@ -360,14 +360,23 @@ class Masthead:
         if self.subtitle:
             bottom.append(f"   {self.subtitle}", style="accent")
         issues = attention(self.states)
-        if issues.plain and options.max_width >= 100:
+        width = options.max_width
+        if issues.plain and width >= 100:
             top = join([top, issues])
-        grid = Table.grid(padding=(0, 2))
-        for _ in range(4):
-            grid.add_column(no_wrap=True)
-        rule = Text("│", style="muted")
-        grid.add_row(cs[0], rule, utm[0], top)
-        grid.add_row(cs[1], rule, utm[1], bottom)
+        # The art is never cut: drop UTM, then the wordmark, as the window
+        # narrows; the readout comes last and wraps rather than lose a word.
+        art = [cs, [Text("│", style="muted")] * 2, utm]
+        while True:
+            grid = Table.grid(padding=(0, 2))
+            for _ in art:
+                grid.add_column(no_wrap=True)
+            grid.add_column()
+            grid.add_row(*(column[0] for column in art), top)
+            grid.add_row(*(column[1] for column in art), bottom)
+            natural = Measurement.get(console, options.update_width(10_000), grid).maximum
+            if not art or natural <= width:
+                break
+            art = art[:-2]
         yield grid
         yield EdgeRule("▄", progress=phase(progress, 0.2, 0.75))
 
