@@ -32,6 +32,10 @@ nuclei-templates/
 .env
 config.local.yaml
 
+# Telegram bot runtime state (scan history DB)
+*.sqlite3
+bot-scans.sqlite3
+
 # Local handoff / scratch files
 PROGRESS.md
 test_script

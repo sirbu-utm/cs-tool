@@ -1,0 +1,6 @@
+# Runtime dependencies for cyberfw_bot.
+# The bot drives the `cyberfw` CLI as a subprocess, so CS-TOOL itself is not
+# imported and is not listed here — install and configure it separately
+# (`uv tool install --editable .` in the repo root, or point CYBERFW_CMD at it).
+python-telegram-bot>=21,<22
+python-dotenv>=1.0
