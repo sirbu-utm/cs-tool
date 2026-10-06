@@ -21,7 +21,6 @@ import hashlib
 import html
 import math
 import re
-import zlib
 from collections import Counter
 from collections.abc import Iterable
 from dataclasses import dataclass, field
@@ -69,20 +68,6 @@ _MAJOR = frozenset({"critical", "high", "medium"})
 #: Record kinds whose target names a host. A gitleaks ``secret`` names a file,
 #: and ``hostname_of("src/app.py")`` would invent a host called ``src``.
 _HOST_KINDS = frozenset({"host", "port", "http", "fuzz", "vuln", "screenshot", "scan"})
-
-#: Fixed colour per registered tool, so a tool looks the same in every report.
-_TOOL_COLORS = {
-    "subfinder": "#2ec5d5",
-    "naabu": "#9b7bff",
-    "rustscan": "#c084fc",
-    "httpx": "#2ed573",
-    "nuclei": "#ff6bcb",
-    "ffuf": "#ffb547",
-    "gowitness": "#4d9bff",
-    "gitleaks": "#a3e635",
-}
-#: Picked by name hash for a tool the map does not know.
-_FALLBACK_COLORS = ("#38bdf8", "#f472b6", "#facc15", "#34d399", "#fb923c", "#818cf8")
 
 #: Caps that keep a huge scan from building a page the browser chokes on;
 #: the record table always lists everything.
@@ -880,10 +865,8 @@ def _tool_label(tool: str) -> str:
 
 
 def _tool_color(tool: str) -> str:
-    return (
-        _TOOL_COLORS.get(tool)
-        or _FALLBACK_COLORS[zlib.crc32(tool.encode("utf-8")) % len(_FALLBACK_COLORS)]
-    )
+    # Austere report: tools are not colour-coded; one neutral grey, theme-aware.
+    return "var(--muted)"
 
 
 def _link(target: str) -> str:
@@ -1176,37 +1159,43 @@ _CSP = (
     "base-uri 'none'; form-action 'none'"
 )
 
-#: Light palette, applied for ``prefers-color-scheme: light``, the theme toggle and print.
-_LIGHT = """
+#: Austere palettes: black on white by default. Grayscale everywhere except
+#: red (critical/high findings, secrets, failures) and amber (medium, skipped).
+_LIGHTVARS = """
   color-scheme: light;
-  --bg: #ffffff; --bg-2: #f5f7f9; --panel: #ffffff; --panel-2: #fafbfc;
-  --line: rgba(17, 24, 39, .10); --line-2: rgba(17, 24, 39, .20);
-  --text: #141a22; --muted: #5a6573; --dim: #8a929c;
-  --accent: #2f55c7; --accent-2: #1f7f93; --violet: #6d4fe0;
-  --ok: #1f8a5b; --warn: #946800; --err: #c52a45;
-  --critical: #c42a47; --high: #b4591b; --medium: #8f6f0c; --low: #1f7d8e; --info: #2f66b8; --unknown: #6b7685;
+  --bg: #ffffff; --bg-2: #f6f6f6; --panel: #ffffff; --panel-2: #fafafa;
+  --line: rgba(0, 0, 0, .14); --line-2: rgba(0, 0, 0, .26);
+  --text: #121212; --muted: #555555; --dim: #8a8a8a;
+  --accent: #121212; --accent-2: #666666; --violet: #666666;
+  --ok: #555555; --warn: #a66b00; --err: #b00020;
+  --critical: #b00020; --high: #c0392b; --medium: #a66b00; --low: #6a6a6a; --info: #6a6a6a; --unknown: #8a8a8a;
+"""
+
+_DARK = """
+  color-scheme: dark;
+  --bg: #121212; --bg-2: #171717; --panel: #171717; --panel-2: #1c1c1c;
+  --line: rgba(255, 255, 255, .15); --line-2: rgba(255, 255, 255, .28);
+  --text: #f0f0f0; --muted: #a6a6a6; --dim: #767676;
+  --accent: #f0f0f0; --accent-2: #9a9a9a; --violet: #9a9a9a;
+  --ok: #a6a6a6; --warn: #e0a84e; --err: #ff6b76;
+  --critical: #ff6b76; --high: #ff8a84; --medium: #e0a84e; --low: #9a9a9a; --info: #9a9a9a; --unknown: #868686;
 """
 
 _CSS = (
     """
-:root {
-  color-scheme: dark;
-  --bg: #14181e; --bg-2: #181d24; --panel: #181d24; --panel-2: #1d232b;
-  --line: rgba(255, 255, 255, .10); --line-2: rgba(255, 255, 255, .20);
-  --text: #e6ebf1; --muted: #98a2b1; --dim: #697181;
-  --accent: #7f9cff; --accent-2: #5fb0c2; --violet: #a98bff;
-  --ok: #4fb286; --warn: #d4a24a; --err: #e26178;
-  --critical: #e26178; --high: #d98a52; --medium: #d2b256; --low: #57b0c2; --info: #7f9cff; --unknown: #98a2b1;
+:root {"""
+    + _LIGHTVARS
+    + """
   --sans: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
   --mono: ui-monospace, "JetBrains Mono", "Cascadia Code", SFMono-Regular, Menlo, Consolas, monospace;
   --radius: 8px;
   --ease: ease;
 }
-@media (prefers-color-scheme: light) { :root:not([data-theme="dark"]) {"""
-    + _LIGHT
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) {"""
+    + _DARK
     + """} }
-:root[data-theme="light"] {"""
-    + _LIGHT
+:root[data-theme="dark"] {"""
+    + _DARK
     + """}
 
 * { box-sizing: border-box; }
@@ -1220,8 +1209,7 @@ a:hover { text-decoration: underline; }
 /* tone classes: components read var(--tone) */
 .sev-critical { --tone: var(--critical); } .sev-high { --tone: var(--high); } .sev-medium { --tone: var(--medium); }
 .sev-low { --tone: var(--low); } .sev-info { --tone: var(--info); } .sev-unknown { --tone: var(--unknown); }
-.http-1xx { --tone: var(--muted); } .http-2xx { --tone: var(--ok); } .http-3xx { --tone: var(--accent-2); }
-.http-4xx { --tone: var(--warn); } .http-5xx { --tone: var(--err); }
+.http-1xx, .http-2xx, .http-3xx, .http-4xx, .http-5xx { --tone: var(--muted); }
 .st-ok, .t-ok { --tone: var(--ok); } .st-failed, .t-err { --tone: var(--err); } .st-skipped, .t-warn { --tone: var(--warn); }
 .t-info { --tone: var(--accent-2); } .t-violet { --tone: var(--violet); }
 
@@ -1441,7 +1429,7 @@ details.more summary:hover { color: var(--text); border-color: var(--accent); }
 }
 @media print {
   :root, :root[data-theme] {"""
-    + _LIGHT
+    + _LIGHTVARS
     + """}
   body { background: #fff; }
   .nav, .toolbar, .lightbox, .pkt { display: none !important; }
@@ -1464,7 +1452,7 @@ _PAGE_TEMPLATE = (
 <meta charset="utf-8">
 <meta http-equiv="Content-Security-Policy" content="{csp}">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="color-scheme" content="dark light">
+<meta name="color-scheme" content="light dark">
 <title>{title}</title>
 <script>{head_js}</script>
 <style>{css}</style>
