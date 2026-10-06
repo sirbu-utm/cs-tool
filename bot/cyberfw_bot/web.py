@@ -54,6 +54,22 @@ def _sid(request: web.Request) -> str:
     return sid
 
 
+def _check_origin(request: web.Request) -> None:
+    """Refuse cross-site state-changing requests (CSRF).
+
+    The dashboard has no auth and binds to localhost, so while the SSH tunnel is
+    up a page on any site the operator visits could POST here. Same-origin fetches
+    from our own page send an ``Origin`` that matches ``Host``; a forged one does
+    not, and a browser sends ``Origin`` on every cross-site POST.
+    """
+    origin = request.headers.get("Origin")
+    if origin is None:
+        return  # curl / same-origin navigations carry no Origin — allowed
+    host = request.headers.get("Host", "")
+    if origin not in {f"http://{host}", f"https://{host}"}:
+        raise web.HTTPForbidden(text="cross-origin request refused")
+
+
 def _tail(path: Path | None, limit: int = _LOG_TAIL_BYTES) -> str:
     if path is None:
         return ""
@@ -111,6 +127,7 @@ async def _report(request: web.Request) -> web.StreamResponse:
 
 
 async def _trigger(request: web.Request) -> web.Response:
+    _check_origin(request)
     service: ScanService = request.app["service"]
     try:
         body = await request.json()
@@ -126,6 +143,7 @@ async def _trigger(request: web.Request) -> web.Response:
 
 
 async def _cancel(request: web.Request) -> web.Response:
+    _check_origin(request)
     service: ScanService = request.app["service"]
     cancelled = await service.cancel(_sid(request))
     return web.json_response({"cancelled": cancelled})
@@ -155,6 +173,15 @@ async def start(config: BotConfig, store: ScanStore, service: ScanService) -> we
     """Start the dashboard on localhost. Returns the runner, or None if disabled."""
     if not config.web_port:
         LOG.info("web UI disabled (WEB_PORT=0)")
+        return None
+    if config.web_host not in {"127.0.0.1", "::1", "localhost"}:
+        # The dashboard has no auth of its own; binding it anywhere but loopback
+        # would expose scan control to the network. Refuse rather than do that.
+        LOG.error(
+            "web UI NOT started: WEB_HOST=%s is not loopback and the dashboard has "
+            "no authentication. Keep WEB_HOST=127.0.0.1 and reach it over an SSH tunnel.",
+            config.web_host,
+        )
         return None
     runner = web.AppRunner(build_web_app(config, store, service))
     await runner.setup()
