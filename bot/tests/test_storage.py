@@ -83,6 +83,16 @@ async def test_reclaim_orphans_marks_unfinished_as_failed_and_returns_them(tmp_p
         assert scan.finished_at is not None
 
 
+async def test_recent_lists_scans_across_all_users(tmp_path: Path) -> None:
+    store = await _store(tmp_path)
+    await store.create(Scan(id="a", user_id=1, chat_id=7, target="a.com"))
+    await store.create(Scan(id="b", user_id=2, chat_id=7, target="b.com"))
+
+    recent = await store.recent(limit=10)
+
+    assert {s.id for s in recent} == {"a", "b"}  # not scoped to one user
+
+
 async def test_reclaim_orphans_leaves_finished_scans_untouched(tmp_path: Path) -> None:
     store = await _store(tmp_path)
     await store.create(Scan(id="d1", user_id=1, chat_id=7, target="c.com"))

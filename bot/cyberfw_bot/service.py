@@ -47,6 +47,8 @@ class ScanService:
         self._semaphore = asyncio.Semaphore(config.max_concurrent)
         #: Strong refs to in-flight tasks so they are not garbage-collected.
         self._tasks: set[asyncio.Task[None]] = set()
+        #: In-flight tasks by scan id, so a specific scan can be cancelled.
+        self._tasks_by_id: dict[str, asyncio.Task[None]] = {}
 
     def authorize(self, user_id: int) -> None:
         """Raise unless ``user_id`` may run scans (empty allow-list = nobody)."""
@@ -64,6 +66,19 @@ class ScanService:
         delivered later through ``notify``.
         """
         self.authorize(user_id)
+        return await self._launch(user_id=user_id, chat_id=chat_id, raw_target=raw_target, notify=notify)
+
+    async def trigger(self, raw_target: str, *, notify: Notifier | None = None) -> Scan:
+        """Start a scan without the Telegram allow-list.
+
+        For the local web UI, which is reachable only by someone already trusted
+        on the host (it binds to localhost). Target validation still applies.
+        """
+        return await self._launch(user_id=0, chat_id=0, raw_target=raw_target, notify=notify)
+
+    async def _launch(
+        self, *, user_id: int, chat_id: int, raw_target: str, notify: Notifier | None
+    ) -> Scan:
         target = validate_target(raw_target, block_private=self._config.block_private)
 
         scan = Scan(
@@ -79,17 +94,49 @@ class ScanService:
 
         task = asyncio.create_task(self._run(scan, notify))
         self._tasks.add(task)
-        task.add_done_callback(self._tasks.discard)
+        self._tasks_by_id[scan.id] = task
+
+        def _finished(done: asyncio.Task[None]) -> None:
+            self._tasks.discard(done)
+            self._tasks_by_id.pop(scan.id, None)
+
+        task.add_done_callback(_finished)
         return scan
 
-    async def _run(self, scan: Scan, notify: Notifier) -> None:
-        async with self._semaphore:
-            await self._store.mark_running(scan.id)
-            scan.status = "running"
-            LOG.info("running scan %s target=%s", scan.id, scan.target)
-            outcome = await self._runner.run(scan.target, session=f"bot-{scan.id}")
-            await self._settle(scan, outcome)
-            LOG.info("scan %s %s exit=%s", scan.id, scan.status, scan.exit_code)
+    async def cancel(self, scan_id: str) -> bool:
+        """Cancel a queued or running scan. Returns whether one was cancelled."""
+        task = self._tasks_by_id.get(scan_id)
+        if task is None or task.done():
+            return False
+        task.cancel()
+        return True
+
+    async def _run(self, scan: Scan, notify: Notifier | None) -> None:
+        try:
+            async with self._semaphore:
+                await self._store.mark_running(scan.id)
+                scan.status = "running"
+                LOG.info("running scan %s target=%s", scan.id, scan.target)
+                outcome = await self._runner.run(scan.target, session=f"bot-{scan.id}")
+                await self._settle(scan, outcome)
+                LOG.info("scan %s %s exit=%s", scan.id, scan.status, scan.exit_code)
+        except asyncio.CancelledError:
+            scan.status = "cancelled"
+            scan.error = "cancelled by operator"
+            scan.finished_at = datetime.now(timezone.utc)
+            await self._store.finish(
+                scan.id, status="cancelled", exit_code=None, error=scan.error,
+                report_json=None, report_html=None, summary=None,
+            )
+            LOG.info("cancelled scan %s", scan.id)
+            await self._deliver(scan, notify)
+            raise
+        await self._deliver(scan, notify)
+
+    @staticmethod
+    async def _deliver(scan: Scan, notify: Notifier | None) -> None:
+        if notify is None:
+            return
         try:
             await notify(scan)
         except Exception:  # noqa: BLE001 - a delivery failure must not crash the worker

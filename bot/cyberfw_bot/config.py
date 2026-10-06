@@ -71,6 +71,8 @@ class BotConfig:
     max_findings_in_message: int = 10
     extra_pipeline_args: tuple[str, ...] = field(default_factory=tuple)
     log_path: Path | None = None
+    web_host: str = "127.0.0.1"
+    web_port: int = 8787
 
     @property
     def reports_dir(self) -> Path:
@@ -111,4 +113,6 @@ def load_config(environ: dict[str, str] | None = None) -> BotConfig:
         max_findings_in_message=int(environ.get("BOT_MAX_FINDINGS", "10")),
         extra_pipeline_args=tuple(environ.get("BOT_EXTRA_PIPELINE_ARGS", "").split()),
         log_path=log_path,
+        web_host=environ.get("WEB_HOST", "127.0.0.1").strip() or "127.0.0.1",
+        web_port=int(environ.get("WEB_PORT", "8787") or 0),
     )

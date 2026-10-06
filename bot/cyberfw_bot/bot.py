@@ -144,8 +144,8 @@ def build_application(config: BotConfig, store: ScanStore, service: ScanService)
     application.add_handler(MessageHandler(filters.COMMAND, unknown_cmd))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_fallback))
 
-    async def _post_init(_app: Application) -> None:
-        """Ready the store, then settle scans a crash/restart left in limbo.
+    async def _post_init(app: Application) -> None:
+        """Ready the store, settle scans a crash/restart left in limbo, start the UI.
 
         A scan still ``queued``/``running`` at startup cannot be live (its task
         died with the previous process), so mark it failed and tell its chat —
@@ -156,8 +156,18 @@ def build_application(config: BotConfig, store: ScanStore, service: ScanService)
             "interrupted by a bot restart — please resend the scan."
         ):
             await notify(scan)
+        # Lazy import so the bot module does not hard-depend on aiohttp.
+        from cyberfw_bot import web
+
+        app.bot_data["web_runner"] = await web.start(config, store, service)
+
+    async def _post_shutdown(app: Application) -> None:
+        runner = app.bot_data.get("web_runner")
+        if runner is not None:
+            await runner.cleanup()
 
     application.post_init = _post_init
+    application.post_shutdown = _post_shutdown
     return application
 
 

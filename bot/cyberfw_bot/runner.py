@@ -99,6 +99,11 @@ class CyberfwRunner:
             timed_out = True
             await self._terminate(proc)
             stdout, stderr = b"", b"scan exceeded BOT_SCAN_TIMEOUT and was stopped"
+        except asyncio.CancelledError:
+            # The scan was cancelled (e.g. from the web UI) — stop the subprocess
+            # it launched before the cancellation propagates.
+            await self._terminate(proc)
+            raise
 
         session_dir = self._config.reports_dir / session
         report_json = session_dir / "report.json"

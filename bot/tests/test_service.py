@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
 
@@ -97,6 +98,63 @@ async def test_failed_scan_is_recorded_and_notified(tmp_path: Path) -> None:
     assert delivered[0].status == "failed"
     persisted = await store.get(queued.id)
     assert persisted is not None and persisted.status == "failed" and persisted.error
+
+
+class _BlockingRunner:
+    """Blocks inside run() until cancelled, so a scan stays 'running'."""
+
+    def __init__(self) -> None:
+        self.started = asyncio.Event()
+        self.calls: list[tuple[str, str]] = []
+
+    async def run(self, target: str, session: str) -> ScanOutcome:
+        self.calls.append((target, session))
+        self.started.set()
+        await asyncio.sleep(3600)
+        return ScanOutcome(0, False, None, None, "", "")  # pragma: no cover
+
+
+async def test_trigger_runs_a_scan_without_the_allow_list(tmp_path: Path) -> None:
+    runner = _FakeRunner(tmp_path)
+    service, store = await _service(tmp_path, runner)
+
+    scan = await service.trigger("example.com")
+    assert scan.status == "queued"
+    await service.wait_for_all()
+
+    persisted = await store.get(scan.id)
+    assert persisted is not None and persisted.status == "done"
+    assert runner.calls == [("example.com", f"bot-{scan.id}")]
+
+
+async def test_trigger_still_validates_the_target(tmp_path: Path) -> None:
+    runner = _FakeRunner(tmp_path)
+    service, _ = await _service(tmp_path, runner)
+
+    with pytest.raises(ValidationError):
+        await service.trigger("example.com; id")
+    assert runner.calls == []
+
+
+async def test_cancel_stops_a_running_scan(tmp_path: Path) -> None:
+    runner = _BlockingRunner()
+    service, store = await _service(tmp_path, runner)  # type: ignore[arg-type]
+
+    scan = await service.trigger("example.com")
+    await asyncio.wait_for(runner.started.wait(), 2)
+
+    assert await service.cancel(scan.id) is True
+    await service.wait_for_all()
+
+    persisted = await store.get(scan.id)
+    assert persisted is not None and persisted.status == "cancelled"
+
+
+async def test_cancel_unknown_scan_is_a_no_op(tmp_path: Path) -> None:
+    runner = _FakeRunner(tmp_path)
+    service, _ = await _service(tmp_path, runner)
+
+    assert await service.cancel("does-not-exist") is False
 
 
 async def _noop(_scan: Scan) -> None:

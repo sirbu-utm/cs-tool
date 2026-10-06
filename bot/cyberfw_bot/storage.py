@@ -170,6 +170,17 @@ class ScanStore:
             ).fetchall()
         return [_row_to_scan(row) for row in rows]
 
+    async def recent(self, limit: int = 50) -> list[Scan]:
+        """Newest scans across every user — the web UI's view of all activity."""
+        return await asyncio.to_thread(self._recent_all_sync, limit)
+
+    def _recent_all_sync(self, limit: int) -> list[Scan]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM scans ORDER BY created_at DESC LIMIT ?", (limit,)
+            ).fetchall()
+        return [_row_to_scan(row) for row in rows]
+
 
 # -- (de)serialisation ----------------------------------------------------------
 def _iso(moment: datetime | None) -> str | None:
