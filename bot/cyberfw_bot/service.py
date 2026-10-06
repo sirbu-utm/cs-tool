@@ -9,6 +9,7 @@ testable with a fake runner and an in-memory notifier.
 from __future__ import annotations
 
 import asyncio
+import logging
 import secrets
 from collections.abc import Awaitable, Callable
 from datetime import datetime, timezone
@@ -21,6 +22,8 @@ from cyberfw_bot.storage import ScanStore
 from cyberfw_bot.validation import validate_target
 
 __all__ = ["ScanService", "AuthorizationError"]
+
+LOG = logging.getLogger("cyberfw_bot")
 
 Notifier = Callable[[Scan], Awaitable[None]]
 
@@ -72,6 +75,7 @@ class ScanService:
             created_at=datetime.now(timezone.utc),
         )
         await self._store.create(scan)
+        LOG.info("queued scan %s target=%s user=%s", scan.id, scan.target, user_id)
 
         task = asyncio.create_task(self._run(scan, notify))
         self._tasks.add(task)
@@ -82,8 +86,10 @@ class ScanService:
         async with self._semaphore:
             await self._store.mark_running(scan.id)
             scan.status = "running"
+            LOG.info("running scan %s target=%s", scan.id, scan.target)
             outcome = await self._runner.run(scan.target, session=f"bot-{scan.id}")
             await self._settle(scan, outcome)
+            LOG.info("scan %s %s exit=%s", scan.id, scan.status, scan.exit_code)
         try:
             await notify(scan)
         except Exception:  # noqa: BLE001 - a delivery failure must not crash the worker

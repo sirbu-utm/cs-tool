@@ -35,6 +35,7 @@ class ScanOutcome:
     report_html: Path | None
     stdout_tail: str
     stderr_tail: str
+    log_path: Path | None = None
 
 
 class CyberfwRunner:
@@ -102,6 +103,7 @@ class CyberfwRunner:
         session_dir = self._config.reports_dir / session
         report_json = session_dir / "report.json"
         report_html = session_dir / "report.html"
+        log_path = _write_scan_log(session_dir, stdout, stderr)
         return ScanOutcome(
             exit_code=proc.returncode if proc.returncode is not None else -1,
             timed_out=timed_out,
@@ -109,6 +111,7 @@ class CyberfwRunner:
             report_html=report_html if report_html.is_file() else None,
             stdout_tail=_decode_tail(stdout),
             stderr_tail=_decode_tail(stderr),
+            log_path=log_path,
         )
 
     @staticmethod
@@ -128,6 +131,26 @@ class CyberfwRunner:
             except ProcessLookupError:
                 pass
             await proc.wait()
+
+
+def _write_scan_log(session_dir: Path, stdout: bytes, stderr: bytes) -> Path | None:
+    """Persist the full tool output next to the report, for the UI and triage.
+
+    Best-effort: a scan is not failed just because its log could not be written.
+    """
+    try:
+        session_dir.mkdir(parents=True, exist_ok=True)
+        log_path = session_dir / "scan.log"
+        with open(log_path, "wb") as handle:
+            handle.write(stdout)
+            if stderr:
+                if stdout and not stdout.endswith(b"\n"):
+                    handle.write(b"\n")
+                handle.write(b"--- stderr ---\n")
+                handle.write(stderr)
+        return log_path
+    except OSError:
+        return None
 
 
 def _decode_tail(blob: bytes) -> str:

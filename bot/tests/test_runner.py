@@ -43,6 +43,25 @@ async def test_run_locates_the_report_the_cli_wrote(tmp_path: Path) -> None:
     assert outcome.report_html is not None and outcome.report_html.is_file()
 
 
+_PRINTS_OUTPUT = (
+    "import sys\n"
+    "print('scanning example.com')\n"
+    "print('a tool warning', file=sys.stderr)\n"
+)
+
+
+async def test_run_writes_the_tool_output_to_a_scan_log(tmp_path: Path) -> None:
+    config = make_config(tmp_path, cyberfw_cmd=_fake_cyberfw(tmp_path, body=_PRINTS_OUTPUT))
+    outcome = await CyberfwRunner(config).run("example.com", session="bot-log")
+
+    log = tmp_path / "reports" / "bot-log" / "scan.log"
+    assert outcome.log_path == log
+    assert log.is_file()
+    text = log.read_text(encoding="utf-8")
+    assert "scanning example.com" in text  # stdout
+    assert "a tool warning" in text  # stderr
+
+
 async def test_non_zero_exit_without_a_report_is_reported(tmp_path: Path) -> None:
     config = make_config(tmp_path, cyberfw_cmd=_fake_cyberfw(tmp_path, body="import sys\nsys.exit(2)\n"))
     outcome = await CyberfwRunner(config).run("example.com", session="bot-ef01")

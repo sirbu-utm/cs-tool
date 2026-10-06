@@ -70,6 +70,7 @@ class BotConfig:
     block_private: bool = True
     max_findings_in_message: int = 10
     extra_pipeline_args: tuple[str, ...] = field(default_factory=tuple)
+    log_path: Path | None = None
 
     @property
     def reports_dir(self) -> Path:
@@ -94,6 +95,7 @@ def load_config(environ: dict[str, str] | None = None) -> BotConfig:
 
     cmd = tuple(environ.get("CYBERFW_CMD", "cyberfw").split()) or ("cyberfw",)
     db_path = Path(environ.get("BOT_DB", workspace / "bot-scans.sqlite3")).expanduser()
+    log_path = Path(environ.get("BOT_LOG", workspace / "logs" / "bot.log")).expanduser()
 
     return BotConfig(
         token=token,
@@ -108,4 +110,5 @@ def load_config(environ: dict[str, str] | None = None) -> BotConfig:
         block_private=environ.get("BOT_BLOCK_PRIVATE", "true").lower() not in {"0", "false", "no"},
         max_findings_in_message=int(environ.get("BOT_MAX_FINDINGS", "10")),
         extra_pipeline_args=tuple(environ.get("BOT_EXTRA_PIPELINE_ARGS", "").split()),
+        log_path=log_path,
     )
