@@ -32,6 +32,17 @@ nuclei-templates/
 .env
 config.local.yaml
 
+# Secrets and keys — never commit (this is a security tool)
+*.key
+*.pem
+*.pfx
+*.p12
+id_rsa
+id_rsa.*
+id_ed25519
+id_ed25519.*
+*.ovpn
+
 # Telegram bot runtime state (scan history DB)
 *.sqlite3
 bot-scans.sqlite3
