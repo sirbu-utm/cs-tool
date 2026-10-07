@@ -28,6 +28,8 @@ LOG = logging.getLogger("cyberfw_bot")
 #: Scan ids are short hex tokens; this also stops a crafted id from walking the
 #: filesystem when it is used to build a report/log path.
 _SID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+#: A screenshot file name: any single path segment (no "/", no "..").
+_NAME_RE = re.compile(r"^[^/]{1,255}$")
 _LOG_TAIL_BYTES = 200_000
 
 
@@ -126,6 +128,17 @@ async def _report(request: web.Request) -> web.StreamResponse:
     return web.FileResponse(path)
 
 
+async def _screenshot(request: web.Request) -> web.StreamResponse:
+    config: BotConfig = request.app["config"]
+    name = request.match_info["name"]
+    if ".." in name or not _NAME_RE.match(name):
+        raise web.HTTPBadRequest(text="bad name")
+    path = config.reports_dir / f"bot-{_sid(request)}" / "screenshots" / name
+    if not path.is_file():
+        raise web.HTTPNotFound()
+    return web.FileResponse(path)
+
+
 async def _trigger(request: web.Request) -> web.Response:
     _check_origin(request)
     service: ScanService = request.app["service"]
@@ -162,6 +175,7 @@ def build_web_app(config: BotConfig, store: ScanStore, service: ScanService) -> 
             web.get("/api/scans/{sid}", _scan_detail),
             web.get("/api/scans/{sid}/log", _scan_log),
             web.get("/api/scans/{sid}/report", _report),
+            web.get("/api/scans/{sid}/screenshots/{name}", _screenshot),
             web.post("/api/scans/{sid}/cancel", _cancel),
             web.get("/api/log", _bot_log),
         ]
@@ -198,35 +212,42 @@ _DASHBOARD = r"""<!DOCTYPE html>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>cyberfw monitor</title>
 <style>
-  :root { --red: #b00020; --amber: #a66b00; --line: #d9d9d9; --muted: #555; }
+  :root {
+    --bg: #fff; --fg: #121212; --panel: #fafafa; --line: #d9d9d9; --muted: #555; --sel: #f3f3f3;
+    --red: #b00020; --amber: #a66b00;
+  }
+  :root[data-theme="dark"] {
+    --bg: #121212; --fg: #f0f0f0; --panel: #1b1b1b; --line: #333; --muted: #a6a6a6; --sel: #242424;
+    --red: #ff6b76; --amber: #e0a84e;
+  }
   * { box-sizing: border-box; }
-  body { margin: 0; background: #fff; color: #121212; font: 14px/1.5 system-ui, sans-serif; }
+  body { margin: 0; background: var(--bg); color: var(--fg); font: 14px/1.5 system-ui, sans-serif; }
   code, .mono, pre, td.t { font-family: ui-monospace, Consolas, monospace; }
   header { border-bottom: 1px solid var(--line); padding: 14px 20px; display: flex; align-items: baseline; gap: 12px; }
   header h1 { margin: 0; font-size: 16px; font-weight: 600; }
   header .dim { color: var(--muted); font: 12px ui-monospace, monospace; }
+  header #theme { margin-left: auto; align-self: center; }
   main { max-width: 1100px; margin: 0 auto; padding: 20px; }
   .bar { display: flex; gap: 8px; margin-bottom: 18px; }
-  .bar input { flex: 1; padding: 8px 10px; border: 1px solid var(--line); border-radius: 6px; font: 13px ui-monospace, monospace; }
-  button { padding: 7px 12px; border: 1px solid #bbb; border-radius: 6px; background: #fff; cursor: pointer; font: 13px system-ui; color: #121212; }
-  button:hover { border-color: #121212; }
-  button.danger { color: var(--red); border-color: #e3b7bf; }
+  .bar input { flex: 1; padding: 8px 10px; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); color: var(--fg); font: 13px ui-monospace, monospace; }
+  button { padding: 7px 12px; border: 1px solid var(--line); border-radius: 6px; background: var(--panel); cursor: pointer; font: 13px system-ui; color: var(--fg); }
+  button:hover { border-color: var(--fg); }
+  button.danger { color: var(--red); }
   table { width: 100%; border-collapse: collapse; }
   th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--line); font-size: 13px; vertical-align: top; }
   th { color: var(--muted); font-weight: 600; font-size: 11px; text-transform: uppercase; letter-spacing: .04em; }
-  tr.sel td { background: #f3f3f3; }
-  .st { font: 11px ui-monospace, monospace; padding: 1px 7px; border: 1px solid #ccc; border-radius: 4px; text-transform: uppercase; }
-  .st.running, .st.queued { border-color: #bbb; }
-  .st.failed, .st.cancelled { color: var(--red); border-color: #e3b7bf; }
+  tr.sel td { background: var(--sel); }
+  .st { font: 11px ui-monospace, monospace; padding: 1px 7px; border: 1px solid var(--line); border-radius: 4px; text-transform: uppercase; }
+  .st.failed, .st.cancelled { color: var(--red); }
   .sev { font: 11px ui-monospace, monospace; }
   .sev .crit, .sev .high { color: var(--red); font-weight: 700; }
   .sev .med { color: var(--amber); font-weight: 700; }
   .acts { display: flex; gap: 6px; flex-wrap: wrap; }
   .acts a, .acts button { font-size: 12px; padding: 3px 8px; }
-  .acts a { text-decoration: none; color: #121212; border: 1px solid #bbb; border-radius: 6px; }
-  .acts a:hover { border-color: #121212; }
+  .acts a { text-decoration: none; color: var(--fg); border: 1px solid var(--line); border-radius: 6px; }
+  .acts a:hover { border-color: var(--fg); }
   h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); margin: 26px 0 8px; }
-  pre { margin: 0; padding: 12px; background: #fafafa; border: 1px solid var(--line); border-radius: 6px; max-height: 320px; overflow: auto; font-size: 12px; white-space: pre-wrap; word-break: break-word; }
+  pre { margin: 0; padding: 12px; background: var(--panel); border: 1px solid var(--line); border-radius: 6px; max-height: 320px; overflow: auto; font-size: 12px; white-space: pre-wrap; word-break: break-word; }
   .flex { display: flex; gap: 20px; align-items: flex-start; }
   .flex > div { flex: 1; min-width: 0; }
   .empty { color: var(--muted); padding: 16px 0; }
@@ -234,7 +255,7 @@ _DASHBOARD = r"""<!DOCTYPE html>
 </style>
 </head>
 <body>
-<header><h1>cyberfw monitor</h1><span class="dim" id="clock"></span></header>
+<header><h1>cyberfw monitor</h1><span class="dim" id="clock"></span><button id="theme" type="button" title="Toggle light/dark">Theme</button></header>
 <main>
   <div class="bar">
     <input id="target" placeholder="scan a target you are authorised to test — domain, http(s) URL or IP" autocomplete="off">
@@ -261,6 +282,7 @@ _DASHBOARD = r"""<!DOCTYPE html>
 <script>
 const $ = (id) => document.getElementById(id);
 let selected = null;
+try { if (localStorage.getItem("cyberfw-ui-theme") === "dark") document.documentElement.setAttribute("data-theme", "dark"); } catch (e) {}
 
 function age(iso) {
   if (!iso) return "";
@@ -324,6 +346,12 @@ async function start() {
   $("target").value = "";
   refresh();
 }
+$("theme").addEventListener("click", () => {
+  const dark = document.documentElement.getAttribute("data-theme") === "dark";
+  if (dark) document.documentElement.removeAttribute("data-theme");
+  else document.documentElement.setAttribute("data-theme", "dark");
+  try { localStorage.setItem("cyberfw-ui-theme", dark ? "light" : "dark"); } catch (e) {}
+});
 $("go").addEventListener("click", start);
 $("target").addEventListener("keydown", (e) => { if (e.key === "Enter") start(); });
 refresh();
