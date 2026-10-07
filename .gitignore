@@ -51,6 +51,9 @@ bot-scans.sqlite3
 PROGRESS.md
 test_script
 
+# Personal SSH-tunnel launcher (holds the key path + server IP)
+/tunnel.bat
+
 # Техническое задание (не публикуется)
 тз/
 
