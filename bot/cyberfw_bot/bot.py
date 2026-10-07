@@ -160,7 +160,7 @@ def build_application(config: BotConfig, store: ScanStore, service: ScanService)
         # Lazy import so the bot module does not hard-depend on aiohttp.
         from cyberfw_bot import web
 
-        app.bot_data["web_runner"] = await web.start(config, store, service)
+        app.bot_data["web_runner"] = await web.start(config, store, service, app.bot)
 
     async def _post_shutdown(app: Application) -> None:
         runner = app.bot_data.get("web_runner")

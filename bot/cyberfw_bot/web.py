@@ -41,6 +41,7 @@ def _scan_dict(scan: Scan) -> dict[str, object]:
         "status": scan.status,
         "user_id": scan.user_id,
         "username": scan.username,
+        "chat_id": scan.chat_id,
         "created_at": scan.created_at.isoformat() if scan.created_at else None,
         "finished_at": scan.finished_at.isoformat() if scan.finished_at else None,
         "exit_code": scan.exit_code,
@@ -163,11 +164,39 @@ async def _cancel(request: web.Request) -> web.Response:
     return web.json_response({"cancelled": cancelled})
 
 
-def build_web_app(config: BotConfig, store: ScanStore, service: ScanService) -> web.Application:
+async def _message(request: web.Request) -> web.Response:
+    """Send a message to a chat as the bot (operator-initiated, from the UI)."""
+    _check_origin(request)
+    bot = request.app.get("bot")
+    if bot is None:
+        raise web.HTTPServiceUnavailable(text="messaging is unavailable")
+    try:
+        body = await request.json()
+    except Exception:  # noqa: BLE001 - a malformed body is just a bad request
+        raise web.HTTPBadRequest(text="expected a JSON body") from None
+    try:
+        chat_id = int(body.get("chat_id"))
+    except (TypeError, ValueError):
+        raise web.HTTPBadRequest(text="chat_id must be a number") from None
+    text = str(body.get("text", "")).strip()
+    if not text:
+        raise web.HTTPBadRequest(text="the message is empty")
+    try:
+        await bot.send_message(chat_id, text)
+    except Exception as exc:  # noqa: BLE001 - surface the Telegram error to the operator
+        raise web.HTTPBadGateway(text=f"Telegram refused: {exc}") from exc
+    LOG.info("operator messaged chat %s (%d chars)", chat_id, len(text))
+    return web.json_response({"sent": True})
+
+
+def build_web_app(
+    config: BotConfig, store: ScanStore, service: ScanService, bot: object | None = None
+) -> web.Application:
     app = web.Application()
     app["config"] = config
     app["store"] = store
     app["service"] = service
+    app["bot"] = bot
     app.add_routes(
         [
             web.get("/", _index),
@@ -178,13 +207,16 @@ def build_web_app(config: BotConfig, store: ScanStore, service: ScanService) -> 
             web.get("/api/scans/{sid}/report", _report),
             web.get("/api/scans/{sid}/screenshots/{name}", _screenshot),
             web.post("/api/scans/{sid}/cancel", _cancel),
+            web.post("/api/message", _message),
             web.get("/api/log", _bot_log),
         ]
     )
     return app
 
 
-async def start(config: BotConfig, store: ScanStore, service: ScanService) -> web.AppRunner | None:
+async def start(
+    config: BotConfig, store: ScanStore, service: ScanService, bot: object | None = None
+) -> web.AppRunner | None:
     """Start the dashboard on localhost. Returns the runner, or None if disabled."""
     if not config.web_port:
         LOG.info("web UI disabled (WEB_PORT=0)")
@@ -198,7 +230,7 @@ async def start(config: BotConfig, store: ScanStore, service: ScanService) -> we
             config.web_host,
         )
         return None
-    runner = web.AppRunner(build_web_app(config, store, service))
+    runner = web.AppRunner(build_web_app(config, store, service, bot))
     await runner.setup()
     site = web.TCPSite(runner, config.web_host, config.web_port)
     await site.start()
@@ -269,6 +301,14 @@ _DASHBOARD = r"""<!DOCTYPE html>
     <tbody id="rows"><tr><td colspan="7" class="empty">loading…</td></tr></tbody>
   </table>
 
+  <h2>Message a user (as the bot)</h2>
+  <div class="bar">
+    <input id="mchat" placeholder="chat id" style="flex: 0 0 150px" autocomplete="off">
+    <input id="mtext" placeholder="message — sent to that chat as the bot" autocomplete="off">
+    <button id="msend">Send</button>
+  </div>
+  <div id="mmsg"></div>
+
   <div class="flex">
     <div>
       <h2 id="logtitle">Scan output</h2>
@@ -316,6 +356,7 @@ async function refresh() {
       if (s.has_report)
         acts.push('<a href="api/scans/' + s.id + '/report" target="_blank">Report</a>');
       acts.push('<button onclick="showLog(\'' + s.id + '\')">Log</button>');
+      acts.push('<button onclick="msgTo(\'' + s.chat_id + '\')">Msg</button>');
       return '<tr class="' + (s.id === selected ? 'sel' : '') + '">'
         + '<td class="t">' + esc(s.id) + '</td>'
         + '<td class="t">' + esc(s.target) + '</td>'
@@ -356,6 +397,17 @@ $("theme").addEventListener("click", () => {
 });
 $("go").addEventListener("click", start);
 $("target").addEventListener("keydown", (e) => { if (e.key === "Enter") start(); });
+function msgTo(chat) { $("mchat").value = chat; $("mtext").focus(); }
+async function sendMsg() {
+  const chat_id = $("mchat").value.trim(), text = $("mtext").value.trim();
+  $("mmsg").textContent = ""; $("mmsg").className = "";
+  if (!chat_id || !text) return;
+  const r = await fetch("api/message", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ chat_id: Number(chat_id), text }) });
+  if (!r.ok) { $("mmsg").textContent = await r.text(); $("mmsg").className = "err"; }
+  else { $("mmsg").textContent = "sent to " + chat_id; $("mtext").value = ""; }
+}
+$("msend").addEventListener("click", sendMsg);
+$("mtext").addEventListener("keydown", (e) => { if (e.key === "Enter") sendMsg(); });
 refresh();
 setInterval(refresh, 2000);
 </script>
