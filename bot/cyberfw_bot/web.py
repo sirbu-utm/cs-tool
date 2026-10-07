@@ -40,6 +40,7 @@ def _scan_dict(scan: Scan) -> dict[str, object]:
         "target": scan.target,
         "status": scan.status,
         "user_id": scan.user_id,
+        "username": scan.username,
         "created_at": scan.created_at.isoformat() if scan.created_at else None,
         "finished_at": scan.finished_at.isoformat() if scan.finished_at else None,
         "exit_code": scan.exit_code,
@@ -264,8 +265,8 @@ _DASHBOARD = r"""<!DOCTYPE html>
   <div id="msg" class="err"></div>
 
   <table>
-    <thead><tr><th>id</th><th>target</th><th>status</th><th>findings</th><th>age</th><th>actions</th></tr></thead>
-    <tbody id="rows"><tr><td colspan="6" class="empty">loading…</td></tr></tbody>
+    <thead><tr><th>id</th><th>target</th><th>user</th><th>status</th><th>findings</th><th>age</th><th>actions</th></tr></thead>
+    <tbody id="rows"><tr><td colspan="7" class="empty">loading…</td></tr></tbody>
   </table>
 
   <div class="flex">
@@ -307,7 +308,7 @@ async function refresh() {
   try {
     const scans = await (await fetch("api/scans")).json();
     const rows = $("rows");
-    if (!scans.length) { rows.innerHTML = '<tr><td colspan="6" class="empty">no scans yet</td></tr>'; }
+    if (!scans.length) { rows.innerHTML = '<tr><td colspan="7" class="empty">no scans yet</td></tr>'; }
     else rows.innerHTML = scans.map((s) => {
       const acts = [];
       if (s.status === "queued" || s.status === "running")
@@ -318,6 +319,7 @@ async function refresh() {
       return '<tr class="' + (s.id === selected ? 'sel' : '') + '">'
         + '<td class="t">' + esc(s.id) + '</td>'
         + '<td class="t">' + esc(s.target) + '</td>'
+        + '<td class="t">' + esc(s.username || s.user_id) + '</td>'
         + '<td><span class="st ' + esc(s.status) + '">' + esc(s.status) + '</span></td>'
         + '<td>' + sevHtml(s.severity || {}) + '</td>'
         + '<td class="t">' + age(s.created_at) + '</td>'

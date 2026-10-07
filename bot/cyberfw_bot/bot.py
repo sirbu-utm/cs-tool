@@ -81,6 +81,7 @@ def build_application(config: BotConfig, store: ScanStore, service: ScanService)
                 chat_id=message.chat_id,
                 raw_target=raw_target,
                 notify=notify,
+                username=user.username or user.full_name,
             )
         except AuthorizationError as exc:
             await _reply(update, f"⛔ {exc}")

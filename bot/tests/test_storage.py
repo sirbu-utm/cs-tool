@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sqlite3
 from pathlib import Path
 
 import pytest
@@ -27,6 +28,41 @@ async def test_create_and_fetch(tmp_path: Path) -> None:
     assert scan is not None
     assert scan.status == "queued"
     assert scan.created_at is not None
+
+
+async def test_username_is_persisted(tmp_path: Path) -> None:
+    store = await _store(tmp_path)
+    await store.create(Scan(id="u1", user_id=42, chat_id=7, target="a.com", username="alice"))
+
+    scan = await store.get("u1")
+    assert scan is not None and scan.username == "alice"
+
+
+async def test_init_adds_the_username_column_to_an_old_db(tmp_path: Path) -> None:
+    """A DB created before the username column must gain it on init, keeping rows."""
+    path = tmp_path / "old.sqlite3"
+    con = sqlite3.connect(path)
+    # The original schema (everything except the username column added later).
+    con.execute(
+        "CREATE TABLE scans (id TEXT PRIMARY KEY, user_id INTEGER NOT NULL, "
+        "chat_id INTEGER NOT NULL, target TEXT NOT NULL, status TEXT NOT NULL, created_at TEXT NOT NULL, "
+        "finished_at TEXT, exit_code INTEGER, error TEXT, report_json TEXT, report_html TEXT, summary_json TEXT)"
+    )
+    con.execute(
+        "INSERT INTO scans (id, user_id, chat_id, target, status, created_at) "
+        "VALUES ('old1', 1, 7, 'old.com', 'done', '2026-01-01T00:00:00+00:00')"
+    )
+    con.commit()
+    con.close()
+
+    store = ScanStore(path)
+    await store.init()  # must ALTER TABLE to add username
+    await store.create(Scan(id="new1", user_id=2, chat_id=7, target="new.com", username="bob"))
+
+    old = await store.get("old1")
+    assert old is not None and old.username is None  # pre-existing row survives
+    new = await store.get("new1")
+    assert new is not None and new.username == "bob"
 
 
 async def test_finish_persists_summary(tmp_path: Path) -> None:

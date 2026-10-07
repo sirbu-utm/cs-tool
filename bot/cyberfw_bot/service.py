@@ -57,7 +57,15 @@ class ScanService:
                 "you are not authorised to use this bot. Ask the operator to add your Telegram id."
             )
 
-    async def submit(self, *, user_id: int, chat_id: int, raw_target: str, notify: Notifier) -> Scan:
+    async def submit(
+        self,
+        *,
+        user_id: int,
+        chat_id: int,
+        raw_target: str,
+        notify: Notifier,
+        username: str | None = None,
+    ) -> Scan:
         """Validate + queue a scan and start it in the background. Returns the queued scan.
 
         Raises :class:`AuthorizationError` or
@@ -66,18 +74,30 @@ class ScanService:
         delivered later through ``notify``.
         """
         self.authorize(user_id)
-        return await self._launch(user_id=user_id, chat_id=chat_id, raw_target=raw_target, notify=notify)
+        return await self._launch(
+            user_id=user_id, chat_id=chat_id, raw_target=raw_target, notify=notify, username=username
+        )
 
-    async def trigger(self, raw_target: str, *, notify: Notifier | None = None) -> Scan:
+    async def trigger(
+        self, raw_target: str, *, notify: Notifier | None = None, username: str | None = "web"
+    ) -> Scan:
         """Start a scan without the Telegram allow-list.
 
         For the local web UI, which is reachable only by someone already trusted
         on the host (it binds to localhost). Target validation still applies.
         """
-        return await self._launch(user_id=0, chat_id=0, raw_target=raw_target, notify=notify)
+        return await self._launch(
+            user_id=0, chat_id=0, raw_target=raw_target, notify=notify, username=username
+        )
 
     async def _launch(
-        self, *, user_id: int, chat_id: int, raw_target: str, notify: Notifier | None
+        self,
+        *,
+        user_id: int,
+        chat_id: int,
+        raw_target: str,
+        notify: Notifier | None,
+        username: str | None = None,
     ) -> Scan:
         target = validate_target(raw_target, block_private=self._config.block_private)
 
@@ -86,6 +106,7 @@ class ScanService:
             user_id=user_id,
             chat_id=chat_id,
             target=target,
+            username=username,
             status="queued",
             created_at=datetime.now(timezone.utc),
         )

@@ -33,10 +33,14 @@ CREATE TABLE IF NOT EXISTS scans (
     error        TEXT,
     report_json  TEXT,
     report_html  TEXT,
-    summary_json TEXT
+    summary_json TEXT,
+    username     TEXT
 );
 CREATE INDEX IF NOT EXISTS scans_by_user ON scans (user_id, created_at DESC);
 """
+
+#: Columns added after the first release; applied to an existing DB on init.
+_MIGRATIONS = {"username": "ALTER TABLE scans ADD COLUMN username TEXT"}
 
 
 class ScanStore:
@@ -53,6 +57,10 @@ class ScanStore:
         self._db_path.parent.mkdir(parents=True, exist_ok=True)
         with self._connect() as conn:
             conn.executescript(_SCHEMA)
+            have = {row[1] for row in conn.execute("PRAGMA table_info(scans)")}
+            for column, ddl in _MIGRATIONS.items():
+                if column not in have:
+                    conn.execute(ddl)
 
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self._db_path, timeout=30)
@@ -67,9 +75,12 @@ class ScanStore:
     def _create_sync(self, scan: Scan) -> None:
         with self._connect() as conn:
             conn.execute(
-                "INSERT INTO scans (id, user_id, chat_id, target, status, created_at) "
-                "VALUES (?, ?, ?, ?, ?, ?)",
-                (scan.id, scan.user_id, scan.chat_id, scan.target, scan.status, _iso(scan.created_at)),
+                "INSERT INTO scans (id, user_id, chat_id, target, status, created_at, username) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (
+                    scan.id, scan.user_id, scan.chat_id, scan.target,
+                    scan.status, _iso(scan.created_at), scan.username,
+                ),
             )
 
     async def mark_running(self, scan_id: str) -> None:
@@ -231,6 +242,7 @@ def _row_to_scan(row: sqlite3.Row) -> Scan:
         user_id=row["user_id"],
         chat_id=row["chat_id"],
         target=row["target"],
+        username=row["username"],
         status=row["status"],
         created_at=_parse_iso(row["created_at"]),
         finished_at=_parse_iso(row["finished_at"]),

@@ -49,7 +49,8 @@ class Scan:
     user_id: int
     chat_id: int
     target: str
-    status: str = "queued"  # queued | running | done | failed
+    username: str | None = None  # Telegram @username (or None / "web")
+    status: str = "queued"  # queued | running | done | failed | cancelled
     created_at: datetime | None = None
     finished_at: datetime | None = None
     exit_code: int | None = None
