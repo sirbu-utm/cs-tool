@@ -49,13 +49,33 @@ class ScanService:
         self._tasks: set[asyncio.Task[None]] = set()
         #: In-flight tasks by scan id, so a specific scan can be cancelled.
         self._tasks_by_id: dict[str, asyncio.Task[None]] = {}
+        #: Users added at runtime from the web UI (on top of the env allow-list).
+        self._dynamic_allowed: set[int] = set()
 
     def authorize(self, user_id: int) -> None:
         """Raise unless ``user_id`` may run scans (empty allow-list = nobody)."""
-        if user_id not in self._config.allowed_user_ids:
+        if user_id not in self._config.allowed_user_ids and user_id not in self._dynamic_allowed:
             raise AuthorizationError(
                 "you are not authorised to use this bot. Ask the operator to add your Telegram id."
             )
+
+    async def load_allowed(self) -> None:
+        """Load the runtime allow-list from the store (called at startup)."""
+        self._dynamic_allowed = {row["user_id"] for row in await self._store.list_allowed()}
+
+    async def allow_user(self, user_id: int, username: str | None = None) -> None:
+        """Grant a user access from now on, persisting it across restarts."""
+        await self._store.add_allowed(user_id, username)
+        self._dynamic_allowed.add(user_id)
+        LOG.info("allow-list: added user %s (%s)", user_id, username or "")
+
+    async def disallow_user(self, user_id: int) -> bool:
+        """Revoke a runtime-added user. Env allow-list entries are not touched."""
+        self._dynamic_allowed.discard(user_id)
+        removed = await self._store.remove_allowed(user_id)
+        if removed:
+            LOG.info("allow-list: removed user %s", user_id)
+        return removed
 
     async def submit(
         self,

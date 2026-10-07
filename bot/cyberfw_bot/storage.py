@@ -37,6 +37,11 @@ CREATE TABLE IF NOT EXISTS scans (
     username     TEXT
 );
 CREATE INDEX IF NOT EXISTS scans_by_user ON scans (user_id, created_at DESC);
+CREATE TABLE IF NOT EXISTS allowed_users (
+    user_id  INTEGER PRIMARY KEY,
+    username TEXT,
+    added_at TEXT NOT NULL
+);
 """
 
 #: Columns added after the first release; applied to an existing DB on init.
@@ -160,6 +165,38 @@ class ScanStore:
             scan.finished_at = _parse_iso(finished_at)
             scans.append(scan)
         return scans
+
+    # -- allow-list (users added at runtime via the web UI) ------------------
+    async def add_allowed(self, user_id: int, username: str | None) -> None:
+        await asyncio.to_thread(self._add_allowed_sync, user_id, username)
+
+    def _add_allowed_sync(self, user_id: int, username: str | None) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                "INSERT OR REPLACE INTO allowed_users (user_id, username, added_at) VALUES (?, ?, ?)",
+                (user_id, username, _iso(datetime.now(timezone.utc))),
+            )
+
+    async def list_allowed(self) -> list[dict[str, Any]]:
+        return await asyncio.to_thread(self._list_allowed_sync)
+
+    def _list_allowed_sync(self) -> list[dict[str, Any]]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT user_id, username, added_at FROM allowed_users ORDER BY added_at"
+            ).fetchall()
+        return [
+            {"user_id": r["user_id"], "username": r["username"], "added_at": r["added_at"]}
+            for r in rows
+        ]
+
+    async def remove_allowed(self, user_id: int) -> bool:
+        return await asyncio.to_thread(self._remove_allowed_sync, user_id)
+
+    def _remove_allowed_sync(self, user_id: int) -> bool:
+        with self._connect() as conn:
+            cur = conn.execute("DELETE FROM allowed_users WHERE user_id = ?", (user_id,))
+            return cur.rowcount > 0
 
     # -- reads ---------------------------------------------------------------
     async def get(self, scan_id: str) -> Scan | None:

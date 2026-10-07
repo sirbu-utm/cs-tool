@@ -119,6 +119,20 @@ async def test_reclaim_orphans_marks_unfinished_as_failed_and_returns_them(tmp_p
         assert scan.finished_at is not None
 
 
+async def test_allowed_users_round_trip(tmp_path: Path) -> None:
+    store = await _store(tmp_path)
+    await store.add_allowed(111, "alice")
+    await store.add_allowed(222, None)
+
+    rows = await store.list_allowed()
+    assert {r["user_id"] for r in rows} == {111, 222}
+    assert next(r["username"] for r in rows if r["user_id"] == 111) == "alice"
+
+    assert await store.remove_allowed(111) is True
+    assert {r["user_id"] for r in await store.list_allowed()} == {222}
+    assert await store.remove_allowed(999) is False  # removing an absent id is a no-op
+
+
 async def test_recent_lists_scans_across_all_users(tmp_path: Path) -> None:
     store = await _store(tmp_path)
     await store.create(Scan(id="a", user_id=1, chat_id=7, target="a.com"))

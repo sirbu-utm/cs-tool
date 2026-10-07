@@ -153,6 +153,7 @@ def build_application(config: BotConfig, store: ScanStore, service: ScanService)
         otherwise the request would sit "queued" forever.
         """
         await store.init()
+        await service.load_allowed()
         for scan in await store.reclaim_orphans(
             "interrupted by a bot restart — please resend the scan."
         ):

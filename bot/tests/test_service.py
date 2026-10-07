@@ -157,5 +157,25 @@ async def test_cancel_unknown_scan_is_a_no_op(tmp_path: Path) -> None:
     assert await service.cancel("does-not-exist") is False
 
 
+async def test_allow_user_grants_access_persistently_and_disallow_revokes(tmp_path: Path) -> None:
+    runner = _FakeRunner(tmp_path)
+    service, store = await _service(tmp_path, runner)
+
+    with pytest.raises(AuthorizationError):
+        service.authorize(777)  # not in the env allow-list ({42})
+
+    await service.allow_user(777, "carol")
+    service.authorize(777)  # granted, no raise
+
+    # persisted: a fresh service loading from the same store sees it
+    service2 = ScanService(make_config(tmp_path), store, runner=runner)  # type: ignore[arg-type]
+    await service2.load_allowed()
+    service2.authorize(777)
+
+    assert await service.disallow_user(777) is True
+    with pytest.raises(AuthorizationError):
+        service.authorize(777)
+
+
 async def _noop(_scan: Scan) -> None:
     return None

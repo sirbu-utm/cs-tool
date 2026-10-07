@@ -189,6 +189,50 @@ async def _message(request: web.Request) -> web.Response:
     return web.json_response({"sent": True})
 
 
+async def _list_users(request: web.Request) -> web.Response:
+    config: BotConfig = request.app["config"]
+    store: ScanStore = request.app["store"]
+    users: list[dict[str, object]] = [
+        {"user_id": uid, "username": None, "source": "env"}
+        for uid in sorted(config.allowed_user_ids)
+    ]
+    for row in await store.list_allowed():
+        users.append(
+            {"user_id": row["user_id"], "username": row["username"],
+             "source": "db", "added_at": row["added_at"]}
+        )
+    return web.json_response(users)
+
+
+async def _add_user(request: web.Request) -> web.Response:
+    _check_origin(request)
+    service: ScanService = request.app["service"]
+    try:
+        body = await request.json()
+    except Exception:  # noqa: BLE001 - a malformed body is just a bad request
+        raise web.HTTPBadRequest(text="expected a JSON body") from None
+    try:
+        user_id = int(body.get("user_id"))
+    except (TypeError, ValueError):
+        raise web.HTTPBadRequest(text="telegram id must be a number") from None
+    if user_id <= 0:
+        raise web.HTTPBadRequest(text="telegram id must be a positive number")
+    username = str(body.get("username", "")).strip() or None
+    await service.allow_user(user_id, username)
+    return web.json_response({"added": user_id})
+
+
+async def _remove_user(request: web.Request) -> web.Response:
+    _check_origin(request)
+    service: ScanService = request.app["service"]
+    try:
+        user_id = int(request.match_info["uid"])
+    except ValueError:
+        raise web.HTTPBadRequest(text="bad telegram id") from None
+    removed = await service.disallow_user(user_id)
+    return web.json_response({"removed": removed})
+
+
 def build_web_app(
     config: BotConfig, store: ScanStore, service: ScanService, bot: object | None = None
 ) -> web.Application:
@@ -208,6 +252,9 @@ def build_web_app(
             web.get("/api/scans/{sid}/screenshots/{name}", _screenshot),
             web.post("/api/scans/{sid}/cancel", _cancel),
             web.post("/api/message", _message),
+            web.get("/api/users", _list_users),
+            web.post("/api/users", _add_user),
+            web.delete("/api/users/{uid}", _remove_user),
             web.get("/api/log", _bot_log),
         ]
     )
@@ -309,6 +356,18 @@ _DASHBOARD = r"""<!DOCTYPE html>
   </div>
   <div id="mmsg"></div>
 
+  <h2>Users (allow-list)</h2>
+  <div class="bar">
+    <input id="uid" placeholder="telegram id" style="flex: 0 0 150px" autocomplete="off">
+    <input id="uname" placeholder="note / @username (optional)" autocomplete="off">
+    <button id="uadd">Add user</button>
+  </div>
+  <div id="umsg"></div>
+  <table>
+    <thead><tr><th>telegram id</th><th>note</th><th>source</th><th></th></tr></thead>
+    <tbody id="urows"><tr><td colspan="4" class="empty">loading…</td></tr></tbody>
+  </table>
+
   <div class="flex">
     <div>
       <h2 id="logtitle">Scan output</h2>
@@ -408,6 +467,36 @@ async function sendMsg() {
 }
 $("msend").addEventListener("click", sendMsg);
 $("mtext").addEventListener("keydown", (e) => { if (e.key === "Enter") sendMsg(); });
+
+async function loadUsers() {
+  try {
+    const users = await (await fetch("api/users")).json();
+    const rows = $("urows");
+    if (!users.length) { rows.innerHTML = '<tr><td colspan="4" class="empty">none</td></tr>'; return; }
+    rows.innerHTML = users.map((u) =>
+      '<tr><td class="t">' + esc(u.user_id) + '</td>'
+      + '<td>' + esc(u.username || "") + '</td>'
+      + '<td class="t">' + esc(u.source) + '</td>'
+      + '<td>' + (u.source === "db" ? '<button class="danger" onclick="rmUser(' + u.user_id + ')">Remove</button>' : '') + '</td></tr>'
+    ).join('');
+  } catch (e) {}
+}
+async function addUser() {
+  const user_id = $("uid").value.trim(), username = $("uname").value.trim();
+  $("umsg").textContent = ""; $("umsg").className = "";
+  if (!user_id) return;
+  const r = await fetch("api/users", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ user_id: Number(user_id), username }) });
+  if (!r.ok) { $("umsg").textContent = await r.text(); $("umsg").className = "err"; return; }
+  $("uid").value = ""; $("uname").value = ""; $("umsg").textContent = "added " + user_id;
+  loadUsers();
+}
+async function rmUser(uid) {
+  await fetch("api/users/" + uid, { method: "DELETE" });
+  loadUsers();
+}
+$("uadd").addEventListener("click", addUser);
+$("uid").addEventListener("keydown", (e) => { if (e.key === "Enter") addUser(); });
+loadUsers();
 refresh();
 setInterval(refresh, 2000);
 </script>
