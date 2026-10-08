@@ -44,10 +44,11 @@ class CyberfwRunner:
     def __init__(self, config: BotConfig) -> None:
         self._config = config
 
-    def _argv(self, target: str, session: str) -> list[str]:
+    def _argv(self, target: str, session: str, vt_key: str | None) -> list[str]:
         cfg = self._config
         # --report forces a non-interactive save; --session is validated by
-        # cyberfw itself to be a plain directory name under reports/.
+        # cyberfw itself to be a plain directory name under reports/. --vt turns
+        # on VirusTotal enrichment; the key travels in the env, never argv.
         return [
             *cfg.cyberfw_cmd,
             "pipeline",
@@ -57,10 +58,11 @@ class CyberfwRunner:
             "--session",
             session,
             "--report",
+            *(["--vt"] if vt_key else []),
             *cfg.extra_pipeline_args,
         ]
 
-    def _env(self) -> dict[str, str]:
+    def _env(self, vt_key: str | None = None) -> dict[str, str]:
         # The bot's own settings — above all BOT_TOKEN — are of no use to cyberfw
         # or the scanners it starts, so they never reach the child environment.
         env = {key: value for key, value in os.environ.items() if not key.startswith(_BOT_ENV_PREFIXES)}
@@ -68,16 +70,20 @@ class CyberfwRunner:
         # of where the bot process was started from.
         env["CYBERFW_ROOT_DIR"] = str(self._config.workspace)
         env["CYBERFW_STAGE_TIMEOUT"] = str(self._config.stage_timeout_s)
+        # The user's own VirusTotal key, passed only via the environment so it
+        # never lands in argv, the process list, or the scan log.
+        if vt_key:
+            env["CYBERFW_VT_API_KEY"] = vt_key
         return env
 
-    async def run(self, target: str, session: str) -> ScanOutcome:
+    async def run(self, target: str, session: str, *, vt_key: str | None = None) -> ScanOutcome:
         """Run the pipeline for ``target`` under ``session``; never raises for a scan failure."""
-        argv = self._argv(target, session)
+        argv = self._argv(target, session, vt_key)
         try:
             proc = await asyncio.create_subprocess_exec(
                 *argv,
                 cwd=str(self._config.workspace),
-                env=self._env(),
+                env=self._env(vt_key),
                 stdin=asyncio.subprocess.DEVNULL,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,

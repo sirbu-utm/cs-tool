@@ -158,7 +158,10 @@ class ScanService:
                 await self._store.mark_running(scan.id)
                 scan.status = "running"
                 LOG.info("running scan %s target=%s", scan.id, scan.target)
-                outcome = await self._runner.run(scan.target, session=f"bot-{scan.id}")
+                vt_key = await self._store.get_vt_key(scan.user_id) if scan.user_id else None
+                outcome = await self._runner.run(
+                    scan.target, session=f"bot-{scan.id}", vt_key=vt_key
+                )
                 await self._settle(scan, outcome)
                 LOG.info("scan %s %s exit=%s", scan.id, scan.status, scan.exit_code)
         except asyncio.CancelledError:

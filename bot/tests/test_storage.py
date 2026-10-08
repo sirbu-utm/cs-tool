@@ -133,6 +133,21 @@ async def test_allowed_users_round_trip(tmp_path: Path) -> None:
     assert await store.remove_allowed(999) is False  # removing an absent id is a no-op
 
 
+async def test_vt_key_round_trip(tmp_path: Path) -> None:
+    store = await _store(tmp_path)
+    assert await store.get_vt_key(1) is None
+
+    await store.set_vt_key(1, "abc")
+    assert await store.get_vt_key(1) == "abc"
+
+    await store.set_vt_key(1, "def")  # replace, not duplicate
+    assert await store.get_vt_key(1) == "def"
+
+    assert await store.clear_vt_key(1) is True
+    assert await store.get_vt_key(1) is None
+    assert await store.clear_vt_key(1) is False  # already gone
+
+
 async def test_recent_lists_scans_across_all_users(tmp_path: Path) -> None:
     store = await _store(tmp_path)
     await store.create(Scan(id="a", user_id=1, chat_id=7, target="a.com"))

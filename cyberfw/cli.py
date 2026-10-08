@@ -1209,12 +1209,15 @@ def vt_cmd(
         str | None,
         typer.Option("--api-key", help="VirusTotal key (else from env / ~/.vt.toml / prompt)."),
     ] = None,
+    json_out: Annotated[
+        bool, typer.Option("--json", help="Print the result as one JSON line (for scripts / the bot).")
+    ] = False,
 ) -> None:
     """Look up a target's reputation on VirusTotal, using your own free API key."""
     settings = load_settings()
     key = vt.resolve_or_prompt(
         api_key or settings.vt_api_key,
-        interactive=_is_interactive(),
+        interactive=_is_interactive() and not json_out,
         env_path=settings.root_dir / ".env",
     )
     if not key:
@@ -1225,7 +1228,10 @@ def vt_cmd(
     except vt.VtError as exc:
         console.print(f"[err]VirusTotal: {exc}[/err]")
         raise typer.Exit(1) from exc
-    _print_reputation(rep)
+    if json_out:
+        print(json.dumps(rep.as_record()))
+    else:
+        _print_reputation(rep)
 
 
 async def _vt_lookup(key: str, target: str) -> vt.Reputation:

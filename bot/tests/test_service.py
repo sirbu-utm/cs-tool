@@ -25,7 +25,7 @@ class _FakeRunner:
         self._ok = ok
         self.calls: list[tuple[str, str]] = []
 
-    async def run(self, target: str, session: str) -> ScanOutcome:
+    async def run(self, target: str, session: str, *, vt_key: str | None = None) -> ScanOutcome:
         self.calls.append((target, session))
         if not self._ok:
             return ScanOutcome(1, False, None, None, "", "boom")
@@ -107,7 +107,7 @@ class _BlockingRunner:
         self.started = asyncio.Event()
         self.calls: list[tuple[str, str]] = []
 
-    async def run(self, target: str, session: str) -> ScanOutcome:
+    async def run(self, target: str, session: str, *, vt_key: str | None = None) -> ScanOutcome:
         self.calls.append((target, session))
         self.started.set()
         await asyncio.sleep(3600)

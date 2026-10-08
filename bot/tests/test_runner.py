@@ -106,6 +106,31 @@ async def test_the_bot_settings_never_reach_the_cyberfw_process(
     assert child_env.get("CYBERFW_ROOT_DIR") == str(tmp_path)  # and cyberfw's own are set
 
 
+_DUMPS_ARGV_ENV = (
+    "import json, os, sys\n"
+    "open('dump.json', 'w').write(json.dumps({'argv': sys.argv, 'vt': os.environ.get('CYBERFW_VT_API_KEY')}))\n"
+)
+
+
+async def test_vt_key_adds_the_flag_and_env(tmp_path: Path) -> None:
+    config = make_config(tmp_path, cyberfw_cmd=_fake_cyberfw(tmp_path, body=_DUMPS_ARGV_ENV))
+    await CyberfwRunner(config).run("example.com", session="bot-vt", vt_key="SECRET")
+
+    dump = json.loads((tmp_path / "dump.json").read_text(encoding="utf-8"))
+    assert "--vt" in dump["argv"]  # the flag reaches cyberfw
+    assert dump["vt"] == "SECRET"  # the key reaches the child env (not argv)
+    assert "SECRET" not in dump["argv"]
+
+
+async def test_no_vt_key_means_no_flag(tmp_path: Path) -> None:
+    config = make_config(tmp_path, cyberfw_cmd=_fake_cyberfw(tmp_path, body=_DUMPS_ARGV_ENV))
+    await CyberfwRunner(config).run("example.com", session="bot-novt")
+
+    dump = json.loads((tmp_path / "dump.json").read_text(encoding="utf-8"))
+    assert "--vt" not in dump["argv"]
+    assert dump["vt"] is None
+
+
 async def test_a_missing_cyberfw_binary_is_an_outcome_not_a_crash(tmp_path: Path) -> None:
     config = make_config(tmp_path, cyberfw_cmd=("definitely-not-a-real-binary-xyz",))
     outcome = await CyberfwRunner(config).run("example.com", session="bot-none")

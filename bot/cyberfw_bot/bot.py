@@ -9,9 +9,13 @@ result is pushed to the chat by the notifier built in :func:`build_application`.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+import os
 import time
+from html import escape as _e
 from pathlib import Path
+from typing import Any
 
 from telegram import Message, Update
 from telegram.constants import ParseMode
@@ -36,6 +40,7 @@ from cyberfw_bot.formatting import (
     queued_message,
     status_message,
     summary_message,
+    vt_message,
 )
 from cyberfw_bot.models import Scan
 from cyberfw_bot.service import AuthorizationError, ScanService
@@ -135,11 +140,71 @@ def build_application(config: BotConfig, store: ScanStore, service: ScanService)
         await _reply(update, summary_message(scan, scan.summary, config.max_findings_in_message))
         await _send_report(application, scan)
 
+    async def setvt_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        user, message = update.effective_user, update.effective_message
+        if user is None or message is None:
+            return
+        try:
+            service.authorize(user.id)
+        except AuthorizationError as exc:
+            await _reply(update, f"⛔ {exc}")
+            return
+        key = ctx.args[0].strip() if ctx.args else ""
+        if not key:
+            await _reply(
+                update,
+                "Save your VirusTotal API key: <code>/setvt &lt;key&gt;</code>\n"
+                "Get a free one: https://www.virustotal.com/gui/my-apikey\n"
+                "Best done in a direct message to me.",
+            )
+            return
+        await store.set_vt_key(user.id, key)
+        try:  # hide the key: drop the message that carried it (best-effort)
+            await message.delete()
+        except Exception:  # noqa: BLE001
+            pass
+        await application.bot.send_message(
+            message.chat_id,
+            "✅ VirusTotal key saved. Your scans now add VT reputation. "
+            "Try <code>/vt example.com</code>.",
+            parse_mode=_HTML,
+        )
+
+    async def vt_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        user = update.effective_user
+        if user is None:
+            return
+        try:
+            service.authorize(user.id)
+        except AuthorizationError as exc:
+            await _reply(update, f"⛔ {exc}")
+            return
+        target = " ".join(ctx.args or []).strip()
+        if not target or target[0] == "-" or any(ch.isspace() for ch in target):
+            await _reply(update, "Usage: <code>/vt &lt;domain|ip|url|hash&gt;</code>")
+            return
+        key = await store.get_vt_key(user.id)
+        if not key:
+            await _reply(
+                update,
+                "Set your VirusTotal key first: <code>/setvt &lt;key&gt;</code> "
+                "(free: https://www.virustotal.com/gui/my-apikey)",
+            )
+            return
+        try:
+            data = await _vt_subprocess(config, target, key)
+        except Exception as exc:  # noqa: BLE001 - surface the error to the user
+            await _reply(update, f"⚠️ VirusTotal: {_e(str(exc))}")
+            return
+        await _reply(update, vt_message(data))
+
     application = ApplicationBuilder().token(config.token).build()
     application.add_handler(CommandHandler(["start", "help"], help_cmd))
     application.add_handler(CommandHandler("scan", scan_cmd))
     application.add_handler(CommandHandler("status", status_cmd))
     application.add_handler(CommandHandler("report", report_cmd))
+    application.add_handler(CommandHandler("setvt", setvt_cmd))
+    application.add_handler(CommandHandler("vt", vt_cmd))
     # Fallbacks run last: a known command matches its handler above first, so
     # these only catch an unknown command or a plain, non-command message.
     application.add_handler(MessageHandler(filters.COMMAND, unknown_cmd))
@@ -211,6 +276,37 @@ async def _animate(store: ScanStore, scan: Scan, sent: Message) -> None:
             pass
     except Exception:  # noqa: BLE001 - a cosmetic animation must never crash the worker
         LOG.exception("waiting animation for scan %s crashed", scan.id)
+
+
+async def _vt_subprocess(config: BotConfig, target: str, api_key: str) -> dict[str, Any]:
+    """Run ``cyberfw vt <target> --json`` with the user's key; return the parsed row.
+
+    Shells out like the scan runner (the key goes in the env, never argv), so the
+    bot never imports cyberfw.
+    """
+    env = {k: v for k, v in os.environ.items() if not k.startswith(("BOT_", "ALLOWED_USER_IDS"))}
+    env["CYBERFW_ROOT_DIR"] = str(config.workspace)
+    env["CYBERFW_VT_API_KEY"] = api_key
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *config.cyberfw_cmd, "vt", target, "--json",
+            cwd=str(config.workspace), env=env,
+            stdin=asyncio.subprocess.DEVNULL,
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+        )
+    except OSError as exc:
+        raise RuntimeError(f"could not launch cyberfw: {exc}") from exc
+    out, err = await asyncio.wait_for(proc.communicate(), 60)
+    if proc.returncode != 0:
+        detail = err.decode("utf-8", "replace").strip() or f"cyberfw vt exited {proc.returncode}"
+        raise RuntimeError(detail.splitlines()[-1][:300] if detail else "vt lookup failed")
+    try:
+        data = json.loads(out.decode("utf-8", "replace") or "{}")
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"bad vt output: {exc}") from exc
+    if not isinstance(data, dict):
+        raise RuntimeError("unexpected vt output")
+    return data
 
 
 async def _send_report(application: Application, scan: Scan) -> None:

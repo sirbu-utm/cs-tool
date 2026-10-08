@@ -19,6 +19,7 @@ __all__ = [
     "status_message",
     "animation_frame",
     "did_you_mean_text",
+    "vt_message",
     "HELP_TEXT",
     "UNKNOWN_COMMAND_TEXT",
     "UNRECOGNIZED_TEXT",
@@ -132,6 +133,29 @@ def did_you_mean_text(target: str) -> str:
     return f"🤔 Did you mean <code>/scan {safe}</code>? Send that to scan <b>{safe}</b>."
 
 
+def vt_message(data: dict[str, object]) -> str:
+    """Render a VirusTotal lookup result (from ``cyberfw vt --json``) for a chat."""
+    target = escape(str(data.get("target", "")))
+    if not data.get("found", False):
+        return f"🔍 <b>{target}</b> — not seen by VirusTotal"
+    malicious = int(data.get("malicious", 0) or 0)
+    suspicious = int(data.get("suspicious", 0) or 0)
+    harmless = int(data.get("harmless", 0) or 0)
+    icon, verdict = ("🟥", "malicious") if malicious else ("🟨", "suspicious") if suspicious else ("🟩", "clean")
+    lines = [
+        f"{icon} <b>{target}</b> — {verdict}",
+        f"VT: <b>{malicious}</b> malicious · {suspicious} suspicious · {harmless} harmless "
+        f"· reputation {int(data.get('reputation', 0) or 0)}",
+    ]
+    cats = data.get("categories") or []
+    if isinstance(cats, list) and cats:
+        lines.append("categories: " + escape(", ".join(str(c) for c in cats[:8])))
+    link = str(data.get("permalink", ""))
+    if link:
+        lines.append(f'<a href="{escape(link)}">open on VirusTotal</a>')
+    return "\n".join(lines)
+
+
 UNKNOWN_COMMAND_TEXT = "🤷 I don't know that command. Send /help for the list of commands."
 
 UNRECOGNIZED_TEXT = (
@@ -145,6 +169,8 @@ HELP_TEXT = (
     "<b>/scan &lt;target&gt;</b> — scan one domain, http(s) URL or IP you are authorised to test\n"
     "<b>/status</b> — your recent scans and their state\n"
     "<b>/report &lt;scan_id&gt;</b> — re-send a finished scan's summary and report file\n"
+    "<b>/vt &lt;target&gt;</b> — VirusTotal reputation of a domain/IP/URL/hash\n"
+    "<b>/setvt &lt;key&gt;</b> — save your own VirusTotal API key (in DM); scans then add VT reputation\n"
     "<b>/help</b> — this message\n\n"
     "⚠️ Only scan assets you own or have explicit written permission to test. "
     "Active scanning of third-party systems without authorisation may be illegal."

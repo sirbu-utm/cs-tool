@@ -42,6 +42,11 @@ CREATE TABLE IF NOT EXISTS allowed_users (
     username TEXT,
     added_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS vt_keys (
+    user_id INTEGER PRIMARY KEY,
+    api_key TEXT NOT NULL,
+    set_at  TEXT NOT NULL
+);
 """
 
 #: Columns added after the first release; applied to an existing DB on init.
@@ -196,6 +201,33 @@ class ScanStore:
     def _remove_allowed_sync(self, user_id: int) -> bool:
         with self._connect() as conn:
             cur = conn.execute("DELETE FROM allowed_users WHERE user_id = ?", (user_id,))
+            return cur.rowcount > 0
+
+    # -- per-user VirusTotal keys --------------------------------------------
+    async def set_vt_key(self, user_id: int, api_key: str) -> None:
+        await asyncio.to_thread(self._set_vt_key_sync, user_id, api_key)
+
+    def _set_vt_key_sync(self, user_id: int, api_key: str) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                "INSERT OR REPLACE INTO vt_keys (user_id, api_key, set_at) VALUES (?, ?, ?)",
+                (user_id, api_key, _iso(datetime.now(timezone.utc))),
+            )
+
+    async def get_vt_key(self, user_id: int) -> str | None:
+        return await asyncio.to_thread(self._get_vt_key_sync, user_id)
+
+    def _get_vt_key_sync(self, user_id: int) -> str | None:
+        with self._connect() as conn:
+            row = conn.execute("SELECT api_key FROM vt_keys WHERE user_id = ?", (user_id,)).fetchone()
+        return row["api_key"] if row else None
+
+    async def clear_vt_key(self, user_id: int) -> bool:
+        return await asyncio.to_thread(self._clear_vt_key_sync, user_id)
+
+    def _clear_vt_key_sync(self, user_id: int) -> bool:
+        with self._connect() as conn:
+            cur = conn.execute("DELETE FROM vt_keys WHERE user_id = ?", (user_id,))
             return cur.rowcount > 0
 
     # -- reads ---------------------------------------------------------------

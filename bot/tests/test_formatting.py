@@ -103,3 +103,22 @@ def test_animation_frame_escapes_target() -> None:
     text = animation_frame("running", "a&b.com", "ab12", tick=0, elapsed_s=0)
     assert "a&amp;b.com" in text
     assert "a&b.com" not in text
+
+
+def test_vt_message_renders_a_malicious_hit() -> None:
+    from cyberfw_bot.formatting import vt_message
+
+    text = vt_message({
+        "target": "evil.com", "found": True, "malicious": 5, "suspicious": 1,
+        "harmless": 60, "reputation": -30, "categories": ["malware", "phishing"],
+        "permalink": "https://www.virustotal.com/gui/domain/evil.com",
+    })
+    assert "evil.com" in text and "malicious" in text and "🟥" in text
+    assert "5</b> malicious" in text
+    assert "malware, phishing" in text
+
+
+def test_vt_message_handles_not_found() -> None:
+    from cyberfw_bot.formatting import vt_message
+
+    assert "not seen" in vt_message({"target": "clean.com", "found": False})
