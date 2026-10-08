@@ -27,6 +27,7 @@ from time import strftime
 from typing import Annotated, Any, Protocol
 
 import anyio
+import httpx
 import typer
 from rich.cells import cell_len
 from rich.console import Console, ConsoleOptions, Group, RenderableType, RenderResult
@@ -36,7 +37,7 @@ from rich.prompt import Prompt as _RichPrompt
 from rich.table import Table
 from rich.text import Text, TextType
 
-from cyberfw import motion
+from cyberfw import motion, vt
 from cyberfw.config import Settings, load_settings
 from cyberfw.exceptions import (
     ChromiumUnsupportedError,
@@ -1196,6 +1197,58 @@ def _status_view(rows: list[_ToolRow], settings: Settings, *, chrome: str | None
         ],
         footer=Text("cyberfw status", style="muted"),
     )
+
+
+@app.command("vt")
+def vt_cmd(
+    target: Annotated[
+        str, typer.Argument(help="Domain, IP, http(s) URL or file hash to look up on VirusTotal.")
+    ],
+    api_key: Annotated[
+        str | None,
+        typer.Option("--api-key", help="VirusTotal key (else from env / ~/.vt.toml / prompt)."),
+    ] = None,
+) -> None:
+    """Look up a target's reputation on VirusTotal, using your own free API key."""
+    settings = load_settings()
+    key = vt.resolve_or_prompt(
+        api_key or settings.vt_api_key,
+        interactive=_is_interactive(),
+        env_path=settings.root_dir / ".env",
+    )
+    if not key:
+        console.print(f"[yellow]No VirusTotal API key. Get one free: {vt.API_KEY_URL}[/yellow]")
+        raise typer.Exit(1)
+    try:
+        rep = anyio.run(_vt_lookup, key, target)
+    except vt.VtError as exc:
+        console.print(f"[err]VirusTotal: {exc}[/err]")
+        raise typer.Exit(1) from exc
+    _print_reputation(rep)
+
+
+async def _vt_lookup(key: str, target: str) -> vt.Reputation:
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        return await vt.lookup(client, key, target)
+
+
+def _print_reputation(rep: vt.Reputation) -> None:
+    if not rep.found:
+        console.print(f"[dim]{rep.target}[/dim] — not seen by VirusTotal")
+        return
+    verdict = (
+        "[red]malicious[/red]"
+        if rep.malicious
+        else ("[yellow]suspicious[/yellow]" if rep.suspicious else "[green]clean[/green]")
+    )
+    console.print(f"[bold]{rep.target}[/bold] ({rep.kind}) — {verdict}")
+    console.print(
+        f"  detections: {rep.malicious} malicious · {rep.suspicious} suspicious · "
+        f"{rep.harmless} harmless · reputation {rep.reputation}"
+    )
+    if rep.categories:
+        console.print(f"  categories: {', '.join(rep.categories)}")
+    console.print(f"  [dim]{rep.permalink}[/dim]")
 
 
 @app.command("run")

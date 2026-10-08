@@ -50,6 +50,13 @@ class Settings(BaseSettings):
     # Remote behaviour.
     github_token: str | None = Field(default=None, exclude=True)
     github_rate_fallback: bool = Field(default=True, description="Cache GitHub API responses to save rate limit.")
+    # Integrations.
+    vt_api_key: str | None = Field(
+        default=None,
+        exclude=True,
+        description="VirusTotal API key for reputation enrichment and the `vt` command. "
+        "Also read from VT_API_KEY / VTCLI_APIKEY / ~/.vt.toml; prompted for when interactive.",
+    )
     # Pipeline behaviour.
     concurrency: int = Field(default=4, ge=1, description="Max parallel jobs across pipeline stages.")
     request_timeout: float = Field(

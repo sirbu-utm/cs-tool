@@ -26,6 +26,7 @@ __all__ = [
     "GitleaksResult",
     "GowitnessResult",
     "RustscanResult",
+    "VirusTotalResult",
     "validate_record",
 ]
 
@@ -224,6 +225,30 @@ class RustscanResult(ToolRecord):
         return rec
 
 
+class VirusTotalResult(ToolRecord):
+    """VirusTotal reputation: ``{"target", "vt_kind", "malicious", "suspicious", ...}``.
+
+    Not a downloaded binary — emitted by the reputation enrichment (see
+    :mod:`cyberfw.vt`), but validated like every other record.
+    """
+
+    vt_kind: str = ""
+    found: bool = False
+    malicious: int = 0
+    suspicious: int = 0
+    harmless: int = 0
+    undetected: int = 0
+    reputation: int = 0
+    categories: list[str] = Field(default_factory=list)
+    permalink: str = ""
+
+    @classmethod
+    def from_json(cls, tool: str, text: str, lineno: int) -> VirusTotalResult:
+        rec = cast("VirusTotalResult", super().from_json(tool, text, lineno))
+        rec.kind = "reputation"
+        return rec
+
+
 #: Dispatch map — registry name → validating model.
 MODELS: dict[str, type[ToolRecord]] = {
     "subfinder": SubfinderResult,
@@ -234,6 +259,7 @@ MODELS: dict[str, type[ToolRecord]] = {
     "gitleaks": GitleaksResult,
     "gowitness": GowitnessResult,
     "rustscan": RustscanResult,
+    "virustotal": VirusTotalResult,
 }
 
 
