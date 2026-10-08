@@ -16,7 +16,7 @@ import pytest
 from rich.console import Console
 from typer.testing import CliRunner
 
-from cyberfw.cli import _prompt_choice, _tool_menu, app
+from cyberfw.cli import _prompt_choice, _resolve_vt_key, _tool_menu, app
 from cyberfw.logging import THEME
 from cyberfw.ui import TOOL_GUIDES, banner, tool_guide
 
@@ -1743,3 +1743,50 @@ class TestPreFlightExternalDependencies:
 
         assert result.exit_code == 0
         assert "nmap" not in result.stdout
+
+
+class TestResolveVtKey:
+    """VT enrichment is default-on, asked for once, and --no-vt opts out."""
+
+    @staticmethod
+    def _settings(tmp_path: Path, *, key: str | None = None, prompted: bool = False) -> object:
+        from types import SimpleNamespace
+
+        return SimpleNamespace(vt_api_key=key, vt_prompted=prompted, root_dir=tmp_path)
+
+    def test_no_vt_returns_none_without_asking(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr("cyberfw.cli.vt.resolve_or_prompt", lambda *a, **k: pytest.fail("prompted under --no-vt"))
+        assert _resolve_vt_key(self._settings(tmp_path), False) is None
+
+    def test_configured_key_is_used_silently(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr("cyberfw.cli.vt.resolve_api_key", lambda _explicit: "configured")
+        monkeypatch.setattr("cyberfw.cli.vt.resolve_or_prompt", lambda *a, **k: pytest.fail("should not prompt"))
+        assert _resolve_vt_key(self._settings(tmp_path), None) == "configured"
+
+    def test_default_run_asks_once_then_remembers(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        remembered: list[Path] = []
+        monkeypatch.setattr("cyberfw.cli.vt.resolve_api_key", lambda _explicit: None)
+        monkeypatch.setattr("cyberfw.cli._is_interactive", lambda: True)
+        monkeypatch.setattr("cyberfw.cli.vt.resolve_or_prompt", lambda *a, **k: "entered-key")
+        monkeypatch.setattr("cyberfw.cli.vt.remember_prompt", lambda p: remembered.append(p))
+        assert _resolve_vt_key(self._settings(tmp_path), None) == "entered-key"
+        assert remembered == [tmp_path / ".env"]
+
+    def test_default_run_does_not_ask_again_after_prompted(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr("cyberfw.cli.vt.resolve_api_key", lambda _explicit: None)
+        monkeypatch.setattr("cyberfw.cli._is_interactive", lambda: True)
+        monkeypatch.setattr("cyberfw.cli.vt.resolve_or_prompt", lambda *a, **k: pytest.fail("asked twice"))
+        assert _resolve_vt_key(self._settings(tmp_path, prompted=True), None) is None
+
+    def test_non_interactive_never_prompts(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr("cyberfw.cli.vt.resolve_api_key", lambda _explicit: None)
+        monkeypatch.setattr("cyberfw.cli._is_interactive", lambda: False)
+        monkeypatch.setattr("cyberfw.cli.vt.resolve_or_prompt", lambda *a, **k: pytest.fail("prompted on a pipe"))
+        assert _resolve_vt_key(self._settings(tmp_path), None) is None
+
+    def test_explicit_vt_forces_the_prompt_even_after_skipping(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr("cyberfw.cli.vt.resolve_api_key", lambda _explicit: None)
+        monkeypatch.setattr("cyberfw.cli._is_interactive", lambda: True)
+        monkeypatch.setattr("cyberfw.cli.vt.resolve_or_prompt", lambda *a, **k: "late-key")
+        monkeypatch.setattr("cyberfw.cli.vt.remember_prompt", lambda p: None)
+        assert _resolve_vt_key(self._settings(tmp_path, prompted=True), True) == "late-key"

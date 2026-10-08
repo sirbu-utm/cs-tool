@@ -39,6 +39,16 @@ def test_resolve_or_prompt_never_prompts_when_not_interactive(tmp_path: Path) ->
     assert vt.resolve_or_prompt(None, interactive=False, environ={}) is None  # would hang if it prompted
 
 
+def test_remember_prompt_writes_the_marker_once(tmp_path: Path) -> None:
+    env_file = tmp_path / ".env"
+    env_file.write_text("CYBERFW_VT_API_KEY=k\n", encoding="utf-8")
+    vt.remember_prompt(env_file)
+    text = env_file.read_text(encoding="utf-8")
+    assert f"{vt.PROMPTED_VAR}=1" in text and "CYBERFW_VT_API_KEY=k" in text  # keeps the key line
+    vt.remember_prompt(env_file)  # idempotent — replaces, does not duplicate
+    assert env_file.read_text(encoding="utf-8").count(vt.PROMPTED_VAR) == 1
+
+
 # -- target classification -------------------------------------------------------
 @pytest.mark.parametrize(
     ("target", "kind", "path_prefix"),

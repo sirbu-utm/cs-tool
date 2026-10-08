@@ -1258,6 +1258,42 @@ def _print_reputation(rep: vt.Reputation) -> None:
     console.print(f"  [dim]{rep.permalink}[/dim]")
 
 
+def _resolve_vt_key(settings: Settings, choice: bool | None) -> str | None:
+    """Decide the VirusTotal key for a pipeline run.
+
+    Enrichment is on by default: a key already configured (``--api-key`` is not
+    a pipeline option, so this means env / ``.env`` / ``~/.vt.toml``) is used
+    silently. When none is set, the console offers to save one — the first time
+    only on a default run, or every time under ``--vt``. ``--no-vt`` turns it
+    off and never prompts (CI, pipes, or just not wanting VirusTotal).
+    """
+    if choice is False:  # --no-vt
+        return None
+    key = vt.resolve_api_key(settings.vt_api_key)
+    if key:
+        return key
+    # No key anywhere. Ask only when someone can answer, and — on a default run
+    # — only the first time (``--vt`` forces the ask even after an earlier skip).
+    should_ask = _is_interactive() and (choice is True or not settings.vt_prompted)
+    if not should_ask:
+        if choice is True:
+            console.print(
+                f"[warn]VirusTotal: no API key set and no prompt available. "
+                f"Free key: {vt.API_KEY_URL}[/warn]"
+            )
+        return None
+    env_path = settings.root_dir / ".env"
+    entered = vt.resolve_or_prompt(None, interactive=True, env_path=env_path)
+    # Offer once: record that we asked (a pasted key is already saved to .env by
+    # resolve_or_prompt) so later default runs do not prompt again.
+    vt.remember_prompt(env_path)
+    if not entered:
+        console.print(
+            "[muted]VirusTotal enrichment off for this run — run with --vt to enable later.[/muted]"
+        )
+    return entered
+
+
 def _enrich_with_vt(result: PipelineResult, api_key: str, limit: int) -> None:
     """Append VirusTotal reputation records for the run's discovered targets."""
     targets = vt.enrichment_targets(result.records)
@@ -1465,20 +1501,26 @@ def pipeline_cmd(
         ),
     ] = None,
     vt_enrich: Annotated[
-        bool,
+        bool | None,
         typer.Option(
-            "--vt",
-            help="After the scan, enrich discovered domains/IPs/URLs with VirusTotal reputation "
-            "(uses your own key; skipped if none is set).",
+            "--vt/--no-vt",
+            help="Enrich discovered domains/IPs/URLs with VirusTotal reputation after the scan. "
+            "On by default, using your own key (env / .env / ~/.vt.toml); you are asked for one "
+            "the first time. --no-vt skips it; --vt forces the prompt.",
         ),
-    ] = False,
+    ] = None,
     vt_limit: Annotated[
         int,
         typer.Option("--vt-limit", min=1, help="Max VirusTotal lookups (free tier: 4/min, 500/day)."),
     ] = 20,
     verbose: VerboseOption = False,
 ) -> None:
-    """Run a ready-made pipeline and render HTML/JSON reports."""
+    """Run a ready-made pipeline and render HTML/JSON reports.
+
+    Discovered domains, IPs and URLs are enriched with VirusTotal reputation by
+    default (your own free key; you are asked for one the first time). Use
+    --no-vt to skip it.
+    """
     if target is None:
         console.print("[err]Provide a seed target via --target.[/err]")
         raise typer.Exit(2)
@@ -1486,15 +1528,9 @@ def pipeline_cmd(
         _checked_session(session)
 
     settings, manager = _bootstrap(verbose=verbose)
-    vt_key: str | None = None
-    if vt_enrich:
-        vt_key = vt.resolve_or_prompt(
-            settings.vt_api_key, interactive=_is_interactive(), env_path=settings.root_dir / ".env"
-        )
-        if not vt_key:
-            console.print(
-                f"[warn]VirusTotal enrichment skipped: no API key. Free key: {vt.API_KEY_URL}[/warn]"
-            )
+    # Resolve the VirusTotal key up front (and prompt if needed) before the live
+    # view takes over the terminal — a prompt and a Live render cannot coexist.
+    vt_key = _resolve_vt_key(settings, vt_enrich)
     try:
         nodes = build(
             name,
@@ -1614,7 +1650,7 @@ def pipeline_cmd(
                 live.refresh()
         _after_live()
 
-    if vt_enrich and vt_key:
+    if vt_key:
         _enrich_with_vt(result, vt_key, vt_limit)
 
     if verbose:

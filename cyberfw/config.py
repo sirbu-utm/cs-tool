@@ -57,6 +57,12 @@ class Settings(BaseSettings):
         description="VirusTotal API key for reputation enrichment and the `vt` command. "
         "Also read from VT_API_KEY / VTCLI_APIKEY / ~/.vt.toml; prompted for when interactive.",
     )
+    vt_prompted: bool = Field(
+        default=False,
+        exclude=True,
+        description="Internal: set once the console has offered to save a VirusTotal key, so a "
+        "default pipeline run asks only the first time rather than before every scan.",
+    )
     # Pipeline behaviour.
     concurrency: int = Field(default=4, ge=1, description="Max parallel jobs across pipeline stages.")
     request_timeout: float = Field(

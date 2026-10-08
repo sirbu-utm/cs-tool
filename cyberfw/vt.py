@@ -34,6 +34,7 @@ __all__ = [
     "Reputation",
     "resolve_api_key",
     "resolve_or_prompt",
+    "remember_prompt",
     "classify_target",
     "parse_reputation",
     "lookup",
@@ -41,11 +42,15 @@ __all__ = [
     "enrichment_targets",
     "API_KEY_URL",
     "GUIDE",
+    "PROMPTED_VAR",
 ]
 
 _API = "https://www.virustotal.com/api/v3"
 _GUI = "https://www.virustotal.com/gui"
 API_KEY_URL = "https://www.virustotal.com/gui/my-apikey"
+#: Marker written to ``.env`` once the console has offered to save a key, so a
+#: default (not ``--vt``) run asks only the first time, never on every scan.
+PROMPTED_VAR = "CYBERFW_VT_PROMPTED"
 
 GUIDE = (
     "VirusTotal API key not found.\n"
@@ -134,13 +139,13 @@ def resolve_api_key(
     return _read_vt_toml(home)
 
 
-def _persist_to_env(env_path: Path, key: str) -> None:
-    """Add or replace ``CYBERFW_VT_API_KEY`` in ``env_path`` (chmod 600)."""
-    line = f"CYBERFW_VT_API_KEY={key}"
+def _set_env_var(env_path: Path, name: str, value: str) -> None:
+    """Add or replace ``name=value`` in ``env_path`` (best-effort, chmod 600)."""
+    line = f"{name}={value}"
     try:
         existing = env_path.read_text(encoding="utf-8") if env_path.exists() else ""
-        if re.search(r"(?m)^CYBERFW_VT_API_KEY=", existing):
-            new = re.sub(r"(?m)^CYBERFW_VT_API_KEY=.*$", line, existing)
+        if re.search(rf"(?m)^{re.escape(name)}=", existing):
+            new = re.sub(rf"(?m)^{re.escape(name)}=.*$", line, existing)
         else:
             new = existing + ("" if existing.endswith("\n") or not existing else "\n") + line + "\n"
         env_path.parent.mkdir(parents=True, exist_ok=True)
@@ -151,6 +156,20 @@ def _persist_to_env(env_path: Path, key: str) -> None:
             pass
     except OSError:
         pass
+
+
+def _persist_to_env(env_path: Path, key: str) -> None:
+    """Add or replace ``CYBERFW_VT_API_KEY`` in ``env_path``."""
+    _set_env_var(env_path, "CYBERFW_VT_API_KEY", key)
+
+
+def remember_prompt(env_path: Path) -> None:
+    """Record in ``.env`` that the console has already offered to save a key.
+
+    A default pipeline run reads this back (as the ``vt_prompted`` setting) and
+    skips the prompt, so VirusTotal is offered once, not before every scan.
+    """
+    _set_env_var(env_path, PROMPTED_VAR, "1")
 
 
 def resolve_or_prompt(
