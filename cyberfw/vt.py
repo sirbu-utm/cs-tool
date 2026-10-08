@@ -17,10 +17,12 @@ bot's subprocess, CI, a pipe) it never prompts — enrichment is simply skipped.
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import ipaddress
 import os
 import re
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -35,6 +37,8 @@ __all__ = [
     "classify_target",
     "parse_reputation",
     "lookup",
+    "enrich",
+    "enrichment_targets",
     "API_KEY_URL",
     "GUIDE",
 ]
@@ -241,3 +245,54 @@ async def lookup(client: httpx.AsyncClient, api_key: str, target: str) -> Reputa
         raise VtError(f"VirusTotal returned HTTP {resp.status_code}")
     attributes = (resp.json().get("data") or {}).get("attributes") or {}
     return parse_reputation(target, kind, gui_kind, ident, attributes)
+
+
+def enrichment_targets(records: Iterable[Any]) -> list[str]:
+    """Unique VT-lookable targets (domains / IPs / URLs) from a run's records.
+
+    Reads each record's ``.target``; keeps only what :func:`classify_target`
+    accepts (so ``host:port`` and the like are dropped), preserving order.
+    """
+    seen: set[str] = set()
+    out: list[str] = []
+    for record in records:
+        target = (getattr(record, "target", "") or "").strip()
+        if not target or target in seen:
+            continue
+        try:
+            classify_target(target)
+        except VtError:
+            continue
+        seen.add(target)
+        out.append(target)
+    return out
+
+
+async def enrich(
+    targets: list[str],
+    api_key: str,
+    limit: int = 20,
+    per_minute: int = 4,
+    *,
+    client: httpx.AsyncClient | None = None,
+) -> list[Reputation]:
+    """Look up up to ``limit`` targets, throttled to ``per_minute`` (VT free = 4).
+
+    One target's failure (rate limit, bad response) is skipped, not fatal.
+    """
+    gap = 60.0 / max(1, per_minute)
+    own = client is None
+    client = client or httpx.AsyncClient(timeout=30.0)
+    out: list[Reputation] = []
+    try:
+        for index, target in enumerate(targets[:limit]):
+            if index:
+                await asyncio.sleep(gap)
+            try:
+                out.append(await lookup(client, api_key, target))
+            except VtError:
+                continue
+    finally:
+        if own:
+            await client.aclose()
+    return out

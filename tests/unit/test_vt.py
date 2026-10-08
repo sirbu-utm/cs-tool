@@ -121,3 +121,34 @@ def test_virustotal_record_round_trips_through_validate_record() -> None:
     assert rec.kind == "reputation"
     assert rec.target == "evil.com"
     assert rec.model_dump()["malicious"] == 3
+
+
+def test_enrichment_targets_keeps_lookable_and_dedups() -> None:
+    from types import SimpleNamespace
+
+    recs = [
+        SimpleNamespace(target="a.com"),
+        SimpleNamespace(target="a.com"),           # duplicate
+        SimpleNamespace(target="https://a.com/x"),
+        SimpleNamespace(target="a.com:80"),        # host:port — not a VT target
+        SimpleNamespace(target=""),                # empty
+        SimpleNamespace(target="1.2.3.4"),
+    ]
+    assert vt.enrichment_targets(recs) == ["a.com", "https://a.com/x", "1.2.3.4"]
+
+
+async def test_enrich_respects_limit_and_skips_failures() -> None:
+    calls: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(str(request.url))
+        if "bad.com" in str(request.url):
+            return httpx.Response(401)
+        return httpx.Response(200, json={"data": {"attributes": {"last_analysis_stats": {"malicious": 1}}}})
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    reps = await vt.enrich(["a.com", "bad.com", "c.com", "d.com"], "k", limit=3, per_minute=6000, client=client)
+    await client.aclose()
+
+    assert len(calls) == 3  # limit honoured (d.com not reached)
+    assert [r.target for r in reps] == ["a.com", "c.com"]  # bad.com (401) skipped

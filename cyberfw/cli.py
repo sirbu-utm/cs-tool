@@ -16,6 +16,7 @@ stage failures into a ``NodeResult`` and the command exits with a helpful status
 from __future__ import annotations
 
 import functools
+import json
 import os
 import shutil
 import time
@@ -69,7 +70,7 @@ from cyberfw.pipeline.engine import (
     StageEvent,
     dependency_hint,
 )
-from cyberfw.pipeline.schemas import ToolRecord
+from cyberfw.pipeline.schemas import ToolRecord, validate_record
 from cyberfw.pipelines import PIPELINES, available_pipelines, build
 from cyberfw.report.html_report import generate_html_report
 from cyberfw.report.json_report import generate_json_report
@@ -1251,6 +1252,25 @@ def _print_reputation(rep: vt.Reputation) -> None:
     console.print(f"  [dim]{rep.permalink}[/dim]")
 
 
+def _enrich_with_vt(result: PipelineResult, api_key: str, limit: int) -> None:
+    """Append VirusTotal reputation records for the run's discovered targets."""
+    targets = vt.enrichment_targets(result.records)
+    if not targets:
+        return
+    console.print(
+        f"[muted]VirusTotal: looking up {min(len(targets), limit)} target(s), throttled to 4/min…[/muted]"
+    )
+    try:
+        reps = anyio.run(vt.enrich, targets, api_key, limit)
+    except Exception as exc:  # noqa: BLE001 - enrichment must never fail the scan
+        console.print(f"[warn]VirusTotal enrichment failed: {exc}[/warn]")
+        return
+    for index, rep in enumerate(reps, 1):
+        result.records.append(validate_record("virustotal", json.dumps(rep.as_record()), index))
+    flagged = sum(1 for rep in reps if rep.flagged)
+    console.print(f"[muted]VirusTotal: {len(reps)} looked up, {flagged} flagged.[/muted]")
+
+
 @app.command("run")
 def run_cmd(
     tool: Annotated[str, typer.Argument(help="Tool name from registry.yaml (e.g. subfinder).")],
@@ -1438,6 +1458,18 @@ def pipeline_cmd(
             "Default comes from the `view` setting; this overrides it for one run.",
         ),
     ] = None,
+    vt_enrich: Annotated[
+        bool,
+        typer.Option(
+            "--vt",
+            help="After the scan, enrich discovered domains/IPs/URLs with VirusTotal reputation "
+            "(uses your own key; skipped if none is set).",
+        ),
+    ] = False,
+    vt_limit: Annotated[
+        int,
+        typer.Option("--vt-limit", min=1, help="Max VirusTotal lookups (free tier: 4/min, 500/day)."),
+    ] = 20,
     verbose: VerboseOption = False,
 ) -> None:
     """Run a ready-made pipeline and render HTML/JSON reports."""
@@ -1448,6 +1480,15 @@ def pipeline_cmd(
         _checked_session(session)
 
     settings, manager = _bootstrap(verbose=verbose)
+    vt_key: str | None = None
+    if vt_enrich:
+        vt_key = vt.resolve_or_prompt(
+            settings.vt_api_key, interactive=_is_interactive(), env_path=settings.root_dir / ".env"
+        )
+        if not vt_key:
+            console.print(
+                f"[warn]VirusTotal enrichment skipped: no API key. Free key: {vt.API_KEY_URL}[/warn]"
+            )
     try:
         nodes = build(
             name,
@@ -1566,6 +1607,9 @@ def pipeline_cmd(
                 view.finish()
                 live.refresh()
         _after_live()
+
+    if vt_enrich and vt_key:
+        _enrich_with_vt(result, vt_key, vt_limit)
 
     if verbose:
         console.print(_node_table(result))
