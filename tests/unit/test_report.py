@@ -250,6 +250,28 @@ class TestHtmlDashboard:
         assert "b.example.com" in hosts
         assert '<i class="ld"></i>src</td>' not in hosts  # a gitleaks file path is not a host
 
+    def test_hosts_show_virustotal_reputation_when_enriched(self, tmp_path: Path) -> None:
+        records = [
+            _rec("subfinder", {"host": "evil.example.com", "source": "crtsh"}),
+            _rec("virustotal", {
+                "target": "evil.example.com", "vt_kind": "domain", "found": True,
+                "malicious": 7, "suspicious": 1, "harmless": 50,
+                "permalink": "https://www.virustotal.com/gui/domain/evil.example.com",
+            }),
+        ]
+        result = PipelineResult(
+            nodes=[NodeResult(node=Node(tool="subfinder", stage="s"), ok=True, count=1)],
+            records=records,
+        )
+        hosts = self._page(tmp_path, result).split('<table class="hosts">', 1)[1].split("</table>", 1)[0]
+        assert "<th>reputation</th>" in hosts
+        assert '<span class="badge sev-critical">7 malicious</span>' in hosts
+        assert 'href="https://www.virustotal.com/gui/domain/evil.example.com"' in hosts
+
+    def test_hosts_omit_the_reputation_column_without_virustotal(self, tmp_path: Path) -> None:
+        hosts = self._page(tmp_path).split('<table class="hosts">', 1)[1].split("</table>", 1)[0]
+        assert "<th>reputation</th>" not in hosts
+
     def test_severity_donut_and_cards(self, tmp_path: Path) -> None:
         text = self._page(tmp_path)
         assert text.count('class="seg sev-') == 2  # critical + info

@@ -277,7 +277,10 @@ async def start(
             config.web_host,
         )
         return None
-    runner = web.AppRunner(build_web_app(config, store, service, bot))
+    # access_log=None silences aiohttp's per-request line; the dashboard polls
+    # a few endpoints every couple of seconds, which would otherwise bury the
+    # bot log. Our own LOG.info calls (scan started, operator messaged) remain.
+    runner = web.AppRunner(build_web_app(config, store, service, bot), access_log=None)
     await runner.setup()
     site = web.TCPSite(runner, config.web_host, config.web_port)
     await site.start()
@@ -364,8 +367,8 @@ _DASHBOARD = r"""<!DOCTYPE html>
   </div>
   <div id="umsg"></div>
   <table>
-    <thead><tr><th>telegram id</th><th>note</th><th>source</th><th></th></tr></thead>
-    <tbody id="urows"><tr><td colspan="4" class="empty">loading…</td></tr></tbody>
+    <thead><tr><th>telegram id</th><th>note</th><th>source</th><th>added</th><th></th></tr></thead>
+    <tbody id="urows"><tr><td colspan="5" class="empty">loading…</td></tr></tbody>
   </table>
 
   <div class="flex">
@@ -468,15 +471,21 @@ async function sendMsg() {
 $("msend").addEventListener("click", sendMsg);
 $("mtext").addEventListener("keydown", (e) => { if (e.key === "Enter") sendMsg(); });
 
+function when(iso) {
+  if (!iso) return "—";
+  const d = new Date(iso);
+  return isNaN(d.getTime()) ? "—" : d.toLocaleString();
+}
 async function loadUsers() {
   try {
     const users = await (await fetch("api/users")).json();
     const rows = $("urows");
-    if (!users.length) { rows.innerHTML = '<tr><td colspan="4" class="empty">none</td></tr>'; return; }
+    if (!users.length) { rows.innerHTML = '<tr><td colspan="5" class="empty">none</td></tr>'; return; }
     rows.innerHTML = users.map((u) =>
       '<tr><td class="t">' + esc(u.user_id) + '</td>'
       + '<td>' + esc(u.username || "") + '</td>'
       + '<td class="t">' + esc(u.source) + '</td>'
+      + '<td class="t">' + esc(when(u.added_at)) + '</td>'
       + '<td>' + (u.source === "db" ? '<button class="danger" onclick="rmUser(' + u.user_id + ')">Remove</button>' : '') + '</td></tr>'
     ).join('');
   } catch (e) {}

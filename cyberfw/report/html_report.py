@@ -66,8 +66,11 @@ _SEVERITY_SHORT = {
 _MAJOR = frozenset({"critical", "high", "medium"})
 
 #: Record kinds whose target names a host. A gitleaks ``secret`` names a file,
-#: and ``hostname_of("src/app.py")`` would invent a host called ``src``.
-_HOST_KINDS = frozenset({"host", "port", "http", "fuzz", "vuln", "screenshot", "scan"})
+#: and ``hostname_of("src/app.py")`` would invent a host called ``src``. A VT
+#: ``reputation`` target is a domain/IP/URL, so it folds onto its host too.
+_HOST_KINDS = frozenset(
+    {"host", "port", "http", "fuzz", "vuln", "screenshot", "scan", "reputation"}
+)
 
 #: Caps that keep a huge scan from building a page the browser chokes on;
 #: the record table always lists everything.
@@ -558,6 +561,12 @@ class _Host:
     severities: Counter[str] = field(default_factory=Counter)
     fuzz: int = 0
     shots: int = 0
+    vt_seen: bool = False  # a VirusTotal lookup mapped to this host
+    vt_found: bool = False  # VirusTotal had a record for it
+    vt_malicious: int = 0
+    vt_suspicious: int = 0
+    vt_harmless: int = 0
+    vt_permalink: str = ""
 
     def worst(self) -> str:
         return next((s for s in _SEVERITIES if self.severities[s]), "")
@@ -601,10 +610,42 @@ def _hosts(records: Iterable[ToolRecord]) -> list[_Host]:
             host.fuzz += 1
         elif kind == "screenshot":
             host.shots += 1
+        elif kind == "reputation":
+            host.vt_seen = True
+            if getattr(record, "found", False):
+                host.vt_found = True
+            mal = int(getattr(record, "malicious", 0) or 0)
+            susp = int(getattr(record, "suspicious", 0) or 0)
+            # One host can draw several lookups (its domain and its live URLs);
+            # keep the most alarming (most malicious, then most suspicious).
+            if not host.vt_permalink or (mal, susp) > (host.vt_malicious, host.vt_suspicious):
+                host.vt_malicious, host.vt_suspicious = mal, susp
+                host.vt_harmless = int(getattr(record, "harmless", 0) or 0)
+                host.vt_permalink = str(getattr(record, "permalink", "") or "") or host.vt_permalink
     return sorted(hosts.values(), key=_Host.risk)
 
 
+def _vt_cell(host: _Host) -> str:
+    """One host's VirusTotal verdict: red when flagged malicious, amber when
+    suspicious, muted otherwise — linked to its VirusTotal page when known."""
+    if not host.vt_seen:
+        return _DASH
+    if not host.vt_found:
+        inner = '<span class="dim">not seen</span>'
+    elif host.vt_malicious:
+        inner = f'<span class="badge sev-critical">{host.vt_malicious} malicious</span>'
+    elif host.vt_suspicious:
+        inner = f'<span class="badge sev-medium">{host.vt_suspicious} suspicious</span>'
+    else:
+        inner = '<span class="tag">clean</span>'
+    link = host.vt_permalink
+    if link.lower().startswith(("http://", "https://")):
+        return f'<a href="{_e(link)}" target="_blank" rel="noopener noreferrer">{inner}</a>'
+    return inner
+
+
 def _hosts_section(hosts: list[_Host]) -> str:
+    has_vt = any(h.vt_seen for h in hosts)
     rows: list[str] = []
     for index, host in enumerate(hosts[:_MAX_HOSTS]):
         code = (
@@ -629,6 +670,7 @@ def _hosts_section(hosts: list[_Host]) -> str:
             )
             if part
         )
+        vt = f"<td>{_vt_cell(host)}</td>" if has_vt else ""
         rows.append(
             f'<tr style="--i:{min(index, _MAX_STAGGER)}">'
             f'<td class="host"><i class="ld{" on" if host.live else ""}"></i>{_e(host.name)}</td>'
@@ -636,6 +678,7 @@ def _hosts_section(hosts: list[_Host]) -> str:
             f'<td class="ttl" title="{_e(host.title)}">{_e(_clip(host.title, 70)) or _DASH}</td>'
             f'<td><div class="ports">{port_chips or _DASH}</div></td>'
             f'<td><div class="ports">{findings or _DASH}</div></td>'
+            f"{vt}"
             f'<td class="dim">{_e(extras) or "—"}</td></tr>'
         )
     hidden = len(hosts) - _MAX_HOSTS
@@ -645,10 +688,11 @@ def _hosts_section(hosts: list[_Host]) -> str:
         else ""
     )
     live = sum(1 for h in hosts if h.live)
+    vt_th = "<th>reputation</th>" if has_vt else ""
     return (
         _heading("Hosts", f"{len(hosts):,} discovered · {live:,} live")
         + '<div class="tbl"><table class="hosts"><thead><tr><th>host</th><th>http</th><th>title</th>'
-        + "<th>ports</th><th>findings</th><th>other</th></tr></thead><tbody>"
+        + "<th>ports</th><th>findings</th>" + vt_th + "<th>other</th></tr></thead><tbody>"
         + "\n".join(rows)
         + "</tbody></table></div>"
         + note
