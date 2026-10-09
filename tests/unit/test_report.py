@@ -272,6 +272,50 @@ class TestHtmlDashboard:
         hosts = self._page(tmp_path).split('<table class="hosts">', 1)[1].split("</table>", 1)[0]
         assert "<th>reputation</th>" not in hosts
 
+    def test_cve_intel_puts_exploited_findings_first(self, tmp_path: Path) -> None:
+        from cyberfw.pipeline.schemas import CveIntel, NucleiResult
+
+        hot = _rec("nuclei", {"template-id": "CVE-2021-44228", "matched-at": "https://a.example.com/",
+                              "info": {"name": "Log4Shell", "severity": "medium"}})
+        cold = _rec("nuclei", {"template-id": "t-crit", "matched-at": "https://a.example.com/c",
+                               "info": {"name": "Cold critical", "severity": "critical"}}, 2)
+        assert isinstance(hot, NucleiResult)
+        hot.intel = CveIntel(
+            cves=["CVE-2021-44228"], priority="now", kev=True, kev_added="2021-12-10",
+            ransomware=True, epss=0.944, exploits=["50592"], metasploit=True,
+        )
+        result = PipelineResult(
+            nodes=[NodeResult(node=Node(tool="nuclei", stage="v"), ok=True, count=2)], records=[hot, cold]
+        )
+        text = self._page(tmp_path, result)
+
+        panel = text.split('<div class="panel fixfirst">', 1)[1].split("</ol>", 1)[0]
+        assert "Log4Shell" in panel and "Cold critical" not in panel  # only findings with a signal
+        assert "fix now" in panel and "exploited in the wild (CISA KEV)" in panel and "EPSS 94%" in panel
+        card = text.split('<article class="card sev-medium"', 1)[1].split("</article>", 1)[0]
+        assert '<span class="badge sev-critical">fix now</span>' in card
+        assert "KEV since 2021-12-10" in card and "Metasploit module" in card
+        assert 'href="https://www.exploit-db.com/exploits/50592"' in card
+        assert '<span class="lbl">exploited</span>' in text  # the overview tile
+        assert "2 vulnerabilities · 0 secrets · 1 exploited in the wild" in text  # section heading
+
+    def test_epss_near_certainty_is_not_rounded_to_100_percent(self, tmp_path: Path) -> None:
+        from cyberfw.pipeline.schemas import CveIntel, NucleiResult
+
+        rec = _rec("nuclei", {"template-id": "CVE-2021-44228", "matched-at": "https://a.example.com/",
+                              "info": {"name": "Log4Shell", "severity": "critical"}})
+        assert isinstance(rec, NucleiResult)
+        rec.intel = CveIntel(cves=["CVE-2021-44228"], priority="soon", epss=0.99999)
+        result = PipelineResult(nodes=[NodeResult(node=Node(tool="nuclei", stage="v"), ok=True, count=1)], records=[rec])
+        text = self._page(tmp_path, result)
+        assert "EPSS &gt;99.9%" in text
+        assert "EPSS 100%" not in text
+
+    def test_no_intel_means_no_fix_first_panel(self, tmp_path: Path) -> None:
+        text = self._page(tmp_path)
+        assert 'class="panel fixfirst"' not in text
+        assert '<span class="lbl">exploited</span>' not in text
+
     def test_severity_donut_and_cards(self, tmp_path: Path) -> None:
         text = self._page(tmp_path)
         assert text.count('class="seg sev-') == 2  # critical + info

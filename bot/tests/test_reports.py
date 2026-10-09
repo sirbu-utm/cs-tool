@@ -44,6 +44,23 @@ def test_load_summary_missing_file_raises(tmp_path: Path) -> None:
         load_summary(tmp_path / "nope.json")
 
 
+def test_exploited_findings_rank_first_and_carry_their_intel() -> None:
+    report = {"ok": True, "records": [
+        {"kind": "vuln", "template_id": "crit", "info": {"name": "Plain critical", "severity": "critical"}},
+        {"kind": "vuln", "template_id": "CVE-2021-44228", "info": {"name": "Log4Shell", "severity": "medium"},
+         "intel": {"kev": True, "epss": 0.944, "exploits": ["50592"]}},
+        {"kind": "vuln", "template_id": "y", "info": {"name": "Odd intel", "severity": "low"},
+         "intel": {"epss": "not-a-number"}},
+    ]}
+    summary = summarize(report)
+    first = summary.findings[0]
+    assert first.name == "Log4Shell"  # KEV outranks a plain critical
+    assert first.kev and first.epss == 0.944 and first.exploit
+    assert summary.findings[1].name == "Plain critical"
+    assert summary.findings[2].epss is None  # junk EPSS is ignored, not a crash
+    assert summary.exploited == 1
+
+
 def test_report_without_findings_is_not_serious() -> None:
     summary = summarize({"ok": True, "records": [{"tool": "httpx", "kind": "http", "target": "x"}]})
     assert summary.total_findings == 0

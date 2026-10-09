@@ -89,6 +89,33 @@ async def test_finish_persists_summary(tmp_path: Path) -> None:
     assert scan.report_html == str(tmp_path / "report.html")
 
 
+async def test_finding_intel_round_trips_and_old_summaries_still_load(tmp_path: Path) -> None:
+    from cyberfw_bot.models import Finding, Summary
+
+    store = await _store(tmp_path)
+    await store.create(Scan(id="kv1", user_id=42, chat_id=7, target="example.com"))
+    hot = Finding(name="Log4Shell", severity="critical", target="t", template_id="CVE-2021-44228",
+                  kev=True, epss=0.944, exploit=True)
+    await store.finish(
+        "kv1", status="done", exit_code=0, error=None, report_json=None, report_html=None,
+        summary=Summary(ok=True, severity_counts={"critical": 1}, findings=[hot]),
+    )
+    scan = await store.get("kv1")
+    assert scan is not None and scan.summary is not None
+    assert scan.summary.findings == [hot] and scan.summary.exploited == 1
+
+    # A summary stored before threat intel existed has no kev/epss/exploit keys.
+    with sqlite3.connect(tmp_path / "scans.sqlite3") as con:
+        con.execute(
+            "UPDATE scans SET summary_json = ? WHERE id = 'kv1'",
+            ('{"ok": true, "severity_counts": {"high": 1}, "findings": '
+             '[{"name": "x", "severity": "high", "target": "t", "template_id": "y"}]}',),
+        )
+    old = await store.get("kv1")
+    assert old is not None and old.summary is not None
+    assert old.summary.findings[0].kev is False and old.summary.findings[0].epss is None
+
+
 async def test_recent_is_scoped_to_the_user_and_ordered(tmp_path: Path) -> None:
     store = await _store(tmp_path)
     await store.create(Scan(id="one", user_id=42, chat_id=7, target="a.com"))

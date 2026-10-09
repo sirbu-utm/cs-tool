@@ -32,8 +32,9 @@ from urllib.parse import quote
 from cyberfw.exceptions import ReportError
 from cyberfw.logging import get_logger
 from cyberfw.pipeline.engine import NodeResult, PipelineResult
-from cyberfw.pipeline.schemas import ToolRecord
+from cyberfw.pipeline.schemas import CveIntel, ToolRecord
 from cyberfw.report.run_info import RunInfo
+from cyberfw.threatintel import EPSS_HIGH, exploit_url
 from cyberfw.tools.targets import hostname_of
 
 LOG = get_logger("report.html")
@@ -77,6 +78,7 @@ _HOST_KINDS = frozenset(
 _MAX_HOSTS = 500
 _MAX_CARDS = 240
 _MAX_SHOTS = 300
+_MAX_FIX_FIRST = 15
 #: Rows past this index share its entry delay, so long tables do not crawl in.
 _MAX_STAGGER = 30
 
@@ -279,6 +281,21 @@ def _tiles(
                 "icon": "shield",
                 "sub": top or "none matched",
                 "tone": f"sev-{worst}" if worst else "t-ok",
+            }
+        )
+    rated = [intel for r in vulns if (intel := _intel(r)) is not None]
+    if rated:
+        exploited = sum(1 for intel in rated if intel.kev)
+        public = sum(1 for intel in rated if intel.exploits)
+        tiles.append(
+            {
+                "label": "exploited",
+                "value": exploited,
+                "icon": "flame",
+                "sub": "in the wild (CISA KEV)"
+                if exploited
+                else (f"{public} with a public exploit" if public else "no known exploitation"),
+                "tone": "t-err" if exploited else ("t-warn" if public else "t-ok"),
             }
         )
     secrets = sum(1 for r in result.records if r.kind == "secret")
@@ -701,12 +718,16 @@ def _hosts_section(hosts: list[_Host]) -> str:
 
 # -- findings ---------------------------------------------------------------------
 def _findings_section(vulns: list[ToolRecord], secrets: list[ToolRecord]) -> str:
-    ordered = sorted(
-        vulns, key=lambda r: _SEVERITIES.index(_severity(r))
-    )  # stable: keeps arrival order
+    # Severity groups the cards; within one, exploited-in-the-wild and likelier
+    # findings come first. sorted() is stable, so ties keep arrival order.
+    ordered = sorted(vulns, key=lambda r: (_SEVERITIES.index(_severity(r)), *_urgency(r)))
     major = [r for r in ordered if _severity(r) in _MAJOR]
     minor = [r for r in ordered if _severity(r) not in _MAJOR]
-    parts = [_heading("Findings", f"{len(vulns):,} vulnerabilities · {len(secrets):,} secrets")]
+    exploited = sum(1 for r in vulns if (intel := _intel(r)) is not None and intel.kev)
+    note = f"{len(vulns):,} vulnerabilities · {len(secrets):,} secrets"
+    if exploited:
+        note += f" · {exploited:,} exploited in the wild"
+    parts = [_heading("Findings", note), _fix_first(vulns)]
     if major:
         parts.append(_cards(_vuln_card(r, i) for i, r in enumerate(major[:_MAX_CARDS])))
         parts.append(_more_note(len(major)))
@@ -734,13 +755,112 @@ def _more_note(count: int) -> str:
     )
 
 
+#: Fix-first order of a finding's intel priority; no intel ranks last.
+_PRIORITY_RANK = {"now": 0, "soon": 1}
+_PRIORITY_BADGE = {
+    "now": '<span class="badge sev-critical">fix now</span>',
+    "soon": '<span class="badge sev-medium">fix soon</span>',
+}
+
+
+def _intel(record: ToolRecord) -> CveIntel | None:
+    intel = getattr(record, "intel", None)
+    return intel if isinstance(intel, CveIntel) else None
+
+
+def _urgency(record: ToolRecord) -> tuple[int, float]:
+    """Exploited in the wild first, then likely / exploit published; higher EPSS first."""
+    intel = _intel(record)
+    if intel is None:
+        return (2, 0.0)
+    return (_PRIORITY_RANK.get(intel.priority, 2), -(intel.epss or 0.0))
+
+
+def _pct(value: float) -> str:
+    """An EPSS probability as a percentage: ``>99.9%``, ``94%``, ``3.2%``, ``0.04%``.
+
+    Never rounds up to "100%" — EPSS tops out just below certainty.
+    """
+    pct = value * 100
+    if pct >= 99.9:
+        return ">99.9%"
+    if pct >= 10:
+        return f"{min(pct, 99.0):.0f}%"
+    return f"{pct:.1f}%" if pct >= 1 else f"{pct:.2f}%"
+
+
+def _finding_name(record: ToolRecord) -> str:
+    return str(getattr(record, "name", "") or getattr(record, "template_id", "") or "finding")
+
+
+def _fix_first(vulns: list[ToolRecord]) -> str:
+    """The short list to act on: findings exploited in the wild, then the likely ones."""
+    urgent = [r for r in vulns if (intel := _intel(r)) is not None and intel.priority]
+    if not urgent:
+        return ""
+    urgent.sort(key=lambda r: (_urgency(r)[0], _SEVERITIES.index(_severity(r)), _urgency(r)[1]))
+    rows: list[str] = []
+    for record in urgent[:_MAX_FIX_FIRST]:
+        intel = _intel(record)
+        assert intel is not None  # filtered above
+        why = [
+            part
+            for part in (
+                "exploited in the wild (CISA KEV)" if intel.kev else "",
+                "used by ransomware" if intel.ransomware else "",
+                f"EPSS {_pct(intel.epss)}" if intel.epss is not None else "",
+                "public exploit" if intel.exploits else "",
+                "Metasploit module" if intel.metasploit else "",
+            )
+            if part
+        ]
+        rows.append(
+            f'<li>{_PRIORITY_BADGE[intel.priority]}<div><b>{_e(_finding_name(record))}</b> '
+            f'<span class="mono dim">{_e(", ".join(intel.cves))}</span>'
+            f'<p class="why">{_e(" · ".join(why))}</p><p class="where">{_link(record.target)}</p></div></li>'
+        )
+    hidden = len(urgent) - _MAX_FIX_FIRST
+    more = f'<p class="note">… and {hidden:,} more below.</p>' if hidden > 0 else ""
+    return (
+        '<div class="panel fixfirst"><h3>Fix first — ranked by real-world exploitation</h3>'
+        f'<ol>{"".join(rows)}</ol>{more}</div>'
+    )
+
+
+def _intel_tags(intel: CveIntel) -> str:
+    """Why a finding is urgent: KEV, ransomware, EPSS, public exploits."""
+    tags: list[str] = []
+    if intel.kev:
+        since = f" · KEV since {intel.kev_added}" if intel.kev_added else ""
+        tags.append(f'<span class="tag hot">exploited in the wild{_e(since)}</span>')
+    if intel.ransomware:
+        tags.append('<span class="tag hot">used by ransomware</span>')
+    if intel.epss is not None:
+        tone = " warm" if intel.epss >= EPSS_HIGH else ""
+        tags.append(
+            f'<span class="tag{tone}" title="chance of exploitation in the next 30 days (EPSS)">'
+            f"EPSS {_e(_pct(intel.epss))}</span>"
+        )
+    if intel.metasploit:
+        tags.append('<span class="tag hot">Metasploit module</span>')
+    ids = [edb_id for edb_id in intel.exploits if edb_id.isdigit()]
+    tags += [
+        f'<a class="tag warm" href="{_e(exploit_url(edb_id))}" target="_blank" '
+        f'rel="noopener noreferrer">exploit-db {edb_id}</a>'
+        for edb_id in ids[:3]
+    ]
+    if len(ids) > 3:
+        tags.append(f'<span class="tag">+{len(ids) - 3} exploits</span>')
+    return f'<footer class="intel">{"".join(tags)}</footer>' if tags else ""
+
+
 def _vuln_card(record: ToolRecord, index: int) -> str:
     severity = _severity(record)
     info = getattr(record, "info", {}) or {}
     classification = info.get("classification")
     if not isinstance(classification, dict):
         classification = {}
-    name = str(getattr(record, "name", "") or getattr(record, "template_id", "") or "finding")
+    name = _finding_name(record)
     template_id = str(getattr(record, "template_id", "") or "")
     tags = [f'<span class="tag id">{_e(template_id)}</span>'] if template_id else []
     cves = [c for c in _as_list(classification.get("cve-id")) if c.lower() != template_id.lower()]
@@ -751,10 +871,13 @@ def _vuln_card(record: ToolRecord, index: int) -> str:
     tags += [f'<span class="tag">{_e(tag)}</span>' for tag in _as_list(info.get("tags"))[:5]]
     description = str(info.get("description") or "").strip()
     desc = f'<p class="desc">{_e(_clip(description, 260))}</p>' if description else ""
+    intel = _intel(record)
+    urgent = _PRIORITY_BADGE.get(intel.priority, "") if intel else ""
     return (
         f'<article class="card sev-{severity}" style="--i:{min(index, 12)}">'
-        f'<header><span class="badge sev-{severity}">{severity}</span><h4>{_e(name)}</h4></header>'
+        f'<header><span class="badge sev-{severity}">{severity}</span>{urgent}<h4>{_e(name)}</h4></header>'
         f'<p class="where">{_link(record.target)}</p>{desc}'
+        f"{_intel_tags(intel) if intel else ''}"
         f"<footer>{''.join(tags)}</footer></article>"
     )
 
@@ -849,7 +972,7 @@ def _render_record(index: int, record: ToolRecord) -> str:
 
 def _format_detail(as_dict: dict[str, object]) -> str:
     """Flatten a record dict into a short, readable substring (first field wins)."""
-    skip = {"tool", "line_number", "raw", "target", "kind", "stage"}
+    skip = {"tool", "line_number", "raw", "target", "kind", "stage", "intel"}  # intel: on the cards
     seen: list[str] = []
     for key, value in as_dict.items():
         if key in skip or value in ("", None):
@@ -1016,6 +1139,9 @@ _ICONS = {
         '<path d="M12 3l8 3v6c0 5-3.5 8.5-8 9.5-4.5-1-8-4.5-8-9.5V6z"/><path d="M12 8v5M12 16.5h.01"/>'
     ),
     "key": _icon('<circle cx="8" cy="15" r="4"/><path d="M11 12l9-9M17 6l3 3M14.5 8.5l2 2"/>'),
+    "flame": _icon(
+        '<path d="M12 3c.5 3.5 4.5 5.5 4.5 10a4.5 4.5 0 0 1-9 0c0-2.4 1.3-4 2.4-5.2.3 1.6 1 2.7 2.1 3.2-.6-2.8-.6-5.2 0-8z"/>'
+    ),
     "camera": _icon('<path d="M4 8h3l2-3h6l2 3h3v11H4z"/><circle cx="12" cy="13" r="3.5"/>'),
     "search": _icon('<circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/>'),
 }
@@ -1398,6 +1524,17 @@ html.js #record-table:not(.paged) tbody tr:nth-child(n+501) { display: none; }
 .tag.id { color: var(--text); }
 .tag.cve { color: var(--critical); background: color-mix(in srgb, var(--critical) 10%, transparent); }
 .tag.cvss { color: var(--high); background: color-mix(in srgb, var(--high) 10%, transparent); }
+.tag.hot { color: var(--critical); background: color-mix(in srgb, var(--critical) 10%, transparent); font-weight: 600; }
+.tag.warm { color: var(--medium); background: color-mix(in srgb, var(--medium) 12%, transparent); }
+a.tag { text-decoration: none; }
+a.tag:hover { text-decoration: underline; }
+.card footer.intel + footer { margin-top: 8px; }
+.fixfirst { margin-bottom: 16px; border-left: 3px solid var(--critical); }
+.fixfirst ol { list-style: none; margin: 0; padding: 0; display: grid; gap: 12px; }
+.fixfirst li { display: grid; grid-template-columns: 72px minmax(0, 1fr); gap: 12px; align-items: start; }
+.fixfirst li .badge { justify-self: start; }
+.fixfirst .why { margin: 3px 0 0; color: var(--text); font-size: 12.5px; }
+.fixfirst .where { margin: 2px 0 0; color: var(--muted); font: 12px var(--mono); overflow-wrap: anywhere; }
 .host { white-space: nowrap; }
 .ld { display: inline-block; width: 8px; height: 8px; margin-right: 10px; border-radius: 50%; background: var(--dim); vertical-align: 1px; }
 .ld.on { background: var(--ok); }

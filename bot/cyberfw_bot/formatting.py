@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from html import escape
 
-from cyberfw_bot.models import SEVERITY_ORDER, Scan, Summary
+from cyberfw_bot.models import SEVERITY_ORDER, Finding, Scan, Summary
 
 __all__ = [
     "summary_message",
@@ -44,6 +44,24 @@ def _counts_line(summary: Summary) -> str:
     return "  ".join(shown) if shown else "no vulnerabilities reported"
 
 
+#: EPSS worth calling out in a chat (same threshold as cyberfw.threatintel.EPSS_HIGH).
+_EPSS_HIGH = 0.1
+
+
+def _intel_marks(finding: Finding) -> str:
+    """A line saying why a finding is urgent (KEV / high EPSS / public exploit), or ""."""
+    marks = []
+    if finding.kev:
+        marks.append("🔥 <b>exploited in the wild</b>")
+    if finding.epss is not None and finding.epss >= _EPSS_HIGH:
+        pct = finding.epss * 100  # never round up to "100%": EPSS stops short of certainty
+        # (&gt; — Telegram's HTML mode rejects a bare ">")
+        marks.append("EPSS &gt;99.9%" if pct >= 99.9 else f"EPSS {min(pct, 99.0):.0f}%")
+    if finding.exploit:
+        marks.append("public exploit")
+    return ("\n   " + " · ".join(marks)) if marks else ""
+
+
 def summary_message(scan: Scan, summary: Summary, max_findings: int) -> str:
     """The message sent when a scan finishes: recon totals, severity mix, top findings."""
     lines = [
@@ -54,6 +72,10 @@ def summary_message(scan: Scan, summary: Summary, max_findings: int) -> str:
         ),
         f"findings: {_counts_line(summary)}",
     ]
+    if summary.exploited:
+        lines.append(
+            f"🔥 <b>{summary.exploited}</b> exploited in the wild (CISA KEV) — fix these first"
+        )
     if summary.findings:
         lines.append("")
         lines.append(f"<b>Top {min(max_findings, len(summary.findings))} findings</b>:")
@@ -61,7 +83,7 @@ def summary_message(scan: Scan, summary: Summary, max_findings: int) -> str:
             emoji = _SEVERITY_EMOJI.get(finding.severity, "▫️")
             lines.append(
                 f"{emoji} <b>{escape(finding.severity)}</b> — {escape(finding.name)}\n"
-                f"   <code>{escape(finding.target)}</code>"
+                f"   <code>{escape(finding.target)}</code>{_intel_marks(finding)}"
             )
         extra = len(summary.findings) - max_findings
         if extra > 0:
@@ -98,6 +120,8 @@ def scan_line(scan: Scan) -> str:
         crit = scan.summary.severity_counts.get("critical", 0)
         high = scan.summary.severity_counts.get("high", 0)
         detail = f" — {crit} crit / {high} high"
+        if scan.summary.exploited:
+            detail += f" · 🔥 {scan.summary.exploited} exploited"
     return f"{icon} <code>{escape(scan.id)}</code> {escape(scan.target)} ({escape(scan.status)}){detail}"
 
 

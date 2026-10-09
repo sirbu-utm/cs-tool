@@ -27,6 +27,7 @@ __all__ = [
     "GowitnessResult",
     "RustscanResult",
     "VirusTotalResult",
+    "CveIntel",
     "validate_record",
 ]
 
@@ -144,6 +145,27 @@ class FfufResult(ToolRecord):
 
 
 # -- Nuclei --------------------------------------------------------------------
+class CveIntel(BaseModel):
+    """How urgent a CVE finding is, from public feeds (see :mod:`cyberfw.threatintel`).
+
+    Not something nuclei prints: attached to a finding after the scan, from
+    CISA KEV, EPSS and Exploit-DB, looked up by CVE id only.
+    """
+
+    cves: list[str] = Field(default_factory=list)
+    #: ``now`` — exploited in real attacks (KEV); ``soon`` — likely to be
+    #: (high EPSS) or a public exploit exists; ``""`` — no signal.
+    priority: str = ""
+    kev: bool = False
+    kev_added: str = ""
+    kev_due: str = ""
+    ransomware: bool = False
+    epss: float | None = None
+    epss_percentile: float | None = None
+    exploits: list[str] = Field(default_factory=list)
+    metasploit: bool = False
+
+
 class NucleiResult(ToolRecord):
     """Template-based vulnerability scan: ``{"template-id", "info", "matched-at"}``."""
 
@@ -151,6 +173,7 @@ class NucleiResult(ToolRecord):
     template: str = ""
     matched_at: str = Field(default="", validation_alias="matched-at")
     info: dict[str, Any] = Field(default_factory=dict)
+    intel: CveIntel | None = None
 
     @property
     def name(self) -> str:

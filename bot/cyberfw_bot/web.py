@@ -47,6 +47,7 @@ def _scan_dict(scan: Scan) -> dict[str, object]:
         "exit_code": scan.exit_code,
         "error": scan.error,
         "severity": severity,
+        "exploited": scan.summary.exploited if scan.summary else 0,
         "has_report": bool(scan.report_html),
     }
 
@@ -102,7 +103,10 @@ async def _scan_detail(request: web.Request) -> web.Response:
     data = _scan_dict(scan)
     data["findings"] = (
         [
-            {"name": f.name, "severity": f.severity, "target": f.target, "template_id": f.template_id}
+            {
+                "name": f.name, "severity": f.severity, "target": f.target,
+                "template_id": f.template_id, "kev": f.kev, "epss": f.epss, "exploit": f.exploit,
+            }
             for f in scan.summary.findings
         ]
         if scan.summary
@@ -394,8 +398,9 @@ function age(iso) {
   if (s < 3600) return Math.round(s / 60) + "m";
   return Math.round(s / 3600) + "h";
 }
-function sevHtml(sev) {
+function sevHtml(sev, exploited) {
   const parts = [];
+  if (exploited) parts.push('<span class="crit">' + exploited + ' exploited</span>');
   if (sev.critical) parts.push('<span class="crit">' + sev.critical + ' crit</span>');
   if (sev.high) parts.push('<span class="high">' + sev.high + ' high</span>');
   if (sev.medium) parts.push('<span class="med">' + sev.medium + ' med</span>');
@@ -424,7 +429,7 @@ async function refresh() {
         + '<td class="t">' + esc(s.target) + '</td>'
         + '<td class="t">' + esc(s.username || s.user_id) + '</td>'
         + '<td><span class="st ' + esc(s.status) + '">' + esc(s.status) + '</span></td>'
-        + '<td>' + sevHtml(s.severity || {}) + '</td>'
+        + '<td>' + sevHtml(s.severity || {}, s.exploited || 0) + '</td>'
         + '<td class="t">' + age(s.created_at) + '</td>'
         + '<td><div class="acts">' + acts.join('') + '</div></td></tr>';
     }).join('');

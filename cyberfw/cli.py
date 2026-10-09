@@ -38,7 +38,7 @@ from rich.prompt import Prompt as _RichPrompt
 from rich.table import Table
 from rich.text import Text, TextType
 
-from cyberfw import motion, vt
+from cyberfw import motion, threatintel, vt
 from cyberfw.config import Settings, load_settings
 from cyberfw.exceptions import (
     ChromiumUnsupportedError,
@@ -1294,6 +1294,28 @@ def _resolve_vt_key(settings: Settings, choice: bool | None) -> str | None:
     return entered
 
 
+def _enrich_with_intel(result: PipelineResult, cache_dir: Path) -> None:
+    """Rate CVE findings by real-world exploitation (CISA KEV, EPSS, Exploit-DB)."""
+    if not any(threatintel.cve_ids(r) for r in result.records if r.kind == "vuln"):
+        return
+    console.print("[muted]Threat intel: checking CVEs against CISA KEV, EPSS and Exploit-DB…[/muted]")
+    try:
+        summary = anyio.run(threatintel.enrich, result.records, cache_dir)
+    except Exception as exc:  # noqa: BLE001 - intel must never fail the scan
+        console.print(f"[warn]Threat intel failed: {exc}[/warn]")
+        return
+    for error in summary.errors:
+        console.print(f"[warn]Threat intel — {error}[/warn]")
+    parts = [f"{summary.cves} CVE(s) in {summary.findings} finding(s)"]
+    if summary.exploited:
+        parts.append(f"[err]{summary.exploited} exploited in the wild (CISA KEV)[/err]")
+    if summary.exploits:
+        parts.append(f"{summary.exploits} with a public exploit")
+    if summary.likely:
+        parts.append(f"{summary.likely} with EPSS ≥ {threatintel.EPSS_HIGH:.0%}")
+    console.print("Threat intel: " + " · ".join(parts))
+
+
 def _enrich_with_vt(result: PipelineResult, api_key: str, limit: int) -> None:
     """Append VirusTotal reputation records for the run's discovered targets."""
     targets = vt.enrichment_targets(result.records)
@@ -1513,13 +1535,23 @@ def pipeline_cmd(
         int,
         typer.Option("--vt-limit", min=1, help="Max VirusTotal lookups (free tier: 4/min, 500/day)."),
     ] = 20,
+    intel: Annotated[
+        bool,
+        typer.Option(
+            "--intel/--no-intel",
+            help="Rate CVE findings by real-world exploitation: CISA KEV (exploited in the wild), "
+            "EPSS (chance of attack in 30 days) and Exploit-DB (public exploit). Free, no keys; "
+            "only public feeds are queried, never the target.",
+        ),
+    ] = True,
     verbose: VerboseOption = False,
 ) -> None:
     """Run a ready-made pipeline and render HTML/JSON reports.
 
-    Discovered domains, IPs and URLs are enriched with VirusTotal reputation by
-    default (your own free key; you are asked for one the first time). Use
-    --no-vt to skip it.
+    CVE findings are rated by real-world exploitation (CISA KEV, EPSS,
+    Exploit-DB) — use --no-intel to skip. Discovered domains, IPs and URLs are
+    enriched with VirusTotal reputation by default (your own free key; you are
+    asked for one the first time) — use --no-vt to skip it.
     """
     if target is None:
         console.print("[err]Provide a seed target via --target.[/err]")
@@ -1650,6 +1682,8 @@ def pipeline_cmd(
                 live.refresh()
         _after_live()
 
+    if intel:
+        _enrich_with_intel(result, settings.cache_dir)
     if vt_key:
         _enrich_with_vt(result, vt_key, vt_limit)
 

@@ -13,12 +13,19 @@ SEVERITY_ORDER: tuple[str, ...] = ("critical", "high", "medium", "low", "info", 
 
 @dataclass(frozen=True)
 class Finding:
-    """One nuclei vulnerability, normalised for display."""
+    """One nuclei vulnerability, normalised for display.
+
+    ``kev`` / ``epss`` / ``exploit`` come from cyberfw's threat intel (CISA KEV,
+    EPSS, Exploit-DB) when the finding names a CVE; they default to "unknown".
+    """
 
     name: str
     severity: str
     target: str
     template_id: str
+    kev: bool = False  # exploited in the wild (CISA KEV)
+    epss: float | None = None  # chance of exploitation in the next 30 days
+    exploit: bool = False  # a public exploit is published
 
 
 @dataclass(frozen=True)
@@ -39,6 +46,11 @@ class Summary:
     @property
     def has_serious(self) -> bool:
         return bool(self.severity_counts.get("critical") or self.severity_counts.get("high"))
+
+    @property
+    def exploited(self) -> int:
+        """Findings known to be exploited in real attacks (CISA KEV)."""
+        return sum(1 for f in self.findings if f.kev)
 
 
 @dataclass

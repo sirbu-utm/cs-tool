@@ -105,6 +105,33 @@ def test_animation_frame_escapes_target() -> None:
     assert "a&b.com" not in text
 
 
+def test_summary_flags_findings_exploited_in_the_wild() -> None:
+    findings = [
+        Finding(name="Log4Shell", severity="medium", target="t", template_id="CVE-2021-44228",
+                kev=True, epss=0.944, exploit=True),
+        Finding(name="Unlikely", severity="high", target="t", template_id="x", epss=0.01),
+    ]
+    summary = Summary(ok=True, severity_counts={"medium": 1, "high": 1}, findings=findings)
+    text = summary_message(_scan(), summary, max_findings=10)
+    assert "🔥 <b>1</b> exploited in the wild (CISA KEV)" in text
+    assert "🔥 <b>exploited in the wild</b> · EPSS 94% · public exploit" in text
+    assert "EPSS 1%" not in text  # a low EPSS is noise in a chat
+    assert "exploited" not in summary_message(_scan(), summarize(SAMPLE_REPORT), max_findings=10)
+
+
+def test_epss_near_certainty_is_not_shown_as_100_percent() -> None:
+    hot = Finding(name="x", severity="critical", target="t", template_id="CVE-1", epss=0.99999)
+    text = summary_message(_scan(), Summary(ok=True, severity_counts={"critical": 1}, findings=[hot]), 10)
+    assert "EPSS &gt;99.9%" in text and "EPSS 100%" not in text  # escaped for Telegram HTML
+
+
+def test_status_line_counts_exploited_findings() -> None:
+    hot = Finding(name="x", severity="critical", target="t", template_id="CVE-1", kev=True)
+    scan = _scan()
+    scan.summary = Summary(ok=True, severity_counts={"critical": 1}, findings=[hot])
+    assert "🔥 1 exploited" in status_message([scan])
+
+
 def test_vt_message_renders_a_malicious_hit() -> None:
     from cyberfw_bot.formatting import vt_message
 

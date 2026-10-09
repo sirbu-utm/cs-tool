@@ -279,7 +279,10 @@ def _summary_to_dict(summary: Summary) -> dict[str, Any]:
         "live_hosts": summary.live_hosts,
         "duration_s": summary.duration_s,
         "findings": [
-            {"name": f.name, "severity": f.severity, "target": f.target, "template_id": f.template_id}
+            {
+                "name": f.name, "severity": f.severity, "target": f.target,
+                "template_id": f.template_id, "kev": f.kev, "epss": f.epss, "exploit": f.exploit,
+            }
             for f in summary.findings
         ],
     }
@@ -295,6 +298,10 @@ def _summary_from_dict(data: dict[str, Any]) -> Summary:
                 severity=str(f.get("severity", "unknown")),
                 target=str(f.get("target", "")),
                 template_id=str(f.get("template_id", "")),
+                # absent in summaries stored before threat intel existed
+                kev=bool(f.get("kev", False)),
+                epss=f.get("epss"),
+                exploit=bool(f.get("exploit", False)),
             )
             for f in data.get("findings") or []
         ],

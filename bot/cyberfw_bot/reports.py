@@ -2,7 +2,9 @@
 
 The report schema is stable (see ``cyberfw/report/json_report.py``):
 ``{"ok", "run": {...}, "stages": [...], "records": [...]}``. nuclei findings are
-the records with ``kind == "vuln"``; their severity lives in ``info.severity``.
+the records with ``kind == "vuln"``; their severity lives in ``info.severity``,
+and a finding that names a CVE may carry ``intel`` (CISA KEV / EPSS /
+Exploit-DB, added by cyberfw after the scan).
 """
 
 from __future__ import annotations
@@ -40,6 +42,28 @@ def _severity_of(record: dict[str, Any]) -> str:
     return sev if sev in SEVERITY_ORDER else "unknown"
 
 
+def _intel_of(record: dict[str, Any]) -> tuple[bool, float | None, bool]:
+    """``(kev, epss, exploit)`` from a finding's ``intel`` block, if any."""
+    intel = record.get("intel")
+    if not isinstance(intel, dict):
+        return False, None, False
+    try:
+        epss = float(intel["epss"]) if intel.get("epss") is not None else None
+    except (TypeError, ValueError):
+        epss = None
+    return bool(intel.get("kev")), epss, bool(intel.get("exploits"))
+
+
+def _rank(finding: Finding) -> tuple[int, int, float, str]:
+    """Exploited in the wild first, then by severity, then likelier (higher EPSS) first."""
+    return (
+        0 if finding.kev else 1,
+        SEVERITY_ORDER.index(finding.severity),
+        -(finding.epss or 0.0),
+        finding.name,
+    )
+
+
 def summarize(report: dict[str, Any]) -> Summary:
     """Reduce a parsed report dict to severity counts and ranked findings."""
     records = report.get("records") or []
@@ -60,16 +84,20 @@ def summarize(report: dict[str, Any]) -> Summary:
             counts[severity] += 1
             info = record.get("info") if isinstance(record.get("info"), dict) else {}
             name = str(info.get("name") or record.get("template_id") or "finding")
+            kev, epss, exploit = _intel_of(record)
             findings.append(
                 Finding(
                     name=name,
                     severity=severity,
                     target=str(record.get("matched_at") or record.get("target") or ""),
                     template_id=str(record.get("template_id") or ""),
+                    kev=kev,
+                    epss=epss,
+                    exploit=exploit,
                 )
             )
 
-    findings.sort(key=lambda f: (SEVERITY_ORDER.index(f.severity), f.name))
+    findings.sort(key=_rank)
     run = report.get("run") if isinstance(report.get("run"), dict) else {}
     return Summary(
         ok=bool(report.get("ok")),
