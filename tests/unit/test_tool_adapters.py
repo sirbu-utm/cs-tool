@@ -50,6 +50,11 @@ def test_projectdiscovery_tools_use_json_not_jsonl() -> None:
         assert "-jsonl" not in command
 
 
+def test_httpx_grabs_the_tls_certificate_on_the_same_probe() -> None:
+    command = _adapter("httpx").build_cmd(ToolContext(target="https://example.com"))  # type: ignore[attr-defined]
+    assert "-tls-grab" in command
+
+
 def test_subfinder_reduces_url_seed_to_bare_domain() -> None:
     command = _adapter("subfinder").build_cmd(  # type: ignore[attr-defined]
         ToolContext(target="https://ltnvg.buiucanidets.md/")

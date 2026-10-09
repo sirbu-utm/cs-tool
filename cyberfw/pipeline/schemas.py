@@ -28,6 +28,8 @@ __all__ = [
     "RustscanResult",
     "VirusTotalResult",
     "CveIntel",
+    "PostureFinding",
+    "MailSecurity",
     "validate_record",
 ]
 
@@ -109,7 +111,14 @@ class NaabuResult(ToolRecord):
 
 # -- Httpx ---------------------------------------------------------------------
 class HttpxResult(ToolRecord):
-    """HTTP probing / tech detection: ``{"url", "status_code", ...}``."""
+    """HTTP probing / tech detection: ``{"url", "status_code", ...}``.
+
+    ``tls`` is httpx's ``-tls-grab`` block for an HTTPS URL (certificate subject,
+    SANs, issuer, ``not_after``, negotiated version, and ``expired`` /
+    ``self_signed`` / ``mismatched`` flags when true). It stays a raw mapping —
+    read leniently by :mod:`cyberfw.posture.tls` — so an unexpected shape there
+    can never cost the whole live-host record.
+    """
 
     url: str = ""
     status_code: int = 0
@@ -117,6 +126,7 @@ class HttpxResult(ToolRecord):
     tech: list[str] = Field(default_factory=list)
     webserver: str = ""
     content_length: int = 0
+    tls: dict[str, Any] | None = None
 
     @classmethod
     def from_json(cls, tool: str, text: str, lineno: int) -> HttpxResult:
@@ -270,6 +280,76 @@ class VirusTotalResult(ToolRecord):
         rec = cast("VirusTotalResult", super().from_json(tool, text, lineno))
         rec.kind = "reputation"
         return rec
+
+
+class PostureFinding(ToolRecord):
+    """A finding cyberfw works out itself (TLS certificates, email spoofing).
+
+    Shaped like a nuclei finding — ``template_id``, ``matched_at`` and an
+    ``info`` block with ``name`` / ``severity`` / ``description`` /
+    ``remediation`` — so the report and every reader of ``report.json`` treat it
+    exactly like one. ``tool`` names the check (``tlscheck`` / ``mailcheck``).
+    """
+
+    template_id: str = ""
+    matched_at: str = ""
+    info: dict[str, Any] = Field(default_factory=dict)
+
+    @property
+    def name(self) -> str:
+        return str(self.info.get("name") or self.template_id)
+
+    @property
+    def severity(self) -> str:
+        return str(self.info.get("severity") or "unknown")
+
+    @classmethod
+    def make(
+        cls,
+        tool: str,
+        check_id: str,
+        target: str,
+        *,
+        name: str,
+        severity: str,
+        description: str,
+        remediation: str,
+        tags: list[str] | None = None,
+    ) -> PostureFinding:
+        return cls(
+            tool=tool,
+            kind="vuln",
+            target=target,
+            template_id=check_id,
+            matched_at=target,
+            info={
+                "name": name,
+                "severity": severity,
+                "description": description,
+                "remediation": remediation,
+                "tags": tags or [],
+            },
+        )
+
+
+class MailSecurity(ToolRecord):
+    """Whether mail can be forged as a domain (kind ``mail``): SPF, DMARC, MX.
+
+    ``verdict`` is ``protected`` (DMARC rejects or quarantines all forged mail),
+    ``partial`` (enforced, but not for every message or subdomain) or
+    ``spoofable``. Built by :mod:`cyberfw.posture.mail`.
+    """
+
+    domain: str = ""
+    verdict: str = ""
+    mx: list[str] = Field(default_factory=list)
+    spf: str = ""
+    spf_all: str = ""
+    dmarc: str = ""
+    dmarc_domain: str = ""
+    dmarc_policy: str = ""
+    dmarc_subdomain_policy: str = ""
+    dmarc_pct: int = 100
 
 
 #: Dispatch map — registry name → validating model.

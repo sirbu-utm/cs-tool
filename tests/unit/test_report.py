@@ -6,7 +6,7 @@ import base64
 import hashlib
 import json
 import re
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -310,6 +310,52 @@ class TestHtmlDashboard:
         text = self._page(tmp_path, result)
         assert "EPSS &gt;99.9%" in text
         assert "EPSS 100%" not in text
+
+    def test_tls_section_lists_certificates_soonest_first(self, tmp_path: Path) -> None:
+        now = datetime(2026, 10, 9, 12, 0, tzinfo=timezone.utc)
+
+        def site(host: str, days: int, **flags: object) -> ToolRecord:
+            not_after = (now + timedelta(days=days)).strftime("%Y-%m-%dT%H:%M:%SZ")
+            tls = {"host": host, "port": "443", "probe_status": True, "tls_version": "tls12",
+                   "issuer_cn": "R11", "not_after": not_after, **flags}
+            return _rec("httpx", {"url": f"https://{host}", "status_code": 200, "tls": tls})
+
+        result = PipelineResult(
+            nodes=[NodeResult(node=Node(tool="httpx", stage="live"), ok=True, count=3)],
+            records=[site("later.example.com", 200), site("soon.example.com", 5),
+                     site("dead.example.com", -3, expired=True)],
+            started_at=now - timedelta(minutes=1),
+            finished_at=now,  # countdowns are measured from the end of the scan
+        )
+        text = self._page(tmp_path, result)
+        table = text.split('<table class="certs">', 1)[1].split("</table>", 1)[0]
+        assert table.index("dead.example.com") < table.index("soon.example.com") < table.index("later.example.com")
+        assert '<span class="badge sev-critical">expired</span>' in table
+        assert '<span class="badge sev-critical">5 days</span>' in table  # inside a week
+        assert '<span class="mono">200 days</span>' in table  # nothing to flag
+        assert "3 seen · 1 expired · 1 expire within 30 days" in text
+        assert '<span class="lbl">certificates</span>' in text
+        assert "tls={" not in text  # the raw block stays out of the record table's detail column
+
+    def test_email_section_and_card_carry_the_verdict_and_the_fix(self, tmp_path: Path) -> None:
+        from cyberfw.posture import mail
+
+        posture, found = mail.assess(
+            "shop.test", mx=["mx.shop.test"], null_mx=False, spf=["v=spf1 mx ~all"],
+            spf_policy="~all", dmarc=[], dmarc_domain="",
+        )
+        result = PipelineResult(
+            nodes=[NodeResult(node=Node(tool="subfinder", stage="s"), ok=True, count=0)],
+            records=[posture, *found],
+        )
+        text = self._page(tmp_path, result)
+        section = text.split('<section id="email"', 1)[1].split("</section>", 1)[0]
+        assert '<span class="badge t-err">can be spoofed</span>' in section
+        assert "v=spf1 mx ~all" in section and "no DMARC record" in section and "mx.shop.test" in section
+        card = text.split('<article class="card sev-medium"', 1)[1].split("</article>", 1)[0]
+        assert "No DMARC record" in card and '<p class="fix"><b>Fix:</b>' in card
+        assert "<code>_dmarc.shop.test</code>" in card  # backticked DNS names render as code
+        assert '<span class="lbl">email spoofing</span>' in text
 
     def test_no_intel_means_no_fix_first_panel(self, tmp_path: Path) -> None:
         text = self._page(tmp_path)

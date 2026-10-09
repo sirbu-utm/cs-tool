@@ -72,6 +72,8 @@ from cyberfw.pipeline.engine import (
 )
 from cyberfw.pipeline.schemas import ToolRecord, validate_record
 from cyberfw.pipelines import PIPELINES, available_pipelines, build
+from cyberfw.posture import mail as mailcheck
+from cyberfw.posture import tls as tlscheck
 from cyberfw.report.html_report import generate_html_report
 from cyberfw.report.json_report import generate_json_report
 from cyberfw.report.run_info import RunInfo
@@ -426,17 +428,22 @@ def _run_summary(
     def yields(width: int) -> Table:
         # The name and the count always show; the bar takes what is left (up
         # to 24 cells) and is left out below 4, rather than push the count off.
+        # Names are padded here, not with a column min_width: rich 13.x counts
+        # a min_width column's edge padding even in a grid that has none, so
+        # the table came out one cell wider than this sum and the count column
+        # was dropped at 36-40 columns. The 2 = the cell after the name and
+        # the cell after the bar.
         name_w = max([10, *(cell_len(tool) for tool in totals)])
         digits = max((len(str(count)) for count in totals.values()), default=1)
         bar_w = min(24, width - name_w - digits - 2)
         table = Table.grid(padding=(0, 1))
-        table.add_column(style="tool", no_wrap=True, min_width=10)
+        table.add_column(style="tool", no_wrap=True)
         if bar_w >= 4:
             table.add_column(no_wrap=True)
         table.add_column(justify="right", no_wrap=True)
         for tool, count in totals.items():
             shown = counted(count)
-            cells: list[str | Text] = [tool]
+            cells: list[str | Text] = [tool + " " * (name_w - cell_len(tool))]
             if bar_w >= 4:
                 cells.append(motion.bar(shown / peak, bar_w, style="accent" if count else "muted"))
             cells.append(Text(str(round(shown)), style="bold white" if count else "muted"))
@@ -1294,6 +1301,55 @@ def _resolve_vt_key(settings: Settings, choice: bool | None) -> str | None:
     return entered
 
 
+def _check_tls(result: PipelineResult) -> None:
+    """Certificate health from what httpx's -tls-grab already collected (no network)."""
+    certs = tlscheck.certificates(result.records)
+    if not certs:
+        return
+    now = datetime.now(timezone.utc)
+    result.records.extend(tlscheck.findings(certs, result.records, now=now))
+    expired = sum(1 for cert in certs if cert.is_expired(now))
+    soon = sum(
+        1
+        for cert in certs
+        if not cert.is_expired(now) and (days := cert.days_left(now)) is not None
+        and days <= tlscheck.SOON_DAYS
+    )
+    untrusted = sum(1 for cert in certs if cert.self_signed or cert.mismatched)
+    parts = [f"{len(certs)} certificate(s)"]
+    if expired:
+        parts.append(f"[err]{expired} expired[/err]")
+    if soon:
+        parts.append(f"[warn]{soon} expire within {tlscheck.SOON_DAYS} days[/warn]")
+    if untrusted:
+        parts.append(f"[warn]{untrusted} untrusted or for another name[/warn]")
+    if len(parts) == 1:
+        parts.append(f"[ok]all valid for {tlscheck.SOON_DAYS}+ days[/ok]")
+    console.print("TLS: " + " · ".join(parts))
+
+
+def _check_mail(result: PipelineResult, seed: str) -> None:
+    """Whether mail can be forged as the seed domain (SPF / DMARC over DNS-over-HTTPS)."""
+    domain = mailcheck.mail_domain(seed)
+    if domain is None:
+        return
+    try:
+        record, found = anyio.run(mailcheck.check, domain)
+    except mailcheck.DnsError as exc:
+        console.print(f"[warn]Email check skipped — DNS-over-HTTPS unreachable: {exc}[/warn]")
+        return
+    except Exception as exc:  # noqa: BLE001 - a posture check must never fail the scan
+        console.print(f"[warn]Email check failed: {exc}[/warn]")
+        return
+    result.records.append(record)
+    result.records.extend(found)
+    style = {"protected": "ok", "partial": "warn"}.get(record.verdict, "err")
+    rank = {"critical": 0, "high": 1, "medium": 2, "low": 3}
+    worst = sorted(found, key=lambda f: rank.get(f.severity, 4))
+    reason = f" — {worst[0].name}" if worst else ""
+    console.print(f"Email ({domain}): [{style}]{record.verdict}[/{style}]{reason}")
+
+
 def _enrich_with_intel(result: PipelineResult, cache_dir: Path) -> None:
     """Rate CVE findings by real-world exploitation (CISA KEV, EPSS, Exploit-DB)."""
     if not any(threatintel.cve_ids(r) for r in result.records if r.kind == "vuln"):
@@ -1544,14 +1600,24 @@ def pipeline_cmd(
             "only public feeds are queried, never the target.",
         ),
     ] = True,
+    mail: Annotated[
+        bool,
+        typer.Option(
+            "--mail/--no-mail",
+            help="Check whether mail can be forged as the seed domain: SPF, DMARC and MX, looked "
+            "up over DNS-over-HTTPS (Cloudflare, then Google) — the target is not contacted.",
+        ),
+    ] = True,
     verbose: VerboseOption = False,
 ) -> None:
     """Run a ready-made pipeline and render HTML/JSON reports.
 
-    CVE findings are rated by real-world exploitation (CISA KEV, EPSS,
-    Exploit-DB) — use --no-intel to skip. Discovered domains, IPs and URLs are
-    enriched with VirusTotal reputation by default (your own free key; you are
-    asked for one the first time) — use --no-vt to skip it.
+    After the scan: TLS certificates httpx saw are checked for expiry, trust and
+    host-name match; the seed domain is checked for email spoofing (SPF/DMARC —
+    --no-mail skips it); CVE findings are rated by real-world exploitation
+    (CISA KEV, EPSS, Exploit-DB — --no-intel skips it); and discovered domains,
+    IPs and URLs get VirusTotal reputation (your own free key, asked for the
+    first time — --no-vt skips it).
     """
     if target is None:
         console.print("[err]Provide a seed target via --target.[/err]")
@@ -1682,6 +1748,9 @@ def pipeline_cmd(
                 live.refresh()
         _after_live()
 
+    _check_tls(result)
+    if mail:
+        _check_mail(result, target)
     if intel:
         _enrich_with_intel(result, settings.cache_dir)
     if vt_key:

@@ -32,7 +32,8 @@ from urllib.parse import quote
 from cyberfw.exceptions import ReportError
 from cyberfw.logging import get_logger
 from cyberfw.pipeline.engine import NodeResult, PipelineResult
-from cyberfw.pipeline.schemas import CveIntel, ToolRecord
+from cyberfw.pipeline.schemas import CveIntel, MailSecurity, ToolRecord
+from cyberfw.posture.tls import SOON_DAYS, URGENT_DAYS, Cert, certificates
 from cyberfw.report.run_info import RunInfo
 from cyberfw.threatintel import EPSS_HIGH, exploit_url
 from cyberfw.tools.targets import hostname_of
@@ -119,17 +120,26 @@ def _render_page(result: PipelineResult, run: RunInfo) -> str:
     vulns = [r for r in records if r.kind == "vuln"]
     secrets = [r for r in records if r.kind == "secret"]
     shots = [r for r in records if r.kind == "screenshot" and getattr(r, "filename", None)]
+    certs = certificates(records)
+    mail = [r for r in records if isinstance(r, MailSecurity)]
+    # Certificate countdowns are measured from when the scan ended, so a report
+    # opened next month still says what was true at scan time.
+    now = result.finished_at or datetime.now(timezone.utc)
     # Tools whose stage completed: only those can vouch for "nothing found".
     ran = {nr.node.tool for nr in result.nodes if nr.ok}
 
     sections: list[tuple[str, str, str]] = [
-        ("overview", "Overview", _overview(result, hosts, vulns, ran))
+        ("overview", "Overview", _overview(result, hosts, vulns, ran, certs=certs, mail=mail, now=now))
     ]
     sections.append(("pipeline", "Pipeline", _pipeline_section(result, run.seed)))
     if hosts:
         sections.append(("hosts", "Hosts", _hosts_section(hosts)))
     if vulns or secrets:
         sections.append(("findings", "Findings", _findings_section(vulns, secrets)))
+    if certs:
+        sections.append(("tls", "TLS", _tls_section(certs, now)))
+    if mail:
+        sections.append(("email", "Email", _mail_section(mail)))
     if shots:
         sections.append(("screenshots", "Screenshots", _shots_section(shots)))
     sections.append(("records", "Records", _records_section(records)))
@@ -183,7 +193,14 @@ def _hero(
 
 # -- overview -------------------------------------------------------------------
 def _overview(
-    result: PipelineResult, hosts: list[_Host], vulns: list[ToolRecord], ran: set[str]
+    result: PipelineResult,
+    hosts: list[_Host],
+    vulns: list[ToolRecord],
+    ran: set[str],
+    *,
+    certs: list[Cert] | None = None,
+    mail: list[MailSecurity] | None = None,
+    now: datetime | None = None,
 ) -> str:
     panels = [
         p
@@ -195,11 +212,22 @@ def _overview(
         if p
     ]
     grid = f'<div class="grid2">{"".join(panels)}</div>' if panels else ""
-    return _heading("Overview") + _tiles(result, hosts, vulns, ran) + grid
+    tiles = _tiles(
+        result, hosts, vulns, ran, certs=certs or [], mail=mail or [],
+        now=now or datetime.now(timezone.utc),
+    )
+    return _heading("Overview") + tiles + grid
 
 
 def _tiles(
-    result: PipelineResult, hosts: list[_Host], vulns: list[ToolRecord], ran: set[str]
+    result: PipelineResult,
+    hosts: list[_Host],
+    vulns: list[ToolRecord],
+    ran: set[str],
+    *,
+    certs: list[Cert],
+    mail: list[MailSecurity],
+    now: datetime,
 ) -> str:
     nodes = result.nodes
     failed = sum(1 for n in nodes if not n.ok and not n.skipped)
@@ -296,6 +324,30 @@ def _tiles(
                 if exploited
                 else (f"{public} with a public exploit" if public else "no known exploitation"),
                 "tone": "t-err" if exploited else ("t-warn" if public else "t-ok"),
+            }
+        )
+    if certs:
+        expired = sum(1 for cert in certs if cert.is_expired(now))
+        soon = sum(1 for cert in certs if _expires_soon(cert, now))
+        tiles.append(
+            {
+                "label": "certificates",
+                "value": len(certs),
+                "icon": "lock",
+                "sub": f"{expired} expired"
+                if expired
+                else (f"{soon} expire ≤ {SOON_DAYS} days" if soon else f"all valid {SOON_DAYS}+ days"),
+                "tone": "t-err" if expired else ("t-warn" if soon else "t-ok"),
+            }
+        )
+    for posture in mail[:1]:
+        tiles.append(
+            {
+                "label": "email spoofing",
+                "value": {"protected": "blocked", "partial": "partly"}.get(posture.verdict, "possible"),
+                "icon": "mail",
+                "sub": posture.domain,
+                "tone": {"protected": "t-ok", "partial": "t-warn"}.get(posture.verdict, "t-err"),
             }
         )
     secrets = sum(1 for r in result.records if r.kind == "secret")
@@ -716,6 +768,131 @@ def _hosts_section(hosts: list[_Host]) -> str:
     )
 
 
+# -- TLS --------------------------------------------------------------------------
+def _expires_soon(cert: Cert, now: datetime) -> bool:
+    days = cert.days_left(now)
+    return not cert.is_expired(now) and days is not None and days <= SOON_DAYS
+
+
+def _tls_section(certs: list[Cert], now: datetime) -> str:
+    """Certificate inventory, soonest to expire first."""
+    far = 10**6
+
+    def order(cert: Cert) -> tuple[int, str]:
+        days = cert.days_left(now)
+        return (-far if cert.is_expired(now) else (far if days is None else days), cert.host)
+
+    rows: list[str] = []
+    for index, cert in enumerate(sorted(certs, key=order)[:_MAX_HOSTS]):
+        days = cert.days_left(now)
+        if cert.is_expired(now):
+            left = '<span class="badge sev-critical">expired</span>'
+        elif days is None:
+            left = _DASH
+        else:
+            text = "today" if days <= 0 else (f"{days} day" if days == 1 else f"{days} days")
+            tone = "sev-critical" if days <= URGENT_DAYS else ("sev-medium" if days <= SOON_DAYS else "")
+            left = f'<span class="badge {tone}">{text}</span>' if tone else f'<span class="mono">{text}</span>'
+        flags = []
+        if cert.self_signed:
+            flags.append('<span class="tag hot">untrusted</span>')
+        if cert.mismatched:
+            flags.append('<span class="tag hot">name mismatch</span>')
+        if cert.wildcard:
+            flags.append('<span class="tag">wildcard</span>')
+        version = (
+            f'<span class="tag warm">{_e(cert.version_name)}</span>'
+            if cert.old_protocol
+            else f'<span class="mono">{_e(cert.version_name)}</span>'
+        )
+        port = "" if cert.port == "443" else f":{cert.port}"
+        until = f'<span class="mono">{cert.not_after:%Y-%m-%d}</span>' if cert.not_after else _DASH
+        rows.append(
+            f'<tr style="--i:{min(index, _MAX_STAGGER)}">'
+            f'<td class="host">{_e(cert.host + port)}</td><td>{left}</td><td>{until}</td>'
+            f'<td class="ttl" title="{_e(cert.issuer)}">{_e(_clip(cert.issuer, 48)) or _DASH}</td>'
+            f"<td>{version}</td>"
+            f'<td><div class="ports">{"".join(flags) or _DASH}</div></td></tr>'
+        )
+    expired = sum(1 for cert in certs if cert.is_expired(now))
+    soon = sum(1 for cert in certs if _expires_soon(cert, now))
+    hidden = len(certs) - _MAX_HOSTS
+    note = f'<p class="note">… and {hidden:,} more certificate(s).</p>' if hidden > 0 else ""
+    return (
+        _heading(
+            "TLS certificates",
+            f"{len(certs):,} seen · {expired:,} expired · {soon:,} expire within {SOON_DAYS} days",
+        )
+        + '<div class="tbl"><table class="certs"><thead><tr><th>host</th><th>expires in</th>'
+        + "<th>valid until</th><th>issuer</th><th>protocol</th><th>flags</th></tr></thead><tbody>"
+        + "\n".join(rows)
+        + "</tbody></table></div>"
+        + note
+    )
+
+
+# -- email ------------------------------------------------------------------------
+_SPF_ALL = {
+    "-all": "unlisted senders fail (-all)",
+    "~all": "unlisted senders soft-fail (~all)",
+    "?all": "unlisted senders are neutral (?all)",
+    "+all": "anyone may send (+all)",
+    "": "no closing all — unlisted senders are not failed",
+}
+_VERDICT = {
+    "protected": ("t-ok", "spoofing blocked"),
+    "partial": ("t-warn", "partly protected"),
+    "spoofable": ("t-err", "can be spoofed"),
+}
+
+
+def _mail_section(mail: list[MailSecurity]) -> str:
+    """Per checked domain: the verdict, then the MX / SPF / DMARC it rests on."""
+    blocks: list[str] = []
+    for posture in mail:
+        tone, label = _VERDICT.get(posture.verdict, ("t-err", posture.verdict))
+        mx = ", ".join(posture.mx[:6]) + (f" +{len(posture.mx) - 6}" if len(posture.mx) > 6 else "")
+        spf = (
+            f"{_e(posture.spf)}<br><span class=\"dim\">{_e(_SPF_ALL.get(posture.spf_all, posture.spf_all))}</span>"
+            if posture.spf
+            else _DASH + ' <span class="dim">no SPF record</span>'
+        )
+        if posture.dmarc:
+            where = ""
+            if posture.dmarc_domain:
+                inherited = " (inherited)" if posture.dmarc_domain != posture.domain else ""
+                where = f"_dmarc.{posture.dmarc_domain}{inherited}"
+            policy = (
+                f"policy {posture.dmarc_policy or '—'} · subdomains "
+                f"{posture.dmarc_subdomain_policy or '—'} · applied to {posture.dmarc_pct}% of mail"
+            )
+            dmarc = (
+                f"{_e(posture.dmarc)}<br><span class=\"dim\">{_e(policy)}"
+                f"{' · ' + _e(where) if where else ''}</span>"
+            )
+        else:
+            dmarc = _DASH + ' <span class="dim">no DMARC record</span>'
+        cells = [
+            ("verdict", f'<span class="badge {tone}">{_e(label)}</span>', 1),
+            ("domain", _e(posture.domain), 1),
+            ("mail servers (MX)", _e(mx) if mx else '<span class="dim">none — receives no mail</span>', 2),
+            ("SPF", spf, 4),
+            ("DMARC", dmarc, 4),
+        ]
+        blocks.append(
+            '<dl class="run mail">'
+            + "".join(
+                f'<div style="--span:{span}"><dt>{_e(name)}</dt><dd>{value}</dd></div>'
+                for name, value, span in cells
+            )
+            + "</dl>"
+        )
+    return (
+        _heading("Email", "can mail be forged in this domain's name? (SPF · DMARC)")
+        + "".join(blocks)
+    )
+
+
 # -- findings ---------------------------------------------------------------------
 def _findings_section(vulns: list[ToolRecord], secrets: list[ToolRecord]) -> str:
     # Severity groups the cards; within one, exploited-in-the-wild and likelier
@@ -870,13 +1047,15 @@ def _vuln_card(record: ToolRecord, index: int) -> str:
         tags.append(f'<span class="tag cvss">CVSS {_e(str(score))}</span>')
     tags += [f'<span class="tag">{_e(tag)}</span>' for tag in _as_list(info.get("tags"))[:5]]
     description = str(info.get("description") or "").strip()
-    desc = f'<p class="desc">{_e(_clip(description, 260))}</p>' if description else ""
+    desc = f'<p class="desc">{_prose(_clip(description, 320))}</p>' if description else ""
+    remediation = str(info.get("remediation") or "").strip()
+    fix = f'<p class="fix"><b>Fix:</b> {_prose(_clip(remediation, 320))}</p>' if remediation else ""
     intel = _intel(record)
     urgent = _PRIORITY_BADGE.get(intel.priority, "") if intel else ""
     return (
         f'<article class="card sev-{severity}" style="--i:{min(index, 12)}">'
         f'<header><span class="badge sev-{severity}">{severity}</span>{urgent}<h4>{_e(name)}</h4></header>'
-        f'<p class="where">{_link(record.target)}</p>{desc}'
+        f'<p class="where">{_link(record.target)}</p>{desc}{fix}'
         f"{_intel_tags(intel) if intel else ''}"
         f"<footer>{''.join(tags)}</footer></article>"
     )
@@ -972,7 +1151,8 @@ def _render_record(index: int, record: ToolRecord) -> str:
 
 def _format_detail(as_dict: dict[str, object]) -> str:
     """Flatten a record dict into a short, readable substring (first field wins)."""
-    skip = {"tool", "line_number", "raw", "target", "kind", "stage", "intel"}  # intel: on the cards
+    # intel: on the finding cards; tls: in the certificate table.
+    skip = {"tool", "line_number", "raw", "target", "kind", "stage", "intel", "tls"}
     seen: list[str] = []
     for key, value in as_dict.items():
         if key in skip or value in ("", None):
@@ -1020,6 +1200,14 @@ def _e(value: str) -> str:
 
 def _cell(value: object) -> str:
     return _DASH if value is None else _e(str(value))
+
+
+_CODE_SPAN = re.compile(r"`([^`]+)`")
+
+
+def _prose(text: str) -> str:
+    """Escape, then render ``code`` spans — finding texts quote DNS records that way."""
+    return _CODE_SPAN.sub(r"<code>\1</code>", _e(text))
 
 
 def _heading(title: str, note: str = "") -> str:
@@ -1139,6 +1327,8 @@ _ICONS = {
         '<path d="M12 3l8 3v6c0 5-3.5 8.5-8 9.5-4.5-1-8-4.5-8-9.5V6z"/><path d="M12 8v5M12 16.5h.01"/>'
     ),
     "key": _icon('<circle cx="8" cy="15" r="4"/><path d="M11 12l9-9M17 6l3 3M14.5 8.5l2 2"/>'),
+    "lock": _icon('<rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/>'),
+    "mail": _icon('<rect x="3" y="5" width="18" height="14" rx="2"/><path d="M3 7l9 6 9-6"/>'),
     "flame": _icon(
         '<path d="M12 3c.5 3.5 4.5 5.5 4.5 10a4.5 4.5 0 0 1-9 0c0-2.4 1.3-4 2.4-5.2.3 1.6 1 2.7 2.1 3.2-.6-2.8-.6-5.2 0-8z"/>'
     ),
@@ -1570,6 +1760,11 @@ html:not(.js) .toolbar { display: none; }
 .card .where { margin: 10px 0 0; color: var(--muted); font: 12px var(--mono); overflow-wrap: anywhere; }
 .card .desc { margin: 8px 0 0; color: var(--muted); font-size: 13px; }
 .card footer { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 12px; }
+.card .fix { margin: 8px 0 0; font-size: 13px; }
+.card code, .run code { padding: 0 4px; border-radius: 3px; background: var(--line); font: 12px var(--mono); }
+table.certs td:not(.ttl) { white-space: nowrap; }  /* a date must not break as 2026-12- / 25 */
+.run.mail { margin-bottom: 12px; }
+.run.mail dd { line-height: 1.55; }
 details.more { margin-top: 14px; }
 details.more summary { cursor: pointer; width: max-content; max-width: 100%; padding: 7px 13px; border-radius: 7px; margin-bottom: 12px; border: 1px solid var(--line-2); background: var(--panel); color: var(--muted); font: 12.5px var(--mono); }
 details.more summary:hover { color: var(--text); border-color: var(--accent); }

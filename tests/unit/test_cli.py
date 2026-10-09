@@ -10,6 +10,7 @@ import json
 import os
 import stat
 from collections.abc import Iterator
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -1790,3 +1791,76 @@ class TestResolveVtKey:
         monkeypatch.setattr("cyberfw.cli.vt.resolve_or_prompt", lambda *a, **k: "late-key")
         monkeypatch.setattr("cyberfw.cli.vt.remember_prompt", lambda p: None)
         assert _resolve_vt_key(self._settings(tmp_path, prompted=True), True) == "late-key"
+
+
+class TestPostureChecks:
+    """`pipeline` checks TLS certificates and the seed domain's email spoofing after the scan."""
+
+    @staticmethod
+    def _httpx_prints(root: Path, payload: dict[str, object]) -> None:
+        binary = root / "tools_bin" / "httpx"
+        binary.write_text("#!/usr/bin/env bash\n" f"printf '%s\\n' '{json.dumps(payload)}'\n", encoding="utf-8")
+        binary.chmod(binary.stat().st_mode | stat.S_IEXEC)
+
+    @staticmethod
+    def _records(root: Path, session: str) -> list[dict[str, object]]:
+        report = json.loads((root / "reports" / session / "report.json").read_text(encoding="utf-8"))
+        return list(report["records"])
+
+    def test_an_expiring_untrusted_certificate_is_reported(self, tmp_path: Path) -> None:
+        soon = (datetime.now(timezone.utc) + timedelta(days=3)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        self._httpx_prints(tmp_path, {
+            "url": "https://sub.example.com/", "status_code": 200, "title": "Home",
+            "tls": {"host": "sub.example.com", "port": "443", "probe_status": True, "tls_version": "tls13",
+                    "issuer_cn": "R11", "not_after": soon, "self_signed": True},
+        })
+
+        result = runner.invoke(app, ["pipeline", "recon-to-vuln", "-t", "example.com", "--session", "tls", "--no-mail"])
+
+        assert result.exit_code == 0, result.stdout
+        assert "TLS: 1 certificate(s)" in result.stdout
+        checks = {r["template_id"] for r in self._records(tmp_path, "tls") if r["tool"] == "tlscheck"}
+        assert checks == {"tls-cert-expiring", "tls-cert-self-signed"}
+
+    def test_the_email_verdict_reaches_the_console_and_the_report(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from cyberfw.pipeline.schemas import MailSecurity, PostureFinding
+        from cyberfw.posture import mail
+
+        seen: list[str] = []
+
+        async def fake_check(domain: str) -> tuple[MailSecurity, list[PostureFinding]]:
+            seen.append(domain)
+            return mail.assess(domain, mx=[], null_mx=False, spf=[], spf_policy="", dmarc=[], dmarc_domain="")
+
+        monkeypatch.setattr("cyberfw.cli.mailcheck.check", fake_check)
+        result = runner.invoke(
+            app, ["pipeline", "recon-to-vuln", "-t", "https://www.example.com/", "--session", "mail"]
+        )
+
+        assert result.exit_code == 0, result.stdout
+        assert seen == ["example.com"]  # the seed URL reduced to its mail domain
+        assert "Email (example.com): spoofable" in result.stdout
+        records = self._records(tmp_path, "mail")
+        assert [r["verdict"] for r in records if r["kind"] == "mail"] == ["spoofable"]
+        assert {r["template_id"] for r in records if r["tool"] == "mailcheck" and r["kind"] == "vuln"} == {
+            "mail-spf-missing", "mail-dmarc-missing",
+        }
+
+    def test_no_mail_skips_the_lookup(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        async def must_not_run(domain: str) -> object:
+            raise AssertionError("--no-mail must not look anything up")
+
+        monkeypatch.setattr("cyberfw.cli.mailcheck.check", must_not_run)
+        result = runner.invoke(app, ["pipeline", "recon-to-vuln", "-t", "example.com", "--no-report", "--no-mail"])
+
+        assert result.exit_code == 0, result.stdout
+        assert "Email" not in result.stdout
+
+    def test_a_dns_outage_never_fails_the_scan(self) -> None:
+        # tests/conftest.py keeps live DNS down for every test.
+        result = runner.invoke(app, ["pipeline", "recon-to-vuln", "-t", "example.com", "--no-report"])
+
+        assert result.exit_code == 0, result.stdout
+        assert "Email check skipped" in result.stdout

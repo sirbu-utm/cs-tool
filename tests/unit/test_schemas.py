@@ -42,6 +42,18 @@ class TestValidation:
         assert rec.kind == "http"
         assert rec.target == "https://a.com/"
 
+    def test_httpx_keeps_the_tls_grab_block(self) -> None:
+        tls = {"host": "a.com", "not_after": "2026-12-25T22:56:35Z", "subject_an": ["a.com"], "expired": True}
+        rec = validate_record("httpx", _line({"url": "https://a.com/", "status_code": 200, "tls": tls}), 3)
+        assert isinstance(rec, HttpxResult) and rec.tls == tls
+        assert rec.as_dict()["tls"]["expired"] is True  # carried into report.json
+
+    def test_httpx_tolerates_a_null_or_missing_tls_block(self) -> None:
+        """A surprising tls value must never cost the whole live-host record."""
+        for raw in ({"url": "http://a.com/", "status_code": 200}, {"url": "https://a.com/", "tls": None}):
+            rec = validate_record("httpx", _line(raw), 3)
+            assert isinstance(rec, HttpxResult) and rec.tls is None
+
     def test_ffuf(self) -> None:
         rec = validate_record("ffuf", _line({"input1": "FUZZ", "status": 200, "url": "https://a.com/x"}), 4)
         assert isinstance(rec, FfufResult)
