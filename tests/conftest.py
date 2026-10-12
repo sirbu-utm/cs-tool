@@ -29,16 +29,17 @@ os.environ["TERM"] = "dumb"
 
 @pytest.fixture(autouse=True)
 def _offline_dns(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Never reach a real DNS-over-HTTPS resolver from a test.
+    """Never reach a real DNS-over-HTTPS resolver (or a takeover HTTP probe) from a test.
 
-    ``cyberfw pipeline`` checks the seed domain's SPF/DMARC after every scan;
-    in a test that would query Cloudflare about ``example.com``. Here DNS is
-    simply down, which the email check reports and skips. Tests of the check
-    itself hand it a fake resolver instead.
+    ``cyberfw pipeline`` checks the seed domain's SPF/DMARC and the subdomains'
+    dangling CNAMEs after every scan; in a test those would query Cloudflare and
+    fetch live hosts. Here both are simply down, which the checks report and
+    skip. Tests of a check itself hand it a fake resolver / fetcher instead.
     """
-    from cyberfw.posture import mail
+    from cyberfw.posture import mail, takeover
 
-    async def offline(*_args: object, **_kwargs: object) -> list[str]:
+    async def no_dns(*_args: object, **_kwargs: object) -> list[str]:
         raise mail.DnsError("live DNS is disabled in tests")
 
-    monkeypatch.setattr(mail, "doh_query", offline)
+    monkeypatch.setattr(mail, "doh_query", no_dns)
+    monkeypatch.setattr(takeover, "doh", no_dns)

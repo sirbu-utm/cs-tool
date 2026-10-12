@@ -1864,6 +1864,47 @@ class TestPostureChecks:
 
         assert result.exit_code == 0, result.stdout
         assert "Email check skipped" in result.stdout
+        assert "DNS-over-HTTPS unreachable" in result.stdout  # the takeover check, also offline
+
+    def test_a_subdomain_takeover_reaches_the_console_and_the_report(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from cyberfw.pipeline.schemas import PostureFinding
+        from cyberfw.posture import takeover
+
+        seen: list[list[str]] = []
+
+        async def fake_scan(hosts: list[str], **_kw: object) -> tuple[list[PostureFinding], list[str]]:
+            seen.append(hosts)
+            finding = PostureFinding.make(
+                takeover.TOOL, "subdomain-takeover", "https://blog.example.com",
+                name="Subdomain takeover possible — GitHub Pages", severity="high",
+                description="blog.example.com → user.github.io, unclaimed", remediation="remove the record",
+            )
+            return [finding], []
+
+        monkeypatch.setattr("cyberfw.cli.takeovercheck.scan", fake_scan)
+        result = runner.invoke(
+            app, ["pipeline", "recon-to-vuln", "-t", "example.com", "--session", "to", "--no-mail"]
+        )
+
+        assert result.exit_code == 0, result.stdout
+        assert "Subdomain takeover: 1 possible" in result.stdout and "blog.example.com" in result.stdout
+        assert seen and "sub.example.com" in seen[0]  # the discovered subdomain was checked
+        records = self._records(tmp_path, "to")
+        takeovers = [r for r in records if r["tool"] == "takeover"]
+        assert len(takeovers) == 1 and takeovers[0]["info"]["severity"] == "high"
+
+    def test_no_takeover_skips_the_check(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        async def must_not_run(*_a: object, **_k: object) -> object:
+            raise AssertionError("--no-takeover must not scan")
+
+        monkeypatch.setattr("cyberfw.cli.takeovercheck.scan", must_not_run)
+        result = runner.invoke(
+            app, ["pipeline", "recon-to-vuln", "-t", "example.com", "--no-report", "--no-mail", "--no-takeover"]
+        )
+        assert result.exit_code == 0, result.stdout
+        assert "Subdomain takeover" not in result.stdout
 
 
 class TestBaselineComparison:

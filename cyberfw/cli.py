@@ -74,6 +74,7 @@ from cyberfw.pipeline.engine import (
 from cyberfw.pipeline.schemas import ToolRecord, validate_record
 from cyberfw.pipelines import PIPELINES, available_pipelines, build
 from cyberfw.posture import mail as mailcheck
+from cyberfw.posture import takeover as takeovercheck
 from cyberfw.posture import tls as tlscheck
 from cyberfw.report import diff as rundiff
 from cyberfw.report.html_report import generate_html_report
@@ -1533,6 +1534,26 @@ def _check_mail(result: PipelineResult, seed: str) -> None:
     console.print(f"Email ({domain}): [{style}]{record.verdict}[/{style}]{reason}")
 
 
+def _check_takeover(result: PipelineResult) -> None:
+    """Flag subdomains with a dangling CNAME to an unclaimed third-party service."""
+    hosts = takeovercheck.candidates(result.records)
+    if not hosts:
+        return
+    try:
+        findings, notes = anyio.run(takeovercheck.scan, hosts)
+    except Exception as exc:  # noqa: BLE001 - a posture check must never fail the scan
+        console.print(f"[warn]Subdomain-takeover check failed: {escape(str(exc))}[/warn]")
+        return
+    result.records.extend(findings)
+    for note in notes:
+        console.print(f"[warn]Takeover: {escape(note)}[/warn]")
+    if findings:
+        hosts_hit = ", ".join(sorted({f.target.split("//", 1)[-1] for f in findings})[:3])
+        console.print(f"Subdomain takeover: [err]{len(findings)} possible[/err] — {escape(hosts_hit)}")
+    else:
+        console.print(f"Subdomain takeover: [ok]none[/ok] in {len(hosts)} host(s)")
+
+
 def _enrich_with_intel(result: PipelineResult, cache_dir: Path) -> None:
     """Rate CVE findings by real-world exploitation (CISA KEV, EPSS, Exploit-DB)."""
     if not any(threatintel.cve_ids(r) for r in result.records if r.kind == "vuln"):
@@ -1791,6 +1812,15 @@ def pipeline_cmd(
             "up over DNS-over-HTTPS (Cloudflare, then Google) — the target is not contacted.",
         ),
     ] = True,
+    takeover: Annotated[
+        bool,
+        typer.Option(
+            "--takeover/--no-takeover",
+            help="Check discovered subdomains for a dangling CNAME to an unclaimed third-party "
+            "service (GitHub Pages, Heroku, S3…) that could be taken over. DNS over DoH, plus one "
+            "HTTP read of a matching host — on the service's edge, not your origin.",
+        ),
+    ] = True,
     baseline: Annotated[
         str | None,
         typer.Option(
@@ -1808,7 +1838,9 @@ def pipeline_cmd(
 
     After the scan: TLS certificates httpx saw are checked for expiry, trust and
     host-name match; the seed domain is checked for email spoofing (SPF/DMARC —
-    --no-mail skips it); CVE findings are rated by real-world exploitation
+    --no-mail skips it); discovered subdomains are checked for a dangling CNAME
+    that could be taken over (--no-takeover skips it); CVE findings are rated by
+    real-world exploitation
     (CISA KEV, EPSS, Exploit-DB — --no-intel skips it); and discovered domains,
     IPs and URLs get VirusTotal reputation (your own free key, asked for the
     first time — --no-vt skips it). Finally the run is compared with the
@@ -1947,6 +1979,8 @@ def pipeline_cmd(
     _check_tls(result)
     if mail:
         _check_mail(result, target)
+    if takeover:
+        _check_takeover(result)
     if intel:
         _enrich_with_intel(result, settings.cache_dir)
     if vt_key:
