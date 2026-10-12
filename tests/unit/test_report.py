@@ -357,6 +357,51 @@ class TestHtmlDashboard:
         assert "<code>_dmarc.shop.test</code>" in card  # backticked DNS names render as code
         assert '<span class="lbl">email spoofing</span>' in text
 
+    def test_changes_section_lists_what_changed_since_the_earlier_run(self, tmp_path: Path) -> None:
+        from cyberfw.report.diff import BAD, GOOD, Change, RunDiff
+
+        changes = RunDiff(
+            baseline={"session_id": "s-old", "pipeline": "recon-to-vuln", "seed": "example.com",
+                      "started_at": "2026-10-01T10:00:00+00:00"},
+            changes=[
+                Change("finding", "added", "new finding", "SQL injection", "https://a.example.com/login", "high", BAD),
+                Change("port", "added", "port opened", "a.example.com:22"),
+                Change("finding", "removed", "gone", "<b>XSS</b>", "https://a.example.com/q", "medium", GOOD),
+            ],
+            not_compared=["nuclei did not run (or did not finish) in the earlier run"],
+        )
+        path = html_report_gen(_scan_result(), output_path=tmp_path / "r.html", changes=changes)
+        text = path.read_text(encoding="utf-8")
+
+        section = text.split('<section id="changes"', 1)[1].split("</section>", 1)[0]
+        assert "since 2026-10-01 10:00 UTC · session s-old" in section
+        assert '<span class="chip">1 new finding</span>' in section and '<span class="chip">1 port opened</span>' in section
+        assert '<span class="badge sev-high">new finding</span>' in section  # bad news wears its severity
+        assert '<span class="tag">port opened</span>' in section  # neutral
+        assert '<span class="badge t-ok">gone</span>' in section  # good news is not red
+        assert "&lt;b&gt;XSS&lt;/b&gt;" in section and "<b>XSS</b>" not in section  # scan data is escaped
+        assert "not compared: nuclei did not run" in section
+        assert '<span class="lbl">new since last scan</span>' in text
+        assert text.index('id="changes"') < text.index('id="pipeline"')  # right after the overview
+
+    def test_a_finding_that_became_exploited_turns_the_tile_red(self, tmp_path: Path) -> None:
+        from cyberfw.report.diff import BAD, Change, RunDiff
+
+        flip = Change("finding", "changed", "now exploited", "Path traversal", "https://a/", "medium", BAD)
+        path = html_report_gen(_scan_result(), output_path=tmp_path / "r.html",
+                               changes=RunDiff(baseline={}, changes=[flip]))
+        tile = path.read_text(encoding="utf-8").split('<span class="lbl">new since last scan</span>', 1)[0]
+        assert tile.rsplit('<div class="tile ', 1)[1].startswith("t-err")
+
+    def test_json_report_carries_the_changes_block(self, tmp_path: Path) -> None:
+        from cyberfw.report.diff import Change, RunDiff
+
+        changes = RunDiff(baseline={"session_id": "s-old"}, changes=[Change("subdomain", "added", "new subdomain", "x.example.com")])
+        path = json_report_gen(_scan_result(), output_path=tmp_path / "r.json", changes=changes)
+        block = json.loads(path.read_text(encoding="utf-8"))["changes"]
+        assert block["summary"] == ["1 new subdomain"] and block["baseline"]["session_id"] == "s-old"
+        assert "changes" not in json.loads(json_report_gen(_scan_result(), output_path=tmp_path / "plain.json").read_text("utf-8"))
+
     def test_no_intel_means_no_fix_first_panel(self, tmp_path: Path) -> None:
         text = self._page(tmp_path)
         assert 'class="panel fixfirst"' not in text

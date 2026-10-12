@@ -34,6 +34,7 @@ from cyberfw.logging import get_logger
 from cyberfw.pipeline.engine import NodeResult, PipelineResult
 from cyberfw.pipeline.schemas import CveIntel, MailSecurity, ToolRecord
 from cyberfw.posture.tls import SOON_DAYS, URGENT_DAYS, Cert, certificates
+from cyberfw.report.diff import REAL, RunDiff
 from cyberfw.report.run_info import RunInfo
 from cyberfw.threatintel import EPSS_HIGH, exploit_url
 from cyberfw.tools.targets import hostname_of
@@ -95,17 +96,19 @@ def generate_html_report(
     session_id: str | None = None,
     reports_dir: Path | None = None,
     run: RunInfo | None = None,
+    changes: RunDiff | None = None,
 ) -> Path:
     """Write the HTML report and return its path.
 
     ``output_path`` takes priority; otherwise ``reports_dir / session_id /
     report.html`` is used (creating directories as needed). ``run`` supplies
-    the provenance (pipeline, seed, timing, tool versions).
+    the provenance (pipeline, seed, timing, tool versions); ``changes``, the
+    comparison with an earlier run, adds a "Changes" section.
     """
     path = _resolve_path(output_path, session_id, reports_dir)
     path.parent.mkdir(parents=True, exist_ok=True)
     try:
-        path.write_text(_render_page(result, run or RunInfo()), encoding="utf-8")
+        path.write_text(_render_page(result, run or RunInfo(), changes), encoding="utf-8")
     except OSError as exc:
         raise ReportError(f"cannot write {path}: {exc}") from exc
     LOG.info("HTML report written to %s", path)
@@ -113,7 +116,7 @@ def generate_html_report(
 
 
 # -- page ---------------------------------------------------------------------
-def _render_page(result: PipelineResult, run: RunInfo) -> str:
+def _render_page(result: PipelineResult, run: RunInfo, changes: RunDiff | None = None) -> str:
     info = run.as_dict(result)
     records = result.records
     hosts = _hosts(records)
@@ -128,9 +131,10 @@ def _render_page(result: PipelineResult, run: RunInfo) -> str:
     # Tools whose stage completed: only those can vouch for "nothing found".
     ran = {nr.node.tool for nr in result.nodes if nr.ok}
 
-    sections: list[tuple[str, str, str]] = [
-        ("overview", "Overview", _overview(result, hosts, vulns, ran, certs=certs, mail=mail, now=now))
-    ]
+    overview = _overview(result, hosts, vulns, ran, certs=certs, mail=mail, now=now, changes=changes)
+    sections: list[tuple[str, str, str]] = [("overview", "Overview", overview)]
+    if changes is not None:
+        sections.append(("changes", "Changes", _changes_section(changes)))
     sections.append(("pipeline", "Pipeline", _pipeline_section(result, run.seed)))
     if hosts:
         sections.append(("hosts", "Hosts", _hosts_section(hosts)))
@@ -201,6 +205,7 @@ def _overview(
     certs: list[Cert] | None = None,
     mail: list[MailSecurity] | None = None,
     now: datetime | None = None,
+    changes: RunDiff | None = None,
 ) -> str:
     panels = [
         p
@@ -214,7 +219,7 @@ def _overview(
     grid = f'<div class="grid2">{"".join(panels)}</div>' if panels else ""
     tiles = _tiles(
         result, hosts, vulns, ran, certs=certs or [], mail=mail or [],
-        now=now or datetime.now(timezone.utc),
+        now=now or datetime.now(timezone.utc), changes=changes,
     )
     return _heading("Overview") + tiles + grid
 
@@ -228,6 +233,7 @@ def _tiles(
     certs: list[Cert],
     mail: list[MailSecurity],
     now: datetime,
+    changes: RunDiff | None = None,
 ) -> str:
     nodes = result.nodes
     failed = sum(1 for n in nodes if not n.ok and not n.skipped)
@@ -324,6 +330,24 @@ def _tiles(
                 if exploited
                 else (f"{public} with a public exploit" if public else "no known exploitation"),
                 "tone": "t-err" if exploited else ("t-warn" if public else "t-ok"),
+            }
+        )
+    if changes is not None:
+        new = [c for c in changes.changes if c.area == "finding" and c.status == "added" and c.severity in REAL]
+        gone = sum(1 for c in changes.changes if c.area == "finding" and c.status == "removed" and c.severity in REAL)
+        rest = len(changes.changes) - len(new) - gone
+        sub = " · ".join(p for p in (f"{gone} gone" if gone else "", f"{rest} other change(s)" if rest else "") if p)
+        # Red for a new critical/high finding, or a known one that is now exploited in the wild.
+        serious = any(c.severity in ("critical", "high") for c in new) or any(
+            c.area == "finding" and c.status == "changed" for c in changes.changes
+        )
+        tiles.append(
+            {
+                "label": "new since last scan",
+                "value": len(new),
+                "icon": "delta",
+                "sub": sub or "nothing else changed",
+                "tone": "t-err" if serious else ("t-warn" if new else "t-ok"),
             }
         )
     if certs:
@@ -765,6 +789,56 @@ def _hosts_section(hosts: list[_Host]) -> str:
         + "\n".join(rows)
         + "</tbody></table></div>"
         + note
+    )
+
+
+# -- changes since an earlier run ---------------------------------------------------
+_MAX_CHANGES = 300
+
+
+def _change_badge(area: str, tone: str, severity: str, label: str) -> str:
+    """Red (or the finding's own severity) for bad news, grey for good, a plain tag otherwise."""
+    if tone == "bad":
+        tone_class = f"sev-{severity}" if area == "finding" and severity in _SEVERITIES else "sev-critical"
+        return f'<span class="badge {tone_class}">{_e(label)}</span>'
+    if tone == "good":
+        return f'<span class="badge t-ok">{_e(label)}</span>'
+    return f'<span class="tag">{_e(label)}</span>'
+
+
+def _changes_section(changes: RunDiff) -> str:
+    """What changed since the earlier run: summary chips, then one row per change."""
+    base = changes.baseline
+    when = str(base.get("started_at") or "")[:16].replace("T", " ")
+    note = (f"since {when} UTC" if when else "since the earlier run") + (
+        f" · session {base['session_id']}" if base.get("session_id") else ""
+    )
+    summary = changes.summary()
+    chips = "".join(f'<span class="chip">{_e(part)}</span>' for part in summary)
+    rows: list[str] = []
+    for index, change in enumerate(changes.changes[:_MAX_CHANGES]):
+        severity = f' <span class="dim">{_e(change.severity)}</span>' if change.severity else ""
+        rows.append(
+            f'<tr style="--i:{min(index, _MAX_STAGGER)}">'
+            f"<td>{_change_badge(change.area, change.tone, change.severity, change.label)}</td>"
+            f'<td class="what">{_e(change.subject)}{severity}</td>'
+            f'<td class="detail">{_e(change.detail) or _DASH}</td></tr>'
+        )
+    hidden = len(changes.changes) - _MAX_CHANGES
+    body = (
+        '<div class="tbl"><table class="changes"><thead><tr><th>change</th><th>what</th>'
+        "<th>detail</th></tr></thead><tbody>" + "\n".join(rows) + "</tbody></table></div>"
+        if rows
+        else '<p class="empty">Nothing changed since the earlier run.</p>'
+    )
+    more = f'<p class="note">… and {hidden:,} more change(s) in report.json.</p>' if hidden > 0 else ""
+    notes = "".join(f'<p class="note">not compared: {_e(text)}</p>' for text in changes.not_compared)
+    return (
+        _heading("Changes", note)
+        + (f'<div class="meta chg">{chips}</div>' if chips else "")
+        + body
+        + more
+        + notes
     )
 
 
@@ -1328,6 +1402,7 @@ _ICONS = {
     ),
     "key": _icon('<circle cx="8" cy="15" r="4"/><path d="M11 12l9-9M17 6l3 3M14.5 8.5l2 2"/>'),
     "lock": _icon('<rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/>'),
+    "delta": _icon('<path d="M12 4l8.5 15h-17z"/>'),
     "mail": _icon('<rect x="3" y="5" width="18" height="14" rx="2"/><path d="M3 7l9 6 9-6"/>'),
     "flame": _icon(
         '<path d="M12 3c.5 3.5 4.5 5.5 4.5 10a4.5 4.5 0 0 1-9 0c0-2.4 1.3-4 2.4-5.2.3 1.6 1 2.7 2.1 3.2-.6-2.8-.6-5.2 0-8z"/>'
@@ -1763,6 +1838,9 @@ html:not(.js) .toolbar { display: none; }
 .card .fix { margin: 8px 0 0; font-size: 13px; }
 .card code, .run code { padding: 0 4px; border-radius: 3px; background: var(--line); font: 12px var(--mono); }
 table.certs td:not(.ttl) { white-space: nowrap; }  /* a date must not break as 2026-12- / 25 */
+.meta.chg { margin-bottom: 12px; }
+table.changes td.what { overflow-wrap: anywhere; min-width: 180px; }
+table.changes td.detail { color: var(--muted); overflow-wrap: anywhere; }
 .run.mail { margin-bottom: 12px; }
 .run.mail dd { line-height: 1.55; }
 details.more { margin-top: 14px; }

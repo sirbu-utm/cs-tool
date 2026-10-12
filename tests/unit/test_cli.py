@@ -1864,3 +1864,64 @@ class TestPostureChecks:
 
         assert result.exit_code == 0, result.stdout
         assert "Email check skipped" in result.stdout
+
+
+class TestBaselineComparison:
+    """A repeat scan says what changed since the previous one; `cyberfw diff` compares any two."""
+
+    @staticmethod
+    def _tool_prints(root: Path, tool: str, *lines: dict[str, object]) -> None:
+        payload = "\n".join(json.dumps(line) for line in lines)
+        binary = root / "tools_bin" / tool
+        binary.write_text("#!/usr/bin/env bash\n" f"printf '%s\\n' '{payload}'\n", encoding="utf-8")
+        binary.chmod(binary.stat().st_mode | stat.S_IEXEC)
+
+    def _scan(self, session: str, *extra: str) -> object:
+        result = runner.invoke(
+            app, ["pipeline", "recon-to-vuln", "-t", "example.com", "--session", session, "--no-mail", *extra]
+        )
+        assert result.exit_code == 0, result.stdout
+        return result
+
+    def _scan_twice(self, tmp_path: Path) -> object:
+        first = self._scan("first")
+        assert "Since" not in first.stdout  # nothing earlier to compare with
+        self._tool_prints(tmp_path, "subfinder", {"host": "sub.example.com"}, {"host": "dev.example.com"})
+        self._tool_prints(
+            tmp_path, "nuclei",
+            {"template-id": "xss", "matched-at": "https://sub.example.com/", "info": {"name": "XSS check", "severity": "medium"}},
+            {"template-id": "sqli", "matched-at": "https://sub.example.com/login", "info": {"name": "SQLi", "severity": "high"}},
+        )
+        return self._scan("second")
+
+    def test_a_repeat_scan_reports_what_changed(self, tmp_path: Path) -> None:
+        second = self._scan_twice(tmp_path)
+
+        assert "Since" in second.stdout and "(first)" in second.stdout
+        assert "1 new finding" in second.stdout and "1 new subdomain" in second.stdout
+        report = json.loads((tmp_path / "reports" / "second" / "report.json").read_text(encoding="utf-8"))
+        assert report["changes"]["baseline"]["session_id"] == "first"
+        assert report["changes"]["summary"] == ["1 new finding", "1 new subdomain"]
+        html = (tmp_path / "reports" / "second" / "report.html").read_text(encoding="utf-8")
+        assert '<section id="changes"' in html
+
+    def test_no_baseline_skips_the_comparison(self, tmp_path: Path) -> None:
+        self._scan_twice(tmp_path)
+        third = self._scan("third", "--no-baseline")
+
+        assert "Since" not in third.stdout
+        assert "changes" not in json.loads((tmp_path / "reports" / "third" / "report.json").read_text(encoding="utf-8"))
+
+    def test_diff_command_compares_two_saved_runs(self, tmp_path: Path) -> None:
+        self._scan_twice(tmp_path)
+
+        text = runner.invoke(app, ["diff", "first", "second"])
+        assert text.exit_code == 0, text.stdout
+        assert "1 new finding" in text.stdout and "SQLi" in text.stdout
+
+        as_json = runner.invoke(app, ["diff", "first", "second", "--json"])
+        assert as_json.exit_code == 0, as_json.stdout
+        assert json.loads(as_json.stdout)["summary"] == ["1 new finding", "1 new subdomain"]
+
+        missing = runner.invoke(app, ["diff", "first", "nope"])
+        assert missing.exit_code == 2 and "no report.json" in missing.stdout

@@ -33,6 +33,7 @@ import typer
 from rich.cells import cell_len
 from rich.console import Console, ConsoleOptions, Group, RenderableType, RenderResult
 from rich.live import Live
+from rich.markup import escape
 from rich.prompt import Confirm as _RichConfirm
 from rich.prompt import Prompt as _RichPrompt
 from rich.table import Table
@@ -74,8 +75,9 @@ from cyberfw.pipeline.schemas import ToolRecord, validate_record
 from cyberfw.pipelines import PIPELINES, available_pipelines, build
 from cyberfw.posture import mail as mailcheck
 from cyberfw.posture import tls as tlscheck
+from cyberfw.report import diff as rundiff
 from cyberfw.report.html_report import generate_html_report
-from cyberfw.report.json_report import generate_json_report
+from cyberfw.report.json_report import generate_json_report, report_payload
 from cyberfw.report.run_info import RunInfo
 from cyberfw.resources import default_wordlist, packaged_data
 from cyberfw.tools import adapter_class
@@ -339,12 +341,63 @@ def _discard_session(session_dir: Path, *, created: bool) -> None:
 
 
 def _write_reports(
-    result: PipelineResult, *, session_id: str, settings: Settings, run: RunInfo
+    result: PipelineResult,
+    *,
+    session_id: str,
+    settings: Settings,
+    run: RunInfo,
+    changes: rundiff.RunDiff | None = None,
 ) -> list[tuple[str, Path]]:
     """Render both reports into the session directory; returns ``(label, path)`` pairs."""
-    json_path = generate_json_report(result, session_id=session_id, reports_dir=settings.reports_dir, run=run)
-    html_path = generate_html_report(result, session_id=session_id, reports_dir=settings.reports_dir, run=run)
+    json_path = generate_json_report(
+        result, session_id=session_id, reports_dir=settings.reports_dir, run=run, changes=changes
+    )
+    html_path = generate_html_report(
+        result, session_id=session_id, reports_dir=settings.reports_dir, run=run, changes=changes
+    )
     return [("json", json_path), ("html", html_path)]
+
+
+def _print_changes(changes: rundiff.RunDiff, *, limit: int | None) -> None:
+    """``Since <when> (<session>): 2 new findings · 1 port opened`` and the changes themselves."""
+    base = changes.baseline
+    when = str(base.get("started_at") or "")[:16].replace("T", " ")
+    since = f"{when} UTC" if when else "the earlier run"
+    session = f" ({escape(str(base['session_id']))})" if base.get("session_id") else ""
+    summary = " · ".join(changes.summary()) or "nothing changed"
+    console.print(f"Since {since}{session}: {escape(summary)}")
+    shown = changes.changes if limit is None else changes.changes[:limit]
+    for change in shown:
+        style = {"bad": "err", "good": "ok"}.get(change.tone, "muted")
+        severity = f" {change.severity}" if change.severity else ""
+        detail = f" [muted]— {escape(change.detail)}[/muted]" if change.detail else ""
+        console.print(f"  [{style}]{escape(change.label)}{severity}[/{style}]  {escape(change.subject)}{detail}")
+    if limit is not None and len(changes.changes) > limit:
+        console.print(f"  [muted]… and {len(changes.changes) - limit} more in the report[/muted]")
+    for note in changes.not_compared:
+        console.print(f"  [muted]not compared: {escape(note)}[/muted]")
+
+
+def _compare_with_earlier(
+    result: PipelineResult, run: RunInfo, reports_dir: Path, explicit: str | None
+) -> rundiff.RunDiff | None:
+    """Compare this run with an earlier one — the one named, else the newest
+    earlier run of the same pipeline and seed — and print what changed."""
+    try:
+        if explicit:
+            path: Path | None = rundiff.resolve_report(explicit, reports_dir)
+        else:
+            path = rundiff.find_baseline(
+                reports_dir, seed=run.seed, pipeline=run.pipeline, before=result.started_at
+            )
+        if path is None:
+            return None  # a first scan of this target: nothing to compare with
+        changes = rundiff.compare(rundiff.load_report(path), report_payload(result, run))
+    except (FileNotFoundError, ValueError) as exc:
+        console.print(f"[warn]Not compared with an earlier run: {escape(str(exc))}[/warn]")
+        return None
+    _print_changes(changes, limit=8)
+    return changes
 
 
 def _run_info(manager: ToolManager, *, name: str, seed: str | None, session_id: str, tools: set[str]) -> RunInfo:
@@ -1241,6 +1294,28 @@ def vt_cmd(
         _print_reputation(rep)
 
 
+@app.command("diff")
+def diff_cmd(
+    old: Annotated[str, typer.Argument(help="The earlier run: a session id, its directory or its report.json.")],
+    new: Annotated[str, typer.Argument(help="The later run, given the same way.")],
+    json_out: Annotated[bool, typer.Option("--json", help="Print the changes as JSON.")] = False,
+) -> None:
+    """Show what changed between two saved runs: new or gone findings, opened or
+    closed ports, new subdomains, renewed certificates, CVEs that became exploited."""
+    settings = load_settings()
+    try:
+        before = rundiff.load_report(rundiff.resolve_report(old, settings.reports_dir))
+        after = rundiff.load_report(rundiff.resolve_report(new, settings.reports_dir))
+    except (FileNotFoundError, ValueError) as exc:
+        console.print(f"[err]{escape(str(exc))}[/err]")
+        raise typer.Exit(2) from exc
+    changes = rundiff.compare(before, after)
+    if json_out:
+        print(json.dumps(changes.as_dict(), ensure_ascii=False, indent=2))
+        return
+    _print_changes(changes, limit=None)
+
+
 async def _vt_lookup(key: str, target: str) -> vt.Reputation:
     async with httpx.AsyncClient(timeout=30.0) as client:
         return await vt.lookup(client, key, target)
@@ -1608,6 +1683,17 @@ def pipeline_cmd(
             "up over DNS-over-HTTPS (Cloudflare, then Google) — the target is not contacted.",
         ),
     ] = True,
+    baseline: Annotated[
+        str | None,
+        typer.Option(
+            "--baseline",
+            help="Earlier run to compare with: a session id, its directory or its report.json. "
+            "By default the newest earlier run of the same pipeline and seed is used.",
+        ),
+    ] = None,
+    no_baseline: Annotated[
+        bool, typer.Option("--no-baseline", help="Do not compare with an earlier run.")
+    ] = False,
     verbose: VerboseOption = False,
 ) -> None:
     """Run a ready-made pipeline and render HTML/JSON reports.
@@ -1617,7 +1703,9 @@ def pipeline_cmd(
     --no-mail skips it); CVE findings are rated by real-world exploitation
     (CISA KEV, EPSS, Exploit-DB — --no-intel skips it); and discovered domains,
     IPs and URLs get VirusTotal reputation (your own free key, asked for the
-    first time — --no-vt skips it).
+    first time — --no-vt skips it). Finally the run is compared with the
+    previous scan of the same target (new findings, opened ports, renewed
+    certificates...) — --baseline picks another run, --no-baseline skips it.
     """
     if target is None:
         console.print("[err]Provide a seed target via --target.[/err]")
@@ -1756,6 +1844,9 @@ def pipeline_cmd(
     if vt_key:
         _enrich_with_vt(result, vt_key, vt_limit)
 
+    run_info = _run_info(manager, name=name, seed=target, session_id=session_id, tools={n.tool for n in nodes})
+    changes = None if no_baseline else _compare_with_earlier(result, run_info, settings.reports_dir, baseline)
+
     if verbose:
         console.print(_node_table(result))
 
@@ -1764,16 +1855,7 @@ def pipeline_cmd(
     if _wants_to_save(report, default=True, what=name):
         try:
             written = _write_reports(
-                result,
-                session_id=session_id,
-                settings=settings,
-                run=_run_info(
-                    manager,
-                    name=name,
-                    seed=target,
-                    session_id=session_id,
-                    tools={n.tool for n in nodes},
-                ),
+                result, session_id=session_id, settings=settings, run=run_info, changes=changes
             )
         except CyberfwError as exc:
             console.print(f"[err]report failed:[/err] {exc}")

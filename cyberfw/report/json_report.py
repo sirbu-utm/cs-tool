@@ -7,36 +7,28 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from cyberfw.exceptions import ReportError
 from cyberfw.logging import get_logger
 from cyberfw.pipeline.engine import PipelineResult
 from cyberfw.report.run_info import RunInfo
 
+if TYPE_CHECKING:
+    from cyberfw.report.diff import RunDiff
+
 LOG = get_logger("report.json")
 
-__all__ = ["generate_json_report"]
+__all__ = ["generate_json_report", "report_payload"]
 
 
-def generate_json_report(
-    result: PipelineResult,
-    output_path: Path | None = None,
-    *,
-    session_id: str | None = None,
-    reports_dir: Path | None = None,
-    run: RunInfo | None = None,
-) -> Path:
-    """Write the JSON report and return its path.
+def report_payload(result: PipelineResult, run: RunInfo | None = None) -> dict[str, Any]:
+    """The ``report.json`` document for ``result``, built in memory.
 
-    ``output_path`` takes priority; otherwise ``reports_dir / session_id /
-    report.json`` is used (creating directories as needed). ``run`` fills the
-    provenance block (``run``: pipeline, seed, timing, tool versions); it is
-    always present so consumers can rely on its keys.
+    The same shape :func:`generate_json_report` writes — what an earlier run's
+    file holds — so a run can be compared with one before it is saved.
     """
-    path = _resolve_path(output_path, session_id, reports_dir)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    payload: dict[str, Any] = {
+    return {
         "ok": result.succeeded(),
         "run": (run or RunInfo()).as_dict(result),
         "stages": [
@@ -53,6 +45,30 @@ def generate_json_report(
         "total_records": len(result.records),
         "records": [r.as_dict() for r in result.records],
     }
+
+
+def generate_json_report(
+    result: PipelineResult,
+    output_path: Path | None = None,
+    *,
+    session_id: str | None = None,
+    reports_dir: Path | None = None,
+    run: RunInfo | None = None,
+    changes: RunDiff | None = None,
+) -> Path:
+    """Write the JSON report and return its path.
+
+    ``output_path`` takes priority; otherwise ``reports_dir / session_id /
+    report.json`` is used (creating directories as needed). ``run`` fills the
+    provenance block (``run``: pipeline, seed, timing, tool versions); it is
+    always present so consumers can rely on its keys. ``changes`` — the
+    comparison with an earlier run — adds a ``changes`` block when given.
+    """
+    path = _resolve_path(output_path, session_id, reports_dir)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = report_payload(result, run)
+    if changes is not None:
+        payload["changes"] = changes.as_dict()
     try:
         path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     except OSError as exc:
