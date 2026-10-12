@@ -1925,3 +1925,59 @@ class TestBaselineComparison:
 
         missing = runner.invoke(app, ["diff", "first", "nope"])
         assert missing.exit_code == 2 and "no report.json" in missing.stdout
+
+
+class TestTriage:
+    """`cyberfw mute` silences a finding; the next scan sets it aside and does not call it new."""
+
+    def _mute(self, *args: str) -> object:
+        result = runner.invoke(app, ["mute", *args])
+        assert result.exit_code == 0, result.stdout
+        return result
+
+    def test_mute_list_and_unmute_round_trip(self, tmp_path: Path) -> None:
+        self._mute("self-signed", "--target", "dev.example.com", "--reason", "accepted_risk", "--note", "dev box")
+        self._mute("CVE-2021-1234", "--reason", "false_positive")
+
+        assert (tmp_path / "triage.yaml").is_file()
+        listed = runner.invoke(app, ["mutes"])
+        assert "m1" in listed.stdout and "self-signed" in listed.stdout and "dev.example.com" in listed.stdout
+        assert "m2" in listed.stdout and "CVE-2021-1234" in listed.stdout
+
+        removed = runner.invoke(app, ["unmute", "m1"])
+        assert removed.exit_code == 0 and "Removed" in removed.stdout
+        assert "m1" not in runner.invoke(app, ["mutes"]).stdout
+        assert runner.invoke(app, ["unmute", "m1"]).exit_code == 1  # already gone
+
+    def test_mute_validates_reason_and_expiry(self) -> None:
+        assert runner.invoke(app, ["mute", "x", "--reason", "nonsense"]).exit_code == 2
+        assert runner.invoke(app, ["mute", "x", "--expires", "soon"]).exit_code == 2
+
+    def test_a_muted_finding_is_set_aside_on_the_next_scan(self, tmp_path: Path) -> None:
+        self._tool_prints_xss()
+        first = runner.invoke(
+            app, ["pipeline", "recon-to-vuln", "-t", "example.com", "--session", "pre", "--no-mail", "--no-baseline"]
+        )
+        assert first.exit_code == 0 and "1 new finding" not in first.stdout
+
+        self._mute("xss", "--reason", "false_positive")
+        second = runner.invoke(
+            app, ["pipeline", "recon-to-vuln", "-t", "example.com", "--session", "post", "--no-mail"]
+        )
+        assert second.exit_code == 0, second.stdout
+        assert "Triage: 1 finding(s) muted" in second.stdout
+        assert "new finding" not in second.stdout  # muted, so the comparison with 'pre' does not call it new
+
+        report = json.loads((tmp_path / "reports" / "post" / "report.json").read_text(encoding="utf-8"))
+        vuln = next(r for r in report["records"] if r["kind"] == "vuln")
+        assert vuln["muted"] == {"reason": "false_positive", "rule": "m1"}
+
+    @staticmethod
+    def _tool_prints_xss() -> None:
+        import cyberfw  # noqa: F401 - ensure the package import path is set up
+
+        binary = Path("tools_bin") / "nuclei"
+        line = json.dumps({"template-id": "xss", "matched-at": "https://sub.example.com/",
+                           "info": {"name": "XSS check", "severity": "medium"}})
+        binary.write_text("#!/usr/bin/env bash\n" f"printf '%s\\n' '{line}'\n", encoding="utf-8")
+        binary.chmod(binary.stat().st_mode | stat.S_IEXEC)

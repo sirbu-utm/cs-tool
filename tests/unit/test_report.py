@@ -402,6 +402,28 @@ class TestHtmlDashboard:
         assert block["summary"] == ["1 new subdomain"] and block["baseline"]["session_id"] == "s-old"
         assert "changes" not in json.loads(json_report_gen(_scan_result(), output_path=tmp_path / "plain.json").read_text("utf-8"))
 
+    def test_muted_findings_are_set_aside_not_counted(self, tmp_path: Path) -> None:
+        active = _rec("nuclei", {"template-id": "rce", "matched-at": "https://a.example.com/x",
+                                 "info": {"name": "Critical RCE", "severity": "critical"}})
+        muted = _rec("nuclei", {"template-id": "self-signed", "matched-at": "https://dev.example.com/",
+                                "info": {"name": "Self-signed cert", "severity": "medium"}}, 2)
+        from cyberfw.pipeline.schemas import NucleiResult
+        assert isinstance(muted, NucleiResult)
+        muted.muted = {"reason": "accepted_risk", "rule": "m1", "note": "internal dev box"}
+        result = PipelineResult(
+            nodes=[NodeResult(node=Node(tool="nuclei", stage="v"), ok=True, count=2)], records=[active, muted]
+        )
+        text = self._page(tmp_path, result)
+
+        findings = text.split('<section id="findings"', 1)[1].split("</section>", 1)[0]
+        assert "1 vulnerabilities · 0 secrets · 1 muted" in findings  # active count, then muted
+        muted_block = findings.split('<details class="more muted-f">', 1)[1]
+        assert "Self-signed cert" in muted_block and "accepted risk · internal dev box" in muted_block
+        cards = findings.split('<details class="more muted-f">', 1)[0]
+        assert "Critical RCE" in cards and "Self-signed cert" not in cards  # muted is out of the active cards
+        assert '<b data-count="1">1</b><span>findings</span>' in text  # donut counts only the active finding
+        assert "dev.example.com" in text  # still on the host map / record table
+
     def test_no_intel_means_no_fix_first_panel(self, tmp_path: Path) -> None:
         text = self._page(tmp_path)
         assert 'class="panel fixfirst"' not in text

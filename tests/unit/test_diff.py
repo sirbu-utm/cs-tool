@@ -157,6 +157,24 @@ def test_finding_identity() -> None:
     assert matchers.summary() == ["2 info-level finding changes"]
 
 
+def test_a_muted_finding_is_not_counted_as_new_or_gone() -> None:
+    new_only = dict(_vuln("self-signed", "https://dev.example.com/"))
+    new_only["muted"] = {"reason": "accepted_risk", "rule": "m1"}
+    result = diff.compare(_doc(), _doc(new_only))
+    assert result.changes == []  # a muted finding appearing is not news
+
+    gone = {**_vuln("self-signed", "https://dev.example.com/"), "muted": {"reason": "accepted_risk", "rule": "m1"}}
+    assert diff.compare(_doc(gone), _doc()).changes == []  # nor is it disappearing
+
+
+def test_a_muted_finding_that_becomes_exploited_still_surfaces() -> None:
+    muted = {"reason": "accepted_risk", "rule": "m1"}
+    before = {**_vuln("CVE-2021-41773", "https://a/cgi-bin/", "high", kev=False), "muted": muted}
+    after = {**_vuln("CVE-2021-41773", "https://a/cgi-bin/", "high", kev=True), "muted": muted}
+    result = diff.compare(_doc(before), _doc(after))
+    assert _labels(result) == [("now exploited", "CVE-2021-41773")]  # mute silences noise, not a KEV escalation
+
+
 def test_secrets_are_compared_without_printing_them() -> None:
     secret = {"tool": "gitleaks", "kind": "secret", "target": "app.py", "rule_id": "aws-key",
               "file_path": "app.py", "commit": "abc", "secret": "AKIAEXAMPLE"}

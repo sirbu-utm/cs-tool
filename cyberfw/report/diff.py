@@ -203,11 +203,17 @@ def _items(record: dict[str, Any]) -> list[tuple[tuple[str, str], _Item]]:
         severity = str(info.get("severity") or "unknown").lower()
         key = f"{template}|{_matcher(record)}|{_url_key(where)}"
         name = str(info.get("name") or template or "finding")
-        return [(("finding", key), _Item("finding", tool, name, detail=where, severity=severity, state=kev))]
+        # A muted finding (triage) is not news when it appears or disappears; a
+        # mute that became exploited in the wild still surfaces (the "changed"
+        # path is not gated by `tracked`).
+        tracked = not record.get("muted")
+        return [(("finding", key),
+                 _Item("finding", tool, name, detail=where, severity=severity, state=kev, tracked=tracked))]
     if kind == "secret":
         rule, path = str(record.get("rule_id") or "secret"), str(record.get("file_path") or target)
         key = f"{rule}|{path}|{record.get('commit') or ''}"
-        return [(("secret", key), _Item("secret", tool, rule, detail=path))]  # never the secret itself
+        # never the secret itself
+        return [(("secret", key), _Item("secret", tool, rule, detail=path, tracked=not record.get("muted")))]
     if kind == "fuzz":
         url = str(record.get("url") or target)
         return [(("path", _url_key(url)), _Item("path", tool, url, detail=f"HTTP {record.get('status')}"))]

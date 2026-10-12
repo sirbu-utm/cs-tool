@@ -184,6 +184,9 @@ class NucleiResult(ToolRecord):
     matched_at: str = Field(default="", validation_alias="matched-at")
     info: dict[str, Any] = Field(default_factory=dict)
     intel: CveIntel | None = None
+    #: Set by :mod:`cyberfw.triage` when a rule silences this finding
+    #: (``{"reason", "note", "rule", "until"}``); ``None`` otherwise.
+    muted: dict[str, Any] | None = None
 
     @property
     def name(self) -> str:
@@ -212,6 +215,7 @@ class GitleaksResult(ToolRecord):
     secret: str = Field(default="", validation_alias="Secret")
     file_path: str = Field(default="", validation_alias="File", alias="File")
     commit: str = Field(default="", validation_alias="Commit")
+    muted: dict[str, Any] | None = None  # see NucleiResult.muted
 
     @classmethod
     def from_json(cls, tool: str, text: str, lineno: int) -> GitleaksResult:
@@ -294,6 +298,7 @@ class PostureFinding(ToolRecord):
     template_id: str = ""
     matched_at: str = ""
     info: dict[str, Any] = Field(default_factory=dict)
+    muted: dict[str, Any] | None = None  # see NucleiResult.muted
 
     @property
     def name(self) -> str:

@@ -131,7 +131,10 @@ def _render_page(result: PipelineResult, run: RunInfo, changes: RunDiff | None =
     # Tools whose stage completed: only those can vouch for "nothing found".
     ran = {nr.node.tool for nr in result.nodes if nr.ok}
 
-    overview = _overview(result, hosts, vulns, ran, certs=certs, mail=mail, now=now, changes=changes)
+    # The overview counts what needs attention: triage-muted findings are set
+    # aside (the Findings section still lists them, the host map still has them).
+    active_vulns = [r for r in vulns if _muted(r) is None]
+    overview = _overview(result, hosts, active_vulns, ran, certs=certs, mail=mail, now=now, changes=changes)
     sections: list[tuple[str, str, str]] = [("overview", "Overview", overview)]
     if changes is not None:
         sections.append(("changes", "Changes", _changes_section(changes)))
@@ -968,17 +971,33 @@ def _mail_section(mail: list[MailSecurity]) -> str:
 
 
 # -- findings ---------------------------------------------------------------------
+def _muted(record: ToolRecord) -> dict[str, Any] | None:
+    mark = getattr(record, "muted", None)
+    return mark if isinstance(mark, dict) else None
+
+
 def _findings_section(vulns: list[ToolRecord], secrets: list[ToolRecord]) -> str:
+    # Triage: findings an owner has judged (false positive / accepted risk) are
+    # set aside — kept out of Fix-first and the cards, folded into a collapsed
+    # block of their own — so a re-scan does not nag with the same acknowledged
+    # noise. They remain in the record table and on the host map.
+    active = [r for r in vulns if _muted(r) is None]
+    muted = [r for r in vulns if _muted(r) is not None]
+    muted_secrets = [r for r in secrets if _muted(r) is not None]
+    live_secrets = [r for r in secrets if _muted(r) is None]
     # Severity groups the cards; within one, exploited-in-the-wild and likelier
     # findings come first. sorted() is stable, so ties keep arrival order.
-    ordered = sorted(vulns, key=lambda r: (_SEVERITIES.index(_severity(r)), *_urgency(r)))
+    ordered = sorted(active, key=lambda r: (_SEVERITIES.index(_severity(r)), *_urgency(r)))
     major = [r for r in ordered if _severity(r) in _MAJOR]
     minor = [r for r in ordered if _severity(r) not in _MAJOR]
-    exploited = sum(1 for r in vulns if (intel := _intel(r)) is not None and intel.kev)
-    note = f"{len(vulns):,} vulnerabilities · {len(secrets):,} secrets"
+    exploited = sum(1 for r in active if (intel := _intel(r)) is not None and intel.kev)
+    note = f"{len(active):,} vulnerabilities · {len(live_secrets):,} secrets"
     if exploited:
         note += f" · {exploited:,} exploited in the wild"
-    parts = [_heading("Findings", note), _fix_first(vulns)]
+    total_muted = len(muted) + len(muted_secrets)
+    if total_muted:
+        note += f" · {total_muted:,} muted"
+    parts = [_heading("Findings", note), _fix_first(active)]
     if major:
         parts.append(_cards(_vuln_card(r, i) for i, r in enumerate(major[:_MAX_CARDS])))
         parts.append(_more_note(len(major)))
@@ -988,11 +1007,49 @@ def _findings_section(vulns: list[ToolRecord], secrets: list[ToolRecord]) -> str
         parts.append(
             f'<details class="more"{"" if major else " open"}><summary>{summary}</summary>{cards}{_more_note(len(minor))}</details>'
         )
-    if secrets:
+    if live_secrets:
         parts.append('<h3 class="sub">Secrets</h3>')
-        parts.append(_cards(_secret_card(r, i) for i, r in enumerate(secrets[:_MAX_CARDS])))
-        parts.append(_more_note(len(secrets)))
+        parts.append(_cards(_secret_card(r, i) for i, r in enumerate(live_secrets[:_MAX_CARDS])))
+        parts.append(_more_note(len(live_secrets)))
+    parts.append(_muted_block(muted + muted_secrets))
     return "".join(parts)
+
+
+def _muted_block(records: list[ToolRecord]) -> str:
+    """A collapsed list of findings triage has silenced, each with its reason."""
+    if not records:
+        return ""
+    rows: list[str] = []
+    for record in records[:_MAX_CARDS]:
+        mark = _muted(record) or {}
+        reason = _MUTE_REASON.get(str(mark.get("reason") or "other"), "muted")
+        meta = [reason]
+        if mark.get("note"):
+            meta.append(str(mark["note"]))
+        if mark.get("until"):
+            meta.append(f"until {mark['until']}")
+        name = _finding_name(record) if record.kind == "vuln" else str(getattr(record, "rule_id", "") or "secret")
+        rows.append(
+            f'<li><span class="badge sev-{_severity(record)}">{_e(_severity(record))}</span>'
+            f'<div><b>{_e(name)}</b> <span class="mono dim">{_e(record.target)}</span>'
+            f'<p class="why">{_e(" · ".join(meta))}</p></div></li>'
+        )
+    hidden = len(records) - _MAX_CARDS
+    more = f'<p class="note">… and {hidden:,} more in the record table.</p>' if hidden > 0 else ""
+    return (
+        f'<details class="more muted-f"><summary>{len(records):,} muted finding(s) — '
+        "false positives / accepted risk</summary>"
+        f'<ol class="mutes">{"".join(rows)}</ol>{more}</details>'
+    )
+
+
+#: Human label for a triage reason code (mirrors cyberfw.triage.REASONS).
+_MUTE_REASON = {
+    "false_positive": "false positive",
+    "accepted_risk": "accepted risk",
+    "wont_fix": "won't fix",
+    "other": "muted",
+}
 
 
 def _cards(cards: Iterable[str]) -> str:
@@ -1225,8 +1282,8 @@ def _render_record(index: int, record: ToolRecord) -> str:
 
 def _format_detail(as_dict: dict[str, object]) -> str:
     """Flatten a record dict into a short, readable substring (first field wins)."""
-    # intel: on the finding cards; tls: in the certificate table.
-    skip = {"tool", "line_number", "raw", "target", "kind", "stage", "intel", "tls"}
+    # intel: on the finding cards; tls: in the certificate table; muted: its own block.
+    skip = {"tool", "line_number", "raw", "target", "kind", "stage", "intel", "tls", "muted"}
     seen: list[str] = []
     for key, value in as_dict.items():
         if key in skip or value in ("", None):
@@ -1800,6 +1857,10 @@ a.tag:hover { text-decoration: underline; }
 .fixfirst li .badge { justify-self: start; }
 .fixfirst .why { margin: 3px 0 0; color: var(--text); font-size: 12.5px; }
 .fixfirst .where { margin: 2px 0 0; color: var(--muted); font: 12px var(--mono); overflow-wrap: anywhere; }
+.muted-f ol.mutes { list-style: none; margin: 0; padding: 0; display: grid; gap: 10px; }
+.muted-f li { display: grid; grid-template-columns: 72px minmax(0, 1fr); gap: 12px; align-items: start; }
+.muted-f li .badge { justify-self: start; opacity: .7; }
+.muted-f .why { margin: 3px 0 0; color: var(--muted); font-size: 12.5px; }
 .host { white-space: nowrap; }
 .ld { display: inline-block; width: 8px; height: 8px; margin-right: 10px; border-radius: 50%; background: var(--dim); vertical-align: 1px; }
 .ld.on { background: var(--ok); }
