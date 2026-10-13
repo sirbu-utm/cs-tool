@@ -757,6 +757,9 @@ def _start_screen(rows: list[_ToolRow], platform: str, settings: Settings) -> No
 def interactive_menu() -> None:
     """Run the keyboard-driven launcher used by ``cs-tool`` without arguments."""
     _ensure_tools()
+    # Whatever installing / checking printed is done with: the interface starts
+    # on a clean, titled screen.
+    _fresh_screen()
     settings, manager = _bootstrap()
     try:
         # One inventory pass serves the banner and the first launcher frame;
@@ -765,6 +768,7 @@ def interactive_menu() -> None:
     finally:
         manager.close()
     first = True
+    review = False  # the last action printed output the user should read first
     while True:
         # Re-bootstrap each loop so a p/l/f settings change — exported as a
         # CYBERFW_* env var — takes effect on the next frame. The panel is
@@ -775,11 +779,21 @@ def interactive_menu() -> None:
         try:
             names = manager.registry.names()
             if not first:  # the start screen already showed this frame
+                if not _back_to_launcher(review):
+                    console.print("\n[muted]Goodbye.[/muted]")
+                    return
                 console.print(_launcher_view(manager, settings))
         finally:
             manager.close()
         first = False
-        choice = _prompt_choice(names)
+        review = False
+        try:
+            choice = _prompt_choice(names)
+        except (KeyboardInterrupt, EOFError):
+            # Ctrl+C / Ctrl+D at the menu is a normal way out, not a failure: exit
+            # 0, so a Windows Terminal window opened for the interface closes.
+            console.print("\n[muted]Goodbye.[/muted]")
+            return
         if choice in _SETTINGS_KEYS:
             _toggle_setting(choice, settings)
             continue  # reprint the panel with the new setting
@@ -791,6 +805,35 @@ def interactive_menu() -> None:
         except (KeyboardInterrupt, EOFError):
             console.print("\n[muted]Goodbye.[/muted]")
             return
+        review = True
+
+
+def _fresh_screen() -> None:
+    """Title the window and clear it — only for a person at a terminal; a pipe,
+    a log or a test keeps its plain transcript."""
+    if not _is_interactive():
+        return
+    console.set_window_title("CS-TOOL")
+    console.clear()
+
+
+def _back_to_launcher(review: bool) -> bool:
+    """Make room for the next launcher frame on a clean screen.
+
+    After an action (a scan, a tool run) the user first reads its output and
+    presses Enter; a settings toggle redraws straight away. Returns False when
+    they leave at that prompt (Ctrl+C / Ctrl+D). Non-interactive: no-op, so the
+    transcript keeps scrolling as before.
+    """
+    if not _is_interactive():
+        return True
+    if review:
+        try:
+            console.input("\n[muted]Enter — back to the launcher[/muted] ")
+        except (KeyboardInterrupt, EOFError):
+            return False
+    console.clear()
+    return True
 
 
 #: Launcher hotkeys that are not tool numbers. Tools are ``1``..``len(names)``,
@@ -906,6 +949,16 @@ class _LauncherView:
             (Text.assemble(keycap(key, label, slot=2, label_style="muted"), " ", value) for key, label, value in items),
             "  " if compact else "   ",
         )
+
+
+@app.command("prepare", hidden=True)
+def prepare_cmd() -> None:
+    """Install every missing tool, then exit.
+
+    The launchers (cstool.bat / start.sh) run this in the install window, so the
+    interface then opens in a clean terminal with nothing left to download.
+    """
+    _ensure_tools()
 
 
 def _ensure_tools() -> None:
@@ -1317,8 +1370,11 @@ def diff_cmd(
     new: Annotated[str, typer.Argument(help="The later run, given the same way.")],
     json_out: Annotated[bool, typer.Option("--json", help="Print the changes as JSON.")] = False,
 ) -> None:
-    """Show what changed between two saved runs: new or gone findings, opened or
-    closed ports, new subdomains, renewed certificates, CVEs that became exploited."""
+    """Show what changed between two saved runs.
+
+    New or gone findings, opened or closed ports, new subdomains, renewed
+    certificates, CVEs that have since become exploited in the wild.
+    """
     settings = load_settings()
     try:
         before = rundiff.load_report(rundiff.resolve_report(old, settings.reports_dir))
@@ -1345,8 +1401,11 @@ def mute_cmd(
     expires: Annotated[str | None, typer.Option("--expires",
         help="Date (YYYY-MM-DD) after which the mute lapses — good practice for accepted risk.")] = None,
 ) -> None:
-    """Silence a finding on future scans (triage). It then shows in a muted block,
-    not as an active finding, and is not counted as new when runs are compared."""
+    """Silence a finding on future scans (triage).
+
+    It then shows in a muted block rather than as an active finding, and is not
+    counted as new when runs are compared.
+    """
     settings = load_settings()
     if reason not in triage.REASONS:
         console.print(f"[err]Unknown reason {reason!r}. Use one of: {', '.join(sorted(triage.REASONS))}.[/err]")

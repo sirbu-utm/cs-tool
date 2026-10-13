@@ -2022,3 +2022,106 @@ class TestTriage:
                            "info": {"name": "XSS check", "severity": "medium"}})
         binary.write_text("#!/usr/bin/env bash\n" f"printf '%s\\n' '{line}'\n", encoding="utf-8")
         binary.chmod(binary.stat().st_mode | stat.S_IEXEC)
+
+
+class TestCleanInterface:
+    """The interface opens on a clean screen and keeps the launcher on one."""
+
+    @staticmethod
+    def _screen(monkeypatch: pytest.MonkeyPatch, *, interactive: bool = True,
+                inputs: list[object] | None = None) -> list[str]:
+        """Record what the console is asked to do; ``inputs`` feed ``console.input``."""
+        import cyberfw.cli as cli
+
+        calls: list[str] = []
+        queue = list(inputs or [])
+
+        def fake_input(*_a: object, **_k: object) -> str:
+            calls.append("input")
+            item = queue.pop(0) if queue else ""
+            if isinstance(item, BaseException):
+                raise item
+            return str(item)
+
+        monkeypatch.setattr(cli, "_is_interactive", lambda: interactive)
+        monkeypatch.setattr(cli.console, "clear", lambda *a, **k: calls.append("clear"))
+        monkeypatch.setattr(cli.console, "set_window_title", lambda title: calls.append(f"title:{title}"))
+        monkeypatch.setattr(cli.console, "input", fake_input)
+        return calls
+
+    def test_prepare_installs_missing_tools_and_exits(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        ran: list[bool] = []
+        monkeypatch.setattr("cyberfw.cli._ensure_tools", lambda: ran.append(True))
+        result = runner.invoke(app, ["prepare"])
+        assert result.exit_code == 0 and ran == [True]
+        assert "prepare" not in runner.invoke(app, ["--help"]).stdout  # a launcher detail, not a command to advertise
+
+    def test_the_interface_starts_on_a_clean_titled_screen(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from cyberfw.cli import _fresh_screen
+
+        calls = self._screen(monkeypatch)
+        _fresh_screen()
+        assert calls == ["title:CS-TOOL", "clear"]
+
+    def test_a_pipe_or_a_log_keeps_its_plain_transcript(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from cyberfw.cli import _back_to_launcher, _fresh_screen
+
+        calls = self._screen(monkeypatch, interactive=False)
+        _fresh_screen()
+        assert _back_to_launcher(review=True) is True
+        assert calls == []  # no clearing, no waiting
+
+    def test_back_to_the_launcher_waits_after_an_action_but_not_after_a_toggle(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from cyberfw.cli import _back_to_launcher
+
+        calls = self._screen(monkeypatch)
+        assert _back_to_launcher(review=True) is True
+        assert calls == ["input", "clear"]  # read the output, Enter, clean frame
+        calls.clear()
+        assert _back_to_launcher(review=False) is True
+        assert calls == ["clear"]  # a settings toggle redraws at once
+
+    def test_leaving_at_the_pause_says_goodbye(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from cyberfw.cli import _back_to_launcher
+
+        self._screen(monkeypatch, inputs=[KeyboardInterrupt()])
+        assert _back_to_launcher(review=True) is False
+
+    def test_the_menu_pauses_then_redraws_cleanly_between_actions(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        import cyberfw.cli as cli
+
+        calls = self._screen(monkeypatch)
+        choices = iter(["1", "0"])
+        monkeypatch.setattr(cli, "_ensure_tools", lambda: None)
+        monkeypatch.setattr(cli, "_prompt_choice", lambda names: next(choices))
+        monkeypatch.setattr(cli, "_dispatch_choice", lambda choice, names: choice != "0")  # "1" = an action ran
+        cli.interactive_menu()
+
+        assert calls[:2] == ["title:CS-TOOL", "clear"]  # clean start after install/check
+        assert calls[2:] == ["input", "clear"]  # after the action: Enter, then a clean launcher
+
+    def test_ctrl_c_at_the_menu_is_a_clean_exit(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Exit 0, not "Aborted!" — so a Windows Terminal window opened for the interface closes."""
+        import cyberfw.cli as cli
+
+        def interrupted(names: list[str]) -> str:
+            raise KeyboardInterrupt
+
+        monkeypatch.setattr(cli, "_ensure_tools", lambda: None)
+        monkeypatch.setattr(cli, "_prompt_choice", interrupted)
+        result = runner.invoke(app, [])
+        assert result.exit_code == 0 and "Goodbye." in result.stdout
+
+    def test_launchers_open_the_interface_in_a_clean_terminal(self) -> None:
+        root = Path(__file__).resolve().parents[2]
+        bat = (root / "cstool.bat").read_text(encoding="utf-8")
+        # tools are fetched in the install window, then a new Windows Terminal window
+        # opens the interface, unless already in one or opted out
+        assert "cyberfw.cli prepare" in bat
+        assert "if defined WT_SESSION goto run_here" in bat and "CYBERFW_NO_WT" in bat
+        assert 'wt -w new --size 120,36 --title "CS-TOOL"' in bat
+        assert 'if not "%~1"=="" goto run_here' in bat  # commands with arguments stay in place
+        sh = (root / "start.sh").read_text(encoding="utf-8")
+        assert "cyberfw.cli prepare" in sh and "exec uv run" in sh

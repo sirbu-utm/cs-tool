@@ -6,4 +6,9 @@ if ! command -v uv &> /dev/null; then
     export PATH="$HOME/.local/bin:$HOME/.cargo/bin:$PATH"
 fi
 uv sync --extra dev --no-install-workspace --inexact
-uv run --no-sync python -m cyberfw.cli "$@"
+if [ "$#" -eq 0 ]; then
+    # The interactive interface: fetch any missing tool here first, so the
+    # interface itself opens on a clean screen (it clears it) with nothing to install.
+    uv run --no-sync python -m cyberfw.cli prepare
+fi
+exec uv run --no-sync python -m cyberfw.cli "$@"
