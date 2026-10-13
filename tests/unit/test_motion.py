@@ -133,6 +133,56 @@ class TestEffects:
             glyph.encode("cp437")
 
 
+class TestDecode:
+    def test_text_resolves_left_to_right_out_of_noise(self) -> None:
+        start = motion.decode("Good bye", 0.0)
+        assert len(start.plain) == len("Good bye") and start.plain[4] == " "  # spaces hold the shape
+        assert set(start.plain.replace(" ", "")) <= set(motion.NOISE)
+        half = motion.decode("Goodbye.", 0.5)
+        assert half.plain.startswith("Good") and set(half.plain[4:]) <= set(motion.NOISE)
+        assert motion.decode("Goodbye.", 1.0).plain == "Goodbye."  # what a pipe prints
+
+    def test_the_noise_flickers_between_frames(self) -> None:
+        assert len({motion.decode("abcdefgh", step / 100).plain for step in range(10)}) > 1
+
+
+class TestActivity:
+    def test_a_pipe_gets_nothing_while_the_step_runs(self) -> None:
+        buffer = io.StringIO()
+        with motion.Activity(Console(file=buffer, force_terminal=False), "Working") as activity:
+            activity.advance()
+        assert buffer.getvalue() == "" and not activity.animated
+
+    def test_animations_off_draws_nothing_even_on_a_terminal(self) -> None:
+        console, buffer = _tty()
+        with motion.Activity(console, "Working", animate=False):
+            pass
+        assert buffer.getvalue() == ""
+
+    def test_a_counted_step_fills_a_bar_and_shows_done_of_total(self) -> None:
+        activity = motion.Activity(_tty()[0], "VirusTotal", total=4, detail="4 lookups/min")
+        activity.advance()
+        assert activity.done == 1
+        activity.advance(2)  # a callback reports the count, not a delta
+        line = _text(activity)
+        assert "VirusTotal" in line and "2/4" in line and "4 lookups/min" in line
+        assert motion.BAR_FULL in line
+
+    def test_an_open_ended_step_sweeps_and_counts_seconds(self) -> None:
+        line = _text(motion.Activity(_tty()[0], "Email example.com"))
+        tail = line.split("Email example.com", 1)[1]
+        assert tail.count(motion.BAR_FULL) == 3  # the scanner's stroke
+        assert tail.rstrip().endswith("s")  # elapsed seconds
+
+    def test_on_a_terminal_it_draws_live_then_gets_out_of_the_way(self) -> None:
+        console, buffer = _tty()
+        with motion.Activity(console, "Fetching nuclei"):
+            pass
+        assert "Fetching nuclei" in buffer.getvalue()  # drawn while the step ran
+        with motion.Activity(console, "Next step"):  # the first live display really stopped
+            pass
+
+
 class TestBannerIntro:
     STATES = ["ready", "ready", "blocked", "not installed"]
 

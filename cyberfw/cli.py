@@ -780,9 +780,9 @@ def interactive_menu() -> None:
             names = manager.registry.names()
             if not first:  # the start screen already showed this frame
                 if not _back_to_launcher(review):
-                    console.print("\n[muted]Goodbye.[/muted]")
+                    _goodbye(settings)
                     return
-                console.print(_launcher_view(manager, settings))
+                _show_launcher(manager, settings)
         finally:
             manager.close()
         first = False
@@ -792,20 +792,41 @@ def interactive_menu() -> None:
         except (KeyboardInterrupt, EOFError):
             # Ctrl+C / Ctrl+D at the menu is a normal way out, not a failure: exit
             # 0, so a Windows Terminal window opened for the interface closes.
-            console.print("\n[muted]Goodbye.[/muted]")
+            _goodbye(settings)
             return
         if choice in _SETTINGS_KEYS:
             _toggle_setting(choice, settings)
             continue  # reprint the panel with the new setting
         try:
             if not _dispatch_choice(choice, names):
+                _goodbye(settings, newline=False)
                 return
         except typer.Exit:
             console.print("[warn]The operation failed. Returning to the launcher.[/warn]")
         except (KeyboardInterrupt, EOFError):
-            console.print("\n[muted]Goodbye.[/muted]")
+            _goodbye(settings)
             return
         review = True
+
+
+def _show_launcher(manager: ToolManager, settings: Settings) -> None:
+    """The launcher frame, played in each time the menu comes back — rows type
+    in, then the keys and settings — the same entrance as the start screen."""
+    rows = _tool_rows(manager, settings.tools_dir)
+    motion.play(
+        console, lambda progress: _LauncherView(rows, settings, progress=progress),
+        duration=0.45, animate=settings.animations,
+    )
+
+
+def _goodbye(settings: Settings, *, newline: bool = True) -> None:
+    """Sign off: "Goodbye." resolves out of noise; a pipe just gets the word."""
+    if newline:  # after ^C the cursor sits at the end of the prompt line
+        console.print()
+    motion.play(
+        console, lambda progress: motion.decode("Goodbye.", progress, style="muted"),
+        duration=0.55, animate=settings.animations,
+    )
 
 
 def _fresh_screen() -> None:
@@ -868,9 +889,9 @@ def _prompt_choice(names: list[str]) -> str:
 
 
 def _dispatch_choice(choice: str, names: list[str]) -> bool:
-    """Run the action behind a validated launcher choice; False means "exit"."""
+    """Run the action behind a validated launcher choice; False means "exit"
+    (the caller signs off)."""
     if choice in _EXIT_KEYS:
-        console.print("[muted]Goodbye.[/muted]")
         return False
     if choice == _PIPELINE_KEY:
         _interactive_pipeline()
@@ -963,7 +984,7 @@ def prepare_cmd() -> None:
 
 def _ensure_tools() -> None:
     """Install every missing tool automatically before showing the launcher."""
-    _, manager = _bootstrap()
+    settings, manager = _bootstrap()
     try:
         missing = [name for name in manager.registry.names() if not manager.is_installed(name)]
         if not missing:
@@ -972,7 +993,9 @@ def _ensure_tools() -> None:
         for name in missing:
             console.print(f"[info]fetching[/info] {name} ({manager.spec(name).repo}) ...")
             try:
-                result = manager.install(name)
+                with motion.Activity(console, f"Fetching {name}", animate=settings.animations,
+                                     detail=manager.spec(name).repo):
+                    result = manager.install(name)
             except CyberfwError as exc:
                 console.print(f"[err]  failed {name}:[/err] {exc}")
             else:
@@ -1354,7 +1377,8 @@ def vt_cmd(
         console.print(f"[yellow]No VirusTotal API key. Get one free: {vt.API_KEY_URL}[/yellow]")
         raise typer.Exit(1)
     try:
-        rep = anyio.run(_vt_lookup, key, target)
+        with motion.Activity(console, f"VirusTotal {target}", animate=settings.animations and not json_out):
+            rep = anyio.run(_vt_lookup, key, target)
     except vt.VtError as exc:
         console.print(f"[err]VirusTotal: {exc}[/err]")
         raise typer.Exit(1) from exc
@@ -1571,13 +1595,14 @@ def _check_tls(result: PipelineResult) -> None:
     console.print("TLS: " + " · ".join(parts))
 
 
-def _check_mail(result: PipelineResult, seed: str) -> None:
+def _check_mail(result: PipelineResult, seed: str, *, animate: bool = True) -> None:
     """Whether mail can be forged as the seed domain (SPF / DMARC over DNS-over-HTTPS)."""
     domain = mailcheck.mail_domain(seed)
     if domain is None:
         return
     try:
-        record, found = anyio.run(mailcheck.check, domain)
+        with motion.Activity(console, f"Email {domain}", animate=animate, detail="SPF · DMARC · MX"):
+            record, found = anyio.run(mailcheck.check, domain)
     except mailcheck.DnsError as exc:
         console.print(f"[warn]Email check skipped — DNS-over-HTTPS unreachable: {exc}[/warn]")
         return
@@ -1593,13 +1618,18 @@ def _check_mail(result: PipelineResult, seed: str) -> None:
     console.print(f"Email ({domain}): [{style}]{record.verdict}[/{style}]{reason}")
 
 
-def _check_takeover(result: PipelineResult) -> None:
+def _check_takeover(result: PipelineResult, *, animate: bool = True) -> None:
     """Flag subdomains with a dangling CNAME to an unclaimed third-party service."""
     hosts = takeovercheck.candidates(result.records)
     if not hosts:
         return
     try:
-        findings, notes = anyio.run(takeovercheck.scan, hosts)
+        total = min(len(hosts), 300)
+        with motion.Activity(console, "Subdomain takeover", animate=animate, total=total,
+                             detail="dangling CNAMEs") as activity:
+            findings, notes = anyio.run(
+                functools.partial(takeovercheck.scan, hosts, progress=activity.advance)
+            )
     except Exception as exc:  # noqa: BLE001 - a posture check must never fail the scan
         console.print(f"[warn]Subdomain-takeover check failed: {escape(str(exc))}[/warn]")
         return
@@ -1613,13 +1643,14 @@ def _check_takeover(result: PipelineResult) -> None:
         console.print(f"Subdomain takeover: [ok]none[/ok] in {len(hosts)} host(s)")
 
 
-def _enrich_with_intel(result: PipelineResult, cache_dir: Path) -> None:
+def _enrich_with_intel(result: PipelineResult, cache_dir: Path, *, animate: bool = True) -> None:
     """Rate CVE findings by real-world exploitation (CISA KEV, EPSS, Exploit-DB)."""
     if not any(threatintel.cve_ids(r) for r in result.records if r.kind == "vuln"):
         return
     console.print("[muted]Threat intel: checking CVEs against CISA KEV, EPSS and Exploit-DB…[/muted]")
     try:
-        summary = anyio.run(threatintel.enrich, result.records, cache_dir)
+        with motion.Activity(console, "Rating CVEs", animate=animate, detail="KEV · EPSS · Exploit-DB"):
+            summary = anyio.run(threatintel.enrich, result.records, cache_dir)
     except Exception as exc:  # noqa: BLE001 - intel must never fail the scan
         console.print(f"[warn]Threat intel failed: {exc}[/warn]")
         return
@@ -1635,16 +1666,18 @@ def _enrich_with_intel(result: PipelineResult, cache_dir: Path) -> None:
     console.print("Threat intel: " + " · ".join(parts))
 
 
-def _enrich_with_vt(result: PipelineResult, api_key: str, limit: int) -> None:
+def _enrich_with_vt(result: PipelineResult, api_key: str, limit: int, *, animate: bool = True) -> None:
     """Append VirusTotal reputation records for the run's discovered targets."""
     targets = vt.enrichment_targets(result.records)
     if not targets:
         return
-    console.print(
-        f"[muted]VirusTotal: looking up {min(len(targets), limit)} target(s), throttled to 4/min…[/muted]"
-    )
+    count = min(len(targets), limit)
+    console.print(f"[muted]VirusTotal: looking up {count} target(s), throttled to 4/min…[/muted]")
     try:
-        reps = anyio.run(vt.enrich, targets, api_key, limit)
+        # At the free tier's 4/min this can take minutes: a live counter, not silence.
+        with motion.Activity(console, "VirusTotal", animate=animate, total=count,
+                             detail="free tier: 4 lookups/min") as activity:
+            reps = anyio.run(functools.partial(vt.enrich, targets, api_key, limit, progress=activity.advance))
     except Exception as exc:  # noqa: BLE001 - enrichment must never fail the scan
         console.print(f"[warn]VirusTotal enrichment failed: {exc}[/warn]")
         return
@@ -2035,15 +2068,16 @@ def pipeline_cmd(
                 live.refresh()
         _after_live()
 
+    animate = settings.animations
     _check_tls(result)
     if mail:
-        _check_mail(result, target)
+        _check_mail(result, target, animate=animate)
     if takeover:
-        _check_takeover(result)
+        _check_takeover(result, animate=animate)
     if intel:
-        _enrich_with_intel(result, settings.cache_dir)
+        _enrich_with_intel(result, settings.cache_dir, animate=animate)
     if vt_key:
-        _enrich_with_vt(result, vt_key, vt_limit)
+        _enrich_with_vt(result, vt_key, vt_limit, animate=animate)
 
     _apply_triage(result, settings.triage_file)
     run_info = _run_info(manager, name=name, seed=target, session_id=session_id, tools={n.tool for n in nodes})

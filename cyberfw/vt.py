@@ -22,7 +22,7 @@ import base64
 import ipaddress
 import os
 import re
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -294,10 +294,13 @@ async def enrich(
     per_minute: int = 4,
     *,
     client: httpx.AsyncClient | None = None,
+    progress: Callable[[int], None] | None = None,
 ) -> list[Reputation]:
     """Look up up to ``limit`` targets, throttled to ``per_minute`` (VT free = 4).
 
     One target's failure (rate limit, bad response) is skipped, not fatal.
+    ``progress(done)`` is called after each target, looked up or skipped — at
+    the free tier's pace a run can take minutes, and the UI shows how far it is.
     """
     gap = 60.0 / max(1, per_minute)
     own = client is None
@@ -311,6 +314,9 @@ async def enrich(
                 out.append(await lookup(client, api_key, target))
             except VtError:
                 continue
+            finally:
+                if progress is not None:
+                    progress(index + 1)
     finally:
         if own:
             await client.aclose()

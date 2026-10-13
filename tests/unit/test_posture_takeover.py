@@ -110,6 +110,13 @@ async def test_dns_unreachable_is_reported_not_raised() -> None:
     assert findings == [] and notes == ["subdomain-takeover check skipped — DNS-over-HTTPS unreachable"]
 
 
+async def test_scan_reports_progress_as_each_host_finishes() -> None:
+    seen: list[int] = []
+    hosts = ["a.example.com", "b.example.com", "c.example.com"]
+    await takeover.scan(hosts, resolve=_resolver({}), fetch=_fetcher({}), progress=seen.append)
+    assert sorted(seen) == [1, 2, 3]
+
+
 async def test_scan_caps_the_host_count() -> None:
     hosts = [f"h{i}.example.com" for i in range(takeover._MAX_HOSTS + 5)]
     _findings, notes = await takeover.scan(hosts, resolve=_resolver({}), fetch=_fetcher({}))

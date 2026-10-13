@@ -162,3 +162,16 @@ async def test_enrich_respects_limit_and_skips_failures() -> None:
 
     assert len(calls) == 3  # limit honoured (d.com not reached)
     assert [r.target for r in reps] == ["a.com", "c.com"]  # bad.com (401) skipped
+
+
+async def test_enrich_reports_progress_for_every_target_even_a_failed_one() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if "bad.com" in str(request.url):
+            return httpx.Response(401)
+        return httpx.Response(200, json={"data": {"attributes": {"last_analysis_stats": {}}}})
+
+    seen: list[int] = []
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    await vt.enrich(["a.com", "bad.com", "c.com"], "k", per_minute=6000, client=client, progress=seen.append)
+    await client.aclose()
+    assert seen == [1, 2, 3]

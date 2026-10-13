@@ -225,11 +225,13 @@ async def scan(
     fetch: Fetcher | None = None,
     client: httpx.AsyncClient | None = None,
     limit: int = _MAX_HOSTS,
+    progress: Callable[[int], None] | None = None,
 ) -> tuple[list[PostureFinding], list[str]]:
     """Check ``hosts`` for dangling CNAMEs; return ``(findings, notes)``.
 
     DNS being unreachable is reported in ``notes``, never raised — a posture
-    check must not fail the scan.
+    check must not fail the scan. ``progress(done)`` is called as each host
+    finishes, for the UI's counter.
     """
     targets = hosts[:limit]
     notes: list[str] = []
@@ -244,13 +246,19 @@ async def scan(
     resolve = resolve or (lambda name, rtype: doh(client, name, rtype))
     fetch = fetch or (lambda host: http_body(client, host))
     gate = asyncio.Semaphore(_MAX_CONCURRENCY)
+    finished = 0
 
     async def guarded(host: str) -> _Hit | None | DnsError:
+        nonlocal finished
         async with gate:
             try:
                 return await _check(host, resolve, fetch)
             except DnsError as exc:
                 return exc
+            finally:
+                finished += 1
+                if progress is not None:
+                    progress(finished)
 
     try:
         results = await asyncio.gather(*(guarded(host) for host in targets))
