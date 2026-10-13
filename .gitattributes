@@ -1,0 +1,11 @@
+# Line endings for the launchers, whatever the cloner's core.autocrlf is (and in
+# GitHub's "Download ZIP", which follows these attributes).
+
+# Windows batch files need CRLF: with LF-only endings cmd's `goto` / `call :label`
+# can miss its label, and cstool.bat jumps between labels.
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# Shell scripts must stay LF, or bash fails on the carriage returns.
+*.sh text eol=lf
+cstool text eol=lf
