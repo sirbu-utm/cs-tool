@@ -9,7 +9,7 @@ from __future__ import annotations
 import json
 import os
 import stat
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -17,6 +17,7 @@ import pytest
 from rich.console import Console
 from typer.testing import CliRunner
 
+from cyberfw import completion
 from cyberfw.cli import _prompt_choice, _resolve_vt_key, _tool_menu, app
 from cyberfw.logging import THEME
 from cyberfw.ui import TOOL_GUIDES, banner, tool_guide
@@ -405,6 +406,44 @@ class TestPromptChoice:
         for key in ("p", "l", "f", "P", "L", "F"):
             monkeypatch.setattr("cyberfw.cli.Prompt.ask", lambda *_a, _k=key, **_kw: _k)
             assert _prompt_choice(["a", "b"]) == key.lower()
+
+    @pytest.mark.parametrize(
+        ("typed", "key"),
+        [
+            ("nuclei", "2"),
+            ("SUBFINDER", "1"),
+            ("pipeline", "r"),
+            ("exit", "q"),
+            ("parse", "p"),
+            ("log-level", "l"),
+            ("log-file", "f"),
+            ("animations", "a"),
+        ],
+    )
+    def test_names_answer_like_their_keys(self, monkeypatch: pytest.MonkeyPatch, typed: str, key: str) -> None:
+        # What Tab completes is a name, and Enter sends it: the menu acts on it
+        # exactly as on the key beside it. (A rejected name would be asked
+        # again; the "0" behind it ends that loop.)
+        answers = iter([typed, "0"])
+        monkeypatch.setattr("cyberfw.cli.Prompt.ask", lambda *_a, **_k: next(answers))
+
+        assert _prompt_choice(["subfinder", "nuclei"]) == key
+
+    def test_tab_lists_every_tool_then_the_actions(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        offered: list[completion.Option] = []
+
+        def ask(*_a: object, **_k: object) -> str:
+            offered.extend(completion.offered())
+            return "0"
+
+        monkeypatch.setattr("cyberfw.cli.Prompt.ask", ask)
+        _prompt_choice(["subfinder", "nuclei"])
+
+        assert [option.name for option in offered] == [
+            "subfinder", "nuclei", "pipeline", "parse", "log-level", "log-file", "animations", "exit",
+        ]
+        # Beside each name: its key, so the list also teaches the hotkeys.
+        assert offered[1].hint == "2 · Vulnerability scanning"
 
 
 class TestSettingsToggle:
@@ -1046,6 +1085,42 @@ class TestYamlPipelines:
         assert seen["name"] == "web-check"
         assert seen["target"] == "example.com"
 
+    @staticmethod
+    def _offered_pipelines(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, str]]:
+        """Run the launcher's pipeline questions; return what Tab offered at "Pipeline"."""
+        from cyberfw.cli import _interactive_pipeline
+
+        offered: list[tuple[str, str]] = []
+
+        def fake_ask(prompt: str, *_a: object, **_k: object) -> str:
+            if prompt == "Pipeline":
+                offered.extend((option.name, option.hint) for option in completion.offered())
+                return "recon-to-vuln"
+            return "example.com"
+
+        monkeypatch.setattr("cyberfw.cli.Prompt.ask", fake_ask)
+        monkeypatch.setattr("cyberfw.cli.Confirm.ask", lambda *_a, **_k: False)
+        monkeypatch.setattr("cyberfw.cli.pipeline_cmd", lambda *_a, **_k: None)
+        _interactive_pipeline()
+        return offered
+
+    def test_tab_lists_each_pipeline_with_its_stages(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        self._write_pipeline(
+            tmp_path, "web-check", "nodes:\n  - tool: httpx\n    stage: live\n  - tool: nuclei\n    stage: vulns\n"
+        )
+
+        assert self._offered_pipelines(monkeypatch) == [
+            ("recon-to-vuln", "subfinder → httpx → nuclei"),
+            ("web-check", "httpx → nuclei"),
+        ]
+
+    def test_a_broken_pipeline_file_does_not_break_the_list(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        # Its error is reported when it is picked (as before); listing it must not
+        # crash the launcher first.
+        self._write_pipeline(tmp_path, "broken", "nodes: [")
+
+        assert dict(self._offered_pipelines(monkeypatch))["broken"] == "invalid pipeline file"
+
     def test_registered_tool_without_an_adapter_is_a_usage_error(self, tmp_path: Path) -> None:
         with (tmp_path / "registry.yaml").open("a", encoding="utf-8") as handle:
             handle.write("weirdtool:\n  repo: org/weirdtool\n  asset_patterns: []\n  binary: weirdtool\n")
@@ -1055,6 +1130,37 @@ class TestYamlPipelines:
 
         assert result.exit_code == 2
         assert "no adapter registered" in result.stdout
+
+
+class TestTabCompletion:
+    """At a terminal the launcher's list questions read their answer with Tab completion."""
+
+    def test_tab_picks_another_pipeline_without_typing_its_name(
+        self, keyboard: Callable[..., object], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from cyberfw.cli import _interactive_pipeline
+
+        # Two pipelines; the default is the first, ports-to-vuln.
+        TestYamlPipelines._write_pipeline(tmp_path, "ports-to-vuln", "nodes:\n  - tool: httpx\n    stage: live\n")
+        monkeypatch.setattr("cyberfw.completion.available", lambda _console: True)
+        # The questions without a list keep plain input: target, Include Ffuf?, Include Gowitness?
+        plain = iter(["example.com", "n", "n"])
+        monkeypatch.setattr("builtins.input", lambda *_a: next(plain))
+        seen: dict[str, object] = {}
+        monkeypatch.setattr("cyberfw.cli.pipeline_cmd", lambda name, **kw: seen.update(name=name, **kw))
+
+        keyboard(_interactive_pipeline, "r", "\t", "\r")
+
+        assert seen["name"] == "recon-to-vuln"
+        assert seen["target"] == "example.com"
+
+    def test_without_a_terminal_the_answer_is_read_as_before(
+        self, keyboard: Callable[..., object], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # A pipe, CI or a test: plain input, whatever the keyboard pipe holds.
+        monkeypatch.setattr("builtins.input", lambda *_a: "2")
+
+        assert keyboard(lambda: _prompt_choice(["subfinder", "nuclei"]), "subfinder\r") == "2"
 
 
 class TestReportProvenance:

@@ -8,9 +8,15 @@ from __future__ import annotations
 
 import os
 import sys
+import threading
+import time
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
+from prompt_toolkit.application import create_app_session
+from prompt_toolkit.input import create_pipe_input
+from prompt_toolkit.output import DummyOutput, Output
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -43,3 +49,53 @@ def _offline_dns(monkeypatch: pytest.MonkeyPatch) -> None:
 
     monkeypatch.setattr(mail, "doh_query", no_dns)
     monkeypatch.setattr(takeover, "doh", no_dns)
+
+
+@pytest.fixture
+def keyboard() -> Callable[..., str]:
+    """Type into a prompt_toolkit question the way a person does.
+
+    ``keyboard(ask, "nu", "\\t", "\\r")`` runs ``ask()`` with prompt_toolkit
+    reading keys from a pipe and sends the batches one after another. Tab
+    completion runs as a background task, so an Enter read together with the
+    Tab before it would win the race: each batch goes in only once the previous
+    one has landed (the line, or its list of completions, changed). When
+    ``ask()`` never starts prompt_toolkit (it fell back to plain input), nothing
+    is typed. ``output=`` captures what the question draws; by default it is
+    discarded.
+    """
+
+    def type_into(ask: Callable[[], str], *batches: str, output: Output | None = None) -> str:
+        done = threading.Event()
+        with create_pipe_input() as pipe, create_app_session(input=pipe, output=output or DummyOutput()) as session:
+
+            def line() -> tuple[object, object] | None:
+                app = session.app
+                if app is None or not app.is_running:
+                    return None
+                return app.current_buffer.text, app.current_buffer.complete_state
+
+            def wait_until(landed: Callable[[], bool]) -> None:
+                deadline = time.monotonic() + 5
+                while not landed() and not done.is_set() and time.monotonic() < deadline:
+                    time.sleep(0.002)
+
+            def feed() -> None:
+                wait_until(lambda: line() is not None)
+                for index, batch in enumerate(batches):
+                    if done.is_set():
+                        return
+                    before = line()
+                    pipe.send_text(batch)
+                    if index < len(batches) - 1:
+                        wait_until(lambda before=before: line() != before)
+
+            feeder = threading.Thread(target=feed, daemon=True)
+            feeder.start()
+            try:
+                return ask()
+            finally:
+                done.set()
+                feeder.join()
+
+    return type_into

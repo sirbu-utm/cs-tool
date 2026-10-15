@@ -25,7 +25,7 @@ from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from pathlib import Path
 from time import strftime
-from typing import Annotated, Any, Protocol
+from typing import Annotated, Any, Protocol, TextIO
 
 import anyio
 import httpx
@@ -39,7 +39,7 @@ from rich.prompt import Prompt as _RichPrompt
 from rich.table import Table
 from rich.text import Text, TextType
 
-from cyberfw import motion, threatintel, triage, vt
+from cyberfw import completion, motion, threatintel, triage, vt
 from cyberfw.config import Settings, load_settings
 from cyberfw.exceptions import (
     ChromiumUnsupportedError,
@@ -107,6 +107,8 @@ class Prompt(_RichPrompt):
     test that patches ``cyberfw.cli.Prompt.ask`` sees exactly that wording.
     Questions go to the app's console unless told otherwise: Rich's global
     console has no theme, and the lead-in's style would quietly drop.
+    A question asked inside :func:`completion.offering` reads its answer with
+    Tab completion when a person is at the terminal.
     """
 
     def __init__(self, prompt: TextType = "", *, console: Console | None = None, **kwargs: Any) -> None:
@@ -114,6 +116,13 @@ class Prompt(_RichPrompt):
 
     def make_prompt(self, default: Any) -> Text:
         return Text.assemble(("» ", "accent"), super().make_prompt(default))
+
+    @classmethod
+    def get_input(cls, console: Console, prompt: TextType, password: bool, stream: TextIO | None = None) -> str:
+        options = completion.offered()
+        if options and not password and stream is None and completion.available(console):
+            return completion.read_line(console, prompt, options)
+        return super().get_input(console, prompt, password, stream=stream)
 
 
 class Confirm(_RichConfirm):
@@ -870,21 +879,52 @@ def _tool_range(names: list[str]) -> str:
     return "1" if len(names) == 1 else f"1-{len(names)}"
 
 
+#: The launcher's actions by name, as Tab completes them; each answers like
+#: its key: ``word: (key, hint shown beside it in the list)``.
+_ACTION_WORDS: dict[str, tuple[str, str]] = {
+    "pipeline": (_PIPELINE_KEY, "run a pipeline"),
+    "parse": ("p", "parsing on/off"),
+    "log-level": ("l", "next log level"),
+    "log-file": ("f", "log file on/off"),
+    "animations": ("a", "animations on/off"),
+    "exit": ("q", "leave"),
+}
+
+
+def _menu_options(names: list[str]) -> list[completion.Option]:
+    """What Tab offers at the launcher: every tool by name, then the actions,
+    each with the key that does the same beside it."""
+    tools = []
+    for index, name in enumerate(names, start=1):
+        capability = TOOL_GUIDES.get(name, ("",))[0]
+        tools.append(completion.Option(name, f"{index} · {capability}" if capability else str(index)))
+    actions = [completion.Option(word, f"{key} · {hint}") for word, (key, hint) in _ACTION_WORDS.items()]
+    return tools + actions
+
+
 def _prompt_choice(names: list[str]) -> str:
     """Prompt for a menu choice, with an on-brand hint on invalid input.
 
     Returns a normalised token: a tool number, the pipeline key, an exit key
-    or a settings hotkey (``p``/``l``/``f``/``a``). Anything else re-prompts with a
-    plain explanation instead of Rich's generic "not a valid integer" loop.
+    or a settings hotkey (``p``/``l``/``f``/``a``). A name, a tool's or one of
+    :data:`_ACTION_WORDS` (what Tab completes), answers like its key. Anything
+    else re-prompts with a plain explanation instead of Rich's generic "not a
+    valid integer" loop.
     """
     valid = {str(index) for index in range(1, len(names) + 1)} | {_PIPELINE_KEY} | _EXIT_KEYS | _SETTINGS_KEYS
+    by_name = {name.lower(): str(index) for index, name in enumerate(names, start=1)}
+    by_name.update((word, key) for word, (key, _hint) in _ACTION_WORDS.items())
+    options = _menu_options(names)
     while True:
-        raw = Prompt.ask("Select tool or action").strip().lower()
+        with completion.offering(options):
+            raw = Prompt.ask("Select tool or action").strip().lower()
         if raw in valid:
             return raw
+        if raw in by_name:
+            return by_name[raw]
         console.print(
-            f"[warn]Type {_tool_range(names)} for a tool, {_PIPELINE_KEY} pipeline, 0 exit, "
-            "or p/l/f/a to change settings.[/warn]"
+            f"[warn]Type {_tool_range(names)} or a tool's name, {_PIPELINE_KEY} pipeline, 0 exit, "
+            "or p/l/f/a to change settings. Tab lists them all.[/warn]"
         )
 
 
@@ -933,6 +973,7 @@ class _LauncherView:
                 keycap(_tool_range(names), "select tool"),
                 keycap(_PIPELINE_KEY, "run pipeline"),
                 Text.assemble((" 0 ", KEY), " ", (" q ", KEY), " ", ("exit", "muted")),
+                keycap("Tab", "list"),
             ]
         )
         toggles = self._toggles(compact=False)
@@ -948,7 +989,7 @@ class _LauncherView:
                 Pane(keys if progress >= 0.8 else Text(""), title="Keys"),
                 Pane(toggles if progress >= 0.9 else Text(""), title="Settings"),
             ],
-            footer=Text("type a key, then Enter", style="muted") if progress >= 1 else None,
+            footer=Text("type a key or a name, then Enter", style="muted") if progress >= 1 else None,
         )
 
     def _toggles(self, *, compact: bool) -> Text:
@@ -1036,9 +1077,25 @@ def _tool_facts(tool: str) -> dict[str, str | None]:
         manager.close()
 
 
+def _pipeline_options(names: list[str], pipelines_dir: Path | None) -> list[completion.Option]:
+    """The pipelines as Tab offers them, each with its stages beside it:
+    ``subfinder → httpx → nuclei``. A file that does not load is listed all
+    the same; picking it reports why, as before."""
+    options = []
+    for name in names:
+        try:
+            hint = " → ".join(node.tool for node in build(name, pipelines_dir=pipelines_dir))
+        except RegistryError:
+            hint = "invalid pipeline file"
+        options.append(completion.Option(name, hint))
+    return options
+
+
 def _interactive_pipeline() -> None:
-    choices = available_pipelines(load_settings().pipelines_dir)
-    name = Prompt.ask("Pipeline", choices=choices, default=choices[0])
+    pipelines_dir = load_settings().pipelines_dir
+    choices = available_pipelines(pipelines_dir)
+    with completion.offering(_pipeline_options(choices, pipelines_dir)):
+        name = Prompt.ask("Pipeline", choices=choices, default=choices[0])
     target = Prompt.ask("Seed target (domain or URL)")
     include_ffuf = include_gowitness = False
     wordlist = None
