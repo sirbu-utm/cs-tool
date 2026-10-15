@@ -6,6 +6,7 @@ so the whole code path runs without network and without real precompiled tools.
 
 from __future__ import annotations
 
+import io
 import json
 import os
 import stat
@@ -2240,6 +2241,44 @@ class TestCleanInterface:
 
         self._screen(monkeypatch, inputs=[KeyboardInterrupt()])
         assert _back_to_launcher(review=True) is False
+
+    @staticmethod
+    def _terminal_console(monkeypatch: pytest.MonkeyPatch) -> io.StringIO:
+        """Point the module console at a StringIO that records a terminal's control codes."""
+        import cyberfw.cli as cli
+
+        screen = io.StringIO()
+        # _environ={} so the suite's TERM=dumb does not make Rich suppress control codes.
+        monkeypatch.setattr(
+            cli, "console", Console(file=screen, force_terminal=True, force_interactive=True, _environ={})
+        )
+        return screen
+
+    def test_clearing_the_screen_also_wipes_the_scrollback(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Returning to the menu must leave nothing to scroll back to: the visible
+        screen (CSI 2J) and the scrollback (CSI 3J) both go."""
+        import cyberfw.cli as cli
+
+        screen = self._terminal_console(monkeypatch)
+        cli._clear_screen()
+        out = screen.getvalue()
+        assert "\x1b[2J" in out and "\x1b[3J" in out
+
+    def test_returning_to_the_launcher_wipes_the_scrollback(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        import cyberfw.cli as cli
+
+        screen = self._terminal_console(monkeypatch)
+        assert cli._back_to_launcher(review=False) is True
+        assert "\x1b[3J" in screen.getvalue()
+
+    def test_a_pipe_never_wipes_the_scrollback(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # Redirected output keeps its full transcript — no screen or scrollback control codes.
+        import cyberfw.cli as cli
+
+        screen = io.StringIO()
+        monkeypatch.setattr(cli, "console", Console(file=screen, force_interactive=False))
+        assert cli._back_to_launcher(review=True) is True
+        assert screen.getvalue() == ""
 
     def test_the_menu_pauses_then_redraws_cleanly_between_actions(self, monkeypatch: pytest.MonkeyPatch) -> None:
         import cyberfw.cli as cli

@@ -842,13 +842,28 @@ def _goodbye(settings: Settings, *, newline: bool = True) -> None:
     )
 
 
+def _clear_screen() -> None:
+    """Clear the screen *and* the scrollback, so nothing is left to scroll back to.
+
+    ``console.clear()`` erases only the visible screen (CSI 2J) and homes the
+    cursor; the frame that was there stays in the terminal's scrollback. CSI 3J
+    erases that too, so the launcher reopens on a truly blank screen. It is sent
+    only to a real terminal — the same gate Rich's own ``clear`` uses — so a
+    dumb terminal gets neither code; a pipe/CI never reaches here (callers guard
+    on :func:`_is_interactive`)."""
+    console.clear()
+    if console.is_terminal and not console.is_dumb_terminal:
+        console.file.write("\x1b[3J")
+        console.file.flush()
+
+
 def _fresh_screen() -> None:
     """Title the window and clear it — only for a person at a terminal; a pipe,
     a log or a test keeps its plain transcript."""
     if not _is_interactive():
         return
     console.set_window_title("CS-TOOL")
-    console.clear()
+    _clear_screen()
 
 
 def _back_to_launcher(review: bool) -> bool:
@@ -866,7 +881,7 @@ def _back_to_launcher(review: bool) -> bool:
             console.input("\n[muted]Enter — back to the launcher[/muted] ")
         except (KeyboardInterrupt, EOFError):
             return False
-    console.clear()
+    _clear_screen()
     return True
 
 
