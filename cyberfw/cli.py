@@ -806,6 +806,10 @@ def interactive_menu() -> None:
         if choice in _SETTINGS_KEYS:
             _toggle_setting(choice, settings)
             continue  # reprint the panel with the new setting
+        if choice == _HELP_KEY:
+            _show_help(names)
+            review = True  # the cheatsheet stays until Enter, then the launcher redraws
+            continue
         try:
             if not _dispatch_choice(choice, names):
                 _goodbye(settings, newline=False)
@@ -870,6 +874,7 @@ def _back_to_launcher(review: bool) -> bool:
 #: so the pipeline and exit actions get letters rather than a number that a
 #: ninth registry entry would collide with.
 _PIPELINE_KEY = "r"
+_HELP_KEY = "?"
 _EXIT_KEYS = frozenset({"0", "q"})
 _SETTINGS_KEYS = frozenset({"p", "l", "f", "a"})
 
@@ -883,6 +888,7 @@ def _tool_range(names: list[str]) -> str:
 #: its key: ``word: (key, hint shown beside it in the list)``.
 _ACTION_WORDS: dict[str, tuple[str, str]] = {
     "pipeline": (_PIPELINE_KEY, "run a pipeline"),
+    "help": (_HELP_KEY, "this cheatsheet"),
     "parse": ("p", "parsing on/off"),
     "log-level": ("l", "next log level"),
     "log-file": ("f", "log file on/off"),
@@ -911,7 +917,12 @@ def _prompt_choice(names: list[str]) -> str:
     else re-prompts with a plain explanation instead of Rich's generic "not a
     valid integer" loop.
     """
-    valid = {str(index) for index in range(1, len(names) + 1)} | {_PIPELINE_KEY} | _EXIT_KEYS | _SETTINGS_KEYS
+    valid = (
+        {str(index) for index in range(1, len(names) + 1)}
+        | {_PIPELINE_KEY, _HELP_KEY}
+        | _EXIT_KEYS
+        | _SETTINGS_KEYS
+    )
     by_name = {name.lower(): str(index) for index, name in enumerate(names, start=1)}
     by_name.update((word, key) for word, (key, _hint) in _ACTION_WORDS.items())
     options = _menu_options(names)
@@ -923,9 +934,64 @@ def _prompt_choice(names: list[str]) -> str:
         if raw in by_name:
             return by_name[raw]
         console.print(
-            f"[warn]Type {_tool_range(names)} or a tool's name, {_PIPELINE_KEY} pipeline, 0 exit, "
+            f"[warn]Type {_tool_range(names)} or a tool's name, {_PIPELINE_KEY} pipeline, ? help, 0 exit, "
             "or p/l/f/a to change settings. Tab lists them all.[/warn]"
         )
+
+
+def _help_card(names: list[str]) -> HudFrame:
+    """The cheatsheet behind ``?``: the menu keys, what each setting changes, and
+    the command-line calls the menu never shows. ``names`` only sizes the tool
+    range (``1-8``)."""
+    keys = Table.grid(padding=(0, 2))
+    keys.add_column(no_wrap=True)
+    keys.add_column(overflow="fold")
+    for cap, what in (
+        (Text(f" {_tool_range(names)} ", style=KEY), "select a tool by its number"),
+        (Text(f" {_PIPELINE_KEY} ", style=KEY), "run a pipeline"),
+        (Text(" Tab ", style=KEY), "list the choices or complete a name"),
+        (Text(f" {_HELP_KEY} ", style=KEY), "this cheatsheet"),
+        (Text.assemble((" 0 ", KEY), " ", (" q ", KEY)), "exit"),
+    ):
+        keys.add_row(cap, Text(what, style="white"))
+
+    settings = Table.grid(padding=(0, 2))
+    settings.add_column(no_wrap=True)
+    settings.add_column(no_wrap=True)
+    settings.add_column(overflow="fold")
+    for key, name, what in (
+        ("p", "parse", "validate records by schema, or show raw stdout/stderr"),
+        ("l", "log level", "DEBUG → INFO → WARNING → ERROR"),
+        ("f", "log file", "write logs/cyberfw.log on or off"),
+        ("a", "animations", "console motion on or off"),
+    ):
+        settings.add_row(Text(f" {key} ", style=KEY), Text(name, style="accent"), Text(what, style="white"))
+
+    commands = Table.grid(padding=(0, 2))
+    commands.add_column(no_wrap=True, style="bold bright_cyan")
+    commands.add_column(overflow="fold")
+    for call, what in (
+        ("cstool status", "what is installed and ready to run"),
+        ("cstool run <tool> -t <target>", "run a single tool"),
+        ("cstool pipeline recon-to-vuln -t example.com", "full chain; --ffuf / --gowitness add stages"),
+        ("cstool diff <old> <new>", "what changed between two saved runs"),
+        ("cstool vt example.com", "VirusTotal reputation of a domain, IP, URL or file hash"),
+        ('cstool mute <id> --target "*.dev"', "silence a finding in future scans"),
+    ):
+        commands.add_row(Text(call), Text(what, style="muted"))
+
+    return HudFrame(
+        [
+            Pane(keys, title="Keys"),
+            Pane(settings, title="Settings"),
+            Pane(commands, title="Command line"),
+        ]
+    )
+
+
+def _show_help(names: list[str]) -> None:
+    """Print the cheatsheet to the launcher's console (the ``?`` key)."""
+    console.print(_help_card(names))
 
 
 def _dispatch_choice(choice: str, names: list[str]) -> bool:
@@ -968,20 +1034,22 @@ class _LauncherView:
 
     def __rich_console__(self, console: Console, options: ConsoleOptions) -> RenderResult:
         names = [row.name for row in self.rows]
-        keys = join(
-            [
-                keycap(_tool_range(names), "select tool"),
-                keycap(_PIPELINE_KEY, "run pipeline"),
-                Text.assemble((" 0 ", KEY), " ", (" q ", KEY), " ", ("exit", "muted")),
-                keycap("Tab", "list"),
-            ]
-        )
+        wide = options.max_width >= 100
+        key_items = [
+            keycap(_tool_range(names), "select tool"),
+            keycap(_PIPELINE_KEY, "run pipeline"),
+            Text.assemble((" 0 ", KEY), " ", (" q ", KEY), " ", ("exit", "muted")),
+            keycap("Tab", "list"),
+        ]
+        if wide:  # `? help` rides along only where there is room, like the capability column
+            key_items.append(keycap(_HELP_KEY, "help"))
+        keys = join(key_items)
         toggles = self._toggles(compact=False)
         if toggles.cell_len > options.max_width - 4:
             toggles = self._toggles(compact=True)
         progress = self.progress
         table = _tools_table(
-            self.rows, numbered=True, capability=options.max_width >= 100, reveal=motion.phase(progress, 0.0, 0.7)
+            self.rows, numbered=True, capability=wide, reveal=motion.phase(progress, 0.0, 0.7)
         )
         yield HudFrame(
             [

@@ -157,7 +157,7 @@ CI их нет вовсе — печатается сразу финальный
 ║   7  rustscan    Fast port discovery      —         ■ not installed   RustScan/RustScan          ║
 ║   8  subfinder   Subdomain discovery      2.6.7     ■ ready           projectdiscovery/subfinder ║
 ╠═ Keys ═══════════════════════════════════════════════════════════════════════════════════════════╣
-║  1-8  select tool    r    run pipeline    0   q  exit    Tab  list                               ║
+║  1-8  select tool    r    run pipeline    0   q  exit    Tab  list    ?    help                  ║
 ╠═ Settings ═══════════════════════════════════════════════════════════════════════════════════════╣
 ║  p  parse ■ on    l  log level INFO    f  log file ■ on    a  animations ■ on                    ║
 ╚═══════════════════════════════════════════════════════════════ type a key or a name, then Enter ═╝
@@ -172,7 +172,11 @@ CI их нет вовсе — печатается сразу финальный
 показываются в `cyberfw status`.
 
 Диапазон номеров считается от `registry.yaml` (девятый инструмент получит
-номер `9`), pipeline запускается клавишей `r`, выход — `0` или `q`.
+номер `9`), pipeline запускается клавишей `r`, выход — `0` или `q`. Клавиша
+`?` открывает карточку-шпаргалку: клавиши меню, что делает каждая настройка и
+команды запуска из терминала (`cstool status`, `cstool pipeline …`, `diff`,
+`vt`, `mute`) — то, чего в меню не видно. Карточка остаётся на экране до Enter,
+затем меню перерисовывается.
 В том же приглашении доступны переключатели настроек:
 
 - `p` — включить/выключить парсинг по схеме (выкл. = сырой stdout/stderr, как `--no-parse`);

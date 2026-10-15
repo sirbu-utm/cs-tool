@@ -341,6 +341,10 @@ class TestScreens:
         for text in (wide, narrow):
             assert "1-4  select tool" in text and "r    run pipeline" in text and "Tab  list" in text
             assert "animations" in text and "type a key or a name, then Enter" in text
+        # `? help` rides in the Keys row only where there is room, like the capability column;
+        # the key itself works at any width.
+        assert "?    help" in wide
+        assert "help" not in narrow.split("Settings")[0]  # no help key in the narrow Keys row
 
     def test_launcher_entrance_keeps_the_columns_still(self, tmp_path: Path) -> None:
         final, _ = _render(cli._LauncherView(_ROWS, _settings(tmp_path)), width=110)

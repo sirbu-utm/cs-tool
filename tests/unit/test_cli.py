@@ -407,12 +407,18 @@ class TestPromptChoice:
             monkeypatch.setattr("cyberfw.cli.Prompt.ask", lambda *_a, _k=key, **_kw: _k)
             assert _prompt_choice(["a", "b"]) == key.lower()
 
+    def test_help_key_is_accepted(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr("cyberfw.cli.Prompt.ask", lambda *_a, **_k: "?")
+
+        assert _prompt_choice(["a", "b"]) == "?"
+
     @pytest.mark.parametrize(
         ("typed", "key"),
         [
             ("nuclei", "2"),
             ("SUBFINDER", "1"),
             ("pipeline", "r"),
+            ("help", "?"),
             ("exit", "q"),
             ("parse", "p"),
             ("log-level", "l"),
@@ -440,7 +446,7 @@ class TestPromptChoice:
         _prompt_choice(["subfinder", "nuclei"])
 
         assert [option.name for option in offered] == [
-            "subfinder", "nuclei", "pipeline", "parse", "log-level", "log-file", "animations", "exit",
+            "subfinder", "nuclei", "pipeline", "help", "parse", "log-level", "log-file", "animations", "exit",
         ]
         # Beside each name: its key, so the list also teaches the hotkeys.
         assert offered[1].hint == "2 · Vulnerability scanning"
@@ -1372,6 +1378,46 @@ class TestRunSummary:
         assert "elapsed" in result.stdout
 
 
+class TestHelpCard:
+    """`?` at the launcher shows a cheatsheet: the menu keys, what each setting does,
+    and the command-line calls the menu never shows."""
+
+    @staticmethod
+    def _card(names: list[str] | None = None) -> str:
+        from cyberfw.cli import _help_card
+
+        output = Console(theme=THEME, record=True, width=100)
+        output.print(_help_card(names or ["subfinder", "nuclei"]))
+        return output.export_text()
+
+    def test_names_the_menu_keys(self) -> None:
+        card = self._card()
+        assert "1-2" in card and "select" in card  # the tool-number range for two tools
+        for word in ("pipeline", "Tab", "exit"):
+            assert word in card, word
+        assert "?" in card and "cheatsheet" in card  # the help key, and what it is
+
+    def test_says_what_each_setting_does(self) -> None:
+        card = self._card()
+        for setting in ("parse", "log level", "log file", "animations"):
+            assert setting in card, setting
+        # not just the name: what it does, so the card is worth reading
+        assert "DEBUG" in card  # the log-level cycle
+        assert "logs/cyberfw.log" in card  # where the log file goes
+
+    def test_shows_the_command_line_cheatsheet(self) -> None:
+        card = self._card()
+        for call in (
+            "cstool status",
+            "cstool run",
+            "cstool pipeline recon-to-vuln",
+            "cstool diff",
+            "cstool vt",
+            "cstool mute",
+        ):
+            assert call in card, call
+
+
 class TestInventoryPresentation:
     """The launcher and `status` answer the same question — what is ready to run — so
     they show the same inventory: version, state, and a one-line readiness summary."""
@@ -2207,6 +2253,22 @@ class TestCleanInterface:
 
         assert calls[:2] == ["title:CS-TOOL", "clear"]  # clean start after install/check
         assert calls[2:] == ["input", "clear"]  # after the action: Enter, then a clean launcher
+
+    def test_the_help_key_shows_the_cheatsheet_then_returns(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        import cyberfw.cli as cli
+
+        calls = self._screen(monkeypatch)
+        choices = iter(["?", "0"])
+        shown: list[list[str]] = []
+        monkeypatch.setattr(cli, "_ensure_tools", lambda: None)
+        monkeypatch.setattr(cli, "_prompt_choice", lambda names: next(choices))
+        monkeypatch.setattr(cli, "_show_help", lambda names: shown.append(names))
+        monkeypatch.setattr(cli, "_dispatch_choice", lambda choice, names: choice != "0")
+        cli.interactive_menu()
+
+        assert len(shown) == 1  # the cheatsheet was shown once
+        # Shown like any action output: it stays until Enter, then the launcher redraws.
+        assert calls[2:] == ["input", "clear"]
 
     def test_ctrl_c_at_the_menu_is_a_clean_exit(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Exit 0, not "Aborted!" — so a Windows Terminal window opened for the interface closes."""
