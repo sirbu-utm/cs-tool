@@ -14,7 +14,7 @@ from collections.abc import Iterator
 from pathlib import Path
 
 import yaml
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from cyberfw.exceptions import RegistryError
 
@@ -25,10 +25,16 @@ class ToolSpec(BaseModel):
     """Declarative metadata for one external tool."""
 
     name: str = ""  # injected from the YAML key
-    repo: str
-    asset_patterns: list[str]
+    #: ``github`` (downloaded from GitHub Releases) or ``local`` (already on the
+    #: machine — found on PATH or at ``path`` — never downloaded).
+    source: str = "github"
+    repo: str = ""  # required for a github tool; unused for a local one
+    asset_patterns: list[str] = Field(default_factory=list)
     archive: str = "auto"  # auto | zip | tar | raw
     binary: str | None = None  # file to chmod +x inside the archive, else guessed
+    #: An explicit binary path for a ``local`` tool; without it the binary is
+    #: found on PATH by ``binary`` (or the tool name).
+    path: str | None = None
     #: Release tag to install (``v2.6.6``) or ``latest``. Pin it for reproducible
     #: installs: a tool that changes its output format under you is otherwise
     #: only noticed as "N lines did not match the schema".
@@ -50,6 +56,19 @@ class ToolSpec(BaseModel):
             if not re.fullmatch(r"[0-9a-fA-F]{64}", digest):
                 raise ValueError(f"sha256 for {asset!r} must be 64 hex characters")
         return {asset: digest.lower() for asset, digest in value.items()}
+
+    @model_validator(mode="after")
+    def _check_source(self) -> ToolSpec:
+        if self.source not in ("github", "local"):
+            raise ValueError(f"source must be 'github' or 'local', got {self.source!r}")
+        if self.source == "github" and not self.repo:
+            raise ValueError("repo is required for a github tool (owner/name)")
+        return self
+
+    @property
+    def is_local(self) -> bool:
+        """True for a tool the framework does not download (found on PATH / ``path``)."""
+        return self.source == "local"
 
     @property
     def pinned_version(self) -> str | None:

@@ -146,6 +146,61 @@ def test_gitleaks_empty_report_yields_no_records() -> None:
     assert adapter.parse_output("") == []  # type: ignore[attr-defined]
 
 
+class TestNmapAdapter:
+    """nmap does service/version detection on a discovered open port (buffered XML)."""
+
+    @staticmethod
+    def _nmap() -> object:
+        spec = ToolSpec(name="nmap", source="local", binary="nmap")
+        return adapter_for(spec, Path("nmap"))
+
+    _XML = (
+        '<?xml version="1.0"?><nmaprun><host>'
+        '<address addr="93.184.216.34" addrtype="ipv4"/>'
+        '<hostnames><hostname name="example.com" type="user"/></hostnames>'
+        '<ports>'
+        '<port protocol="tcp" portid="22"><state state="open"/>'
+        '<service name="ssh" product="OpenSSH" version="8.9p1"/></port>'
+        '<port protocol="tcp" portid="80"><state state="open"/>'
+        '<service name="http" product="nginx" version="1.18.0"/></port>'
+        '</ports></host></nmaprun>'
+    )
+
+    def test_scans_the_discovered_port_for_service_and_version(self) -> None:
+        command = self._nmap().build_cmd(ToolContext(target="example.com:22"))  # type: ignore[attr-defined]
+
+        assert command[0].endswith("nmap")
+        assert "-sV" in command and "-Pn" in command
+        assert "-p" in command and "22" in command
+        assert "example.com" in command
+        assert "-oX" in command and "-" in command  # XML to stdout
+
+    def test_a_url_target_is_reduced_to_a_host_and_its_port(self) -> None:
+        command = self._nmap().build_cmd(ToolContext(target="https://example.com:8443/x"))  # type: ignore[attr-defined]
+
+        assert "example.com" in command and "8443" in command
+        assert "https://example.com:8443/x" not in command
+
+    def test_a_bare_host_scans_default_ports(self) -> None:
+        command = self._nmap().build_cmd(ToolContext(target="example.com"))  # type: ignore[attr-defined]
+
+        assert "example.com" in command
+        assert "-p" not in command  # no known port → nmap's own default set
+
+    def test_parses_services_from_the_xml_report(self) -> None:
+        records = self._nmap().parse_output(self._XML)  # type: ignore[attr-defined]
+
+        assert len(records) == 2
+        ssh = records[0]
+        assert ssh.target == "example.com:22" and ssh.kind == "service"
+        assert ssh.service == "ssh" and ssh.product == "OpenSSH" and ssh.version == "8.9p1"
+        assert records[1].target == "example.com:80" and records[1].service == "http"
+
+    def test_malformed_or_empty_xml_yields_no_records(self) -> None:
+        assert self._nmap().parse_output("not xml <<<") == []  # type: ignore[attr-defined]
+        assert self._nmap().parse_output("") == []  # type: ignore[attr-defined]
+
+
 def test_ffuf_falls_back_to_the_bundled_wordlist(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """With no --wordlist, ffuf uses the bundled list instead of skipping the stage."""
     bundled = tmp_path / "common.txt"

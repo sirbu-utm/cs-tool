@@ -262,6 +262,21 @@ class RustscanResult(ToolRecord):
         return rec
 
 
+class NmapResult(ToolRecord):
+    """nmap service/version detection on one open port.
+
+    Not JSONL — nmap emits an XML document, so these are built by the adapter's
+    ``parse_output`` rather than :func:`validate_record`."""
+
+    host: str = ""
+    port: int = 0
+    service: str = ""
+    product: str = ""
+    version: str = ""
+    #: ``ssh OpenSSH 8.9p1`` — the one-line detail the record tables surface.
+    service_detail: str = ""
+
+
 class VirusTotalResult(ToolRecord):
     """VirusTotal reputation: ``{"target", "vt_kind", "malicious", "suspicious", ...}``.
 

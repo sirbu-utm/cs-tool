@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 
 from cyberfw.config import Settings
-from cyberfw.exceptions import DownloadError
+from cyberfw.exceptions import CyberfwError, DownloadError, ToolNotFoundError
 from cyberfw.manager import ToolManager
 from cyberfw.manager.github_client import GitHubRelease, ReleaseAsset
 from cyberfw.manager.platform_map import Mapping
@@ -84,6 +84,62 @@ class TestInstall:
         assert state["version"] == "1.0.0"
         assert state["binary"] == str(result.binary.resolve())
         assert manager.is_installed("subfinder")
+
+
+class TestLocalTool:
+    """A `source: local` tool is resolved from PATH / an explicit path, never downloaded."""
+
+    @staticmethod
+    def _manager(tmp_path: Path, entry: str = "nmap:\n  source: local\n  binary: nmap\n") -> ToolManager:
+        registry_path = tmp_path / "registry.yaml"
+        registry_path.write_text(entry, encoding="utf-8")
+        manager = ToolManager(Settings(root_dir=tmp_path), load_registry(registry_path), Mapping("linux", "amd64"))
+        manager.settings.ensure_dirs()
+        return manager
+
+    def test_on_path_is_installed_and_resolves(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        manager = self._manager(tmp_path)
+        monkeypatch.setattr(
+            "cyberfw.manager.find_in_path", lambda cmd: "/usr/bin/nmap" if cmd == "nmap" else None
+        )
+
+        assert manager.is_installed("nmap") is True
+        assert manager.binary_path("nmap") == Path("/usr/bin/nmap")
+
+    def test_absent_from_path_is_not_installed(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        manager = self._manager(tmp_path)
+        monkeypatch.setattr("cyberfw.manager.find_in_path", lambda cmd: None)
+
+        assert manager.is_installed("nmap") is False
+        with pytest.raises(ToolNotFoundError):
+            manager.binary_path("nmap")
+
+    def test_an_explicit_path_is_used_over_the_path_lookup(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        exe = tmp_path / "nmap"
+        exe.write_text("#!/bin/sh\n", encoding="utf-8")
+        manager = self._manager(tmp_path, f"nmap:\n  source: local\n  binary: nmap\n  path: {exe}\n")
+        monkeypatch.setattr(
+            "cyberfw.manager.find_in_path", lambda cmd: pytest.fail("an explicit path must not fall back to PATH")
+        )
+
+        assert manager.binary_path("nmap") == exe
+
+    def test_install_refuses_a_local_tool(self, tmp_path: Path) -> None:
+        manager = self._manager(tmp_path)
+
+        with pytest.raises(CyberfwError, match="package manager"):
+            manager.install("nmap")
+
+    def test_install_all_skips_local_tools(self, tmp_path: Path) -> None:
+        archive = _zip_bytes({"subfinder": b"#!/bin/sh\necho ok\n"})
+        manager = _manager(tmp_path, archive)  # a github subfinder
+        with (tmp_path / "registry.yaml").open("a", encoding="utf-8") as handle:
+            handle.write("nmap:\n  source: local\n  binary: nmap\n")
+        manager.registry = load_registry(tmp_path / "registry.yaml")
+
+        results = manager.install_all()  # must not try to download nmap
+
+        assert [r.spec.name for r in results] == ["subfinder"]
 
 
 class _CountingClient(_FakeClient):

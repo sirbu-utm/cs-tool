@@ -11,13 +11,13 @@ import json
 from pathlib import Path
 
 from cyberfw.config import Settings
-from cyberfw.exceptions import CyberfwError
+from cyberfw.exceptions import CyberfwError, ToolNotFoundError
 from cyberfw.manager.chromium import ChromiumInstallResult
 from cyberfw.manager.github_client import GitHubClient
 from cyberfw.manager.installer import InstallResult, ToolInstaller
 from cyberfw.manager.platform_map import Mapping, asset_patterns, get_target
 from cyberfw.manager.registry import ToolRegistry, ToolSpec, load_registry
-from cyberfw.manager.verify import ensure_binary
+from cyberfw.manager.verify import ensure_binary, find_in_path
 
 __all__ = [
     "ToolManager",
@@ -30,6 +30,7 @@ __all__ = [
     "Mapping",
     "load_registry",
     "ensure_binary",
+    "find_in_path",
     "get_target",
     "asset_patterns",
 ]
@@ -65,8 +66,24 @@ class ToolManager:
         return self.registry.require(name)
 
     def binary_path(self, name: str) -> Path:
-        """Return the installed binary path for ``name`` or raise ``ToolNotFoundError``."""
-        return ensure_binary(self.settings.tools_dir, name, self.spec(name).binary)
+        """Return the binary path for ``name`` or raise ``ToolNotFoundError``.
+
+        A ``source: local`` tool is resolved from its configured ``path`` or
+        from PATH (it is never downloaded); a github tool from ``tools_dir``."""
+        spec = self.spec(name)
+        if spec.is_local:
+            if spec.path:
+                candidate = Path(spec.path)
+                if candidate.is_file():
+                    return candidate
+                raise ToolNotFoundError(f"{name}: configured path does not exist: {spec.path}")
+            found = find_in_path(spec.binary or name)
+            if found:
+                return Path(found)
+            raise ToolNotFoundError(
+                f"{name} is a local tool and is not on PATH — install it with your package manager (apt/brew/winget)"
+            )
+        return ensure_binary(self.settings.tools_dir, name, spec.binary)
 
     def install_state(self, name: str) -> dict[str, str] | None:
         """Return the recorded install metadata (binary/version/os/arch) or ``None``."""
@@ -80,7 +97,17 @@ class ToolManager:
         return state if isinstance(state, dict) else None
 
     def is_installed(self, name: str) -> bool:
-        """Return true only for a binary recorded after a successful install."""
+        """Return true when the tool is available to run.
+
+        A ``source: local`` tool counts as installed when its binary resolves
+        (there is no install record for something we did not download); a github
+        tool only after a successful install matching this OS/arch."""
+        if self.spec(name).is_local:
+            try:
+                self.binary_path(name)
+            except (CyberfwError, OSError):
+                return False
+            return True
         state = self.install_state(name)
         if state is None:
             return False
@@ -103,6 +130,10 @@ class ToolManager:
         ``force`` re-downloads regardless.
         """
         spec = self.registry.require(name)
+        if spec.is_local:
+            raise CyberfwError(
+                f"{name} is a local tool — install it with your package manager (apt/brew/winget), not via cyberfw"
+            )
         installer = ToolInstaller(
             self.client,
             self.settings.tools_dir,
@@ -137,8 +168,9 @@ class ToolManager:
         return result
 
     def install_all(self) -> list[InstallResult]:
-        """Install every registered tool in name order."""
-        return [self.install(name) for name in self.registry.names()]
+        """Install every downloadable (github) tool in name order; local tools
+        are the user's to install and are skipped."""
+        return [self.install(name) for name in self.registry.names() if not self.spec(name).is_local]
 
     def install_chromium(self, *, force: bool = False) -> ChromiumInstallResult:
         """Download the portable Chromium gowitness needs into ``tools_bin/``.

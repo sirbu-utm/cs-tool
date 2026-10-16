@@ -17,6 +17,7 @@ from cyberfw.tools.gitleaks import GitleaksTool
 from cyberfw.tools.gowitness import GowitnessTool
 from cyberfw.tools.httpx_tool import HttpxTool
 from cyberfw.tools.naabu import NaabuTool
+from cyberfw.tools.nmap import NmapTool
 from cyberfw.tools.nuclei import NucleiTool
 from cyberfw.tools.rustscan import RustscanTool
 from cyberfw.tools.subfinder import SubfinderTool
@@ -26,6 +27,7 @@ __all__ = ["ADAPTERS", "adapter_class", "adapter_for"]
 ADAPTERS: dict[str, type[BaseTool]] = {
     "subfinder": SubfinderTool,
     "naabu": NaabuTool,
+    "nmap": NmapTool,
     "rustscan": RustscanTool,
     "httpx": HttpxTool,
     "ffuf": FfufTool,

@@ -1,6 +1,9 @@
 # ports-to-vuln — активный вариант recon-to-vuln: вместо пассивного поиска
 # поддоменов сначала сканируются порты цели (naabu), найденные host:port
-# проверяются httpx, а по живым HTTP-сервисам прогоняется nuclei.
+# проверяются httpx, а по живым HTTP-сервисам прогоняется nuclei. Параллельно
+# по тем же открытым портам nmap определяет сервисы и версии (nmap -sV).
+# nmap — локальный инструмент: поставь его сам (apt/brew/winget); если его нет,
+# этап services помечается недоступным (или пропусти его, убрав из файла).
 #
 #   cyberfw pipeline ports-to-vuln --target example.com
 #
@@ -13,8 +16,12 @@ description: Active port scan, HTTP probe of the open ports, then nuclei on the 
 nodes:
   - tool: naabu
     stage: ports
+  - tool: nmap
+    stage: services
+    input_from: ports
   - tool: httpx
     stage: live_http
+    input_from: ports
   - tool: nuclei
     stage: vulns
     input_from: live_http

@@ -661,7 +661,7 @@ def _tool_rows(manager: ToolManager, tools_dir: Path, states: list[str] | None =
     if states is None or len(states) != len(names):
         states = _tool_states(manager, tools_dir)
     return [
-        _ToolRow(name, _tool_version(manager, name), state, manager.spec(name).repo)
+        _ToolRow(name, _tool_version(manager, name), state, manager.spec(name).repo or "local")
         for name, state in zip(names, states, strict=True)
     ]
 
@@ -1123,7 +1123,11 @@ def _ensure_tools() -> None:
     """Install every missing tool automatically before showing the launcher."""
     settings, manager = _bootstrap()
     try:
-        missing = [name for name in manager.registry.names() if not manager.is_installed(name)]
+        missing = [
+            name
+            for name in manager.registry.names()
+            if not manager.is_installed(name) and not manager.spec(name).is_local
+        ]
         if not missing:
             return
         console.print(f"[info]Preparing {len(missing)} tool(s) automatically...[/info]")
@@ -1244,7 +1248,14 @@ def init_cmd(
         settings = settings.model_copy(update={"github_token": token})
         manager = ToolManager(settings, manager.registry, manager.mapping)
 
-    targets = tools or manager.registry.names()
+    requested = tools or manager.registry.names()
+    # A local tool (source: local) is the user's to install — never downloaded.
+    for name in [n for n in requested if manager.spec(n).is_local]:
+        console.print(
+            f"[muted]{name} is a local tool — install it with your package manager "
+            "(apt/brew/winget); skipping.[/muted]"
+        )
+    targets = [n for n in requested if not manager.spec(n).is_local]
     console.print(
         Text.assemble(
             (f"Installing {len(targets)} tool(s) into ", "info"), (str(settings.tools_dir), "tool")

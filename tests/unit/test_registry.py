@@ -86,6 +86,48 @@ class TestToolSpec:
         assert spec.repo_owner == "org"
         assert spec.repo_name == "repo"
 
+    def test_source_defaults_to_github(self) -> None:
+        spec = ToolSpec(name="x", repo="org/repo", asset_patterns=[])
+        assert spec.source == "github"
+        assert spec.is_local is False
+
+
+class TestLocalSource:
+    """A `source: local` tool is one already on the machine — not downloaded."""
+
+    def test_a_local_tool_needs_no_repo(self, tmp_path: Path) -> None:
+        path = tmp_path / "registry.yaml"
+        path.write_text(yaml.dump({"nmap": {"source": "local", "binary": "nmap"}}), encoding="utf-8")
+
+        spec = load_registry(path).require("nmap")
+
+        assert spec.is_local is True
+        assert spec.binary == "nmap"
+        assert spec.repo == ""
+
+    def test_a_local_tool_may_pin_an_explicit_path(self, tmp_path: Path) -> None:
+        path = tmp_path / "registry.yaml"
+        path.write_text(
+            yaml.dump({"nmap": {"source": "local", "binary": "nmap", "path": "/opt/nmap/bin/nmap"}}),
+            encoding="utf-8",
+        )
+
+        assert load_registry(path).require("nmap").path == "/opt/nmap/bin/nmap"
+
+    def test_a_github_tool_still_requires_a_repo(self, tmp_path: Path) -> None:
+        path = tmp_path / "registry.yaml"
+        path.write_text(yaml.dump({"x": {"asset_patterns": [], "binary": "x"}}), encoding="utf-8")
+
+        with pytest.raises(RegistryError, match="repo"):
+            load_registry(path)
+
+    def test_an_unknown_source_is_rejected(self, tmp_path: Path) -> None:
+        path = tmp_path / "registry.yaml"
+        path.write_text(yaml.dump({"x": {"source": "ftp", "binary": "x"}}), encoding="utf-8")
+
+        with pytest.raises(RegistryError, match="source"):
+            load_registry(path)
+
 
 class TestVersionPinning:
     def test_version_defaults_to_latest(self, tmp_path: Path) -> None:

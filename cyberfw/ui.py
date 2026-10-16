@@ -73,6 +73,11 @@ TOOL_GUIDES: dict[str, tuple[str, str, str]] = {
         "Finds open TCP ports on a host or a list of hosts.",
         "naabu -host example.com -json",
     ),
+    "nmap": (
+        "Service detection",
+        "Identifies the service and version behind an open port (nmap -sV).",
+        "nmap -sV -Pn -p 22 example.com",
+    ),
     "nuclei": (
         "Vulnerability scanning",
         "Runs templates to detect known vulnerabilities and misconfigurations.",
@@ -464,6 +469,7 @@ NEUTRAL_STYLE = "white"
 _DETAIL_FIELDS: tuple[str, ...] = (
     "severity",     # nuclei
     "ports_list",   # rustscan
+    "service_detail",  # nmap (service · product · version)
     "rule_id",      # gitleaks
     "description",  # gitleaks
     "title",        # httpx / gowitness

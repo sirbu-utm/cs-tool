@@ -146,3 +146,9 @@ gowitness:
   binary: gowitness
   needs_checksum: false
   interactive_input: {}
+nmap:
+  # A local tool: nmap is installed by the user (apt/brew/winget), not
+  # downloaded. The `services` stage of ports-to-vuln runs `nmap -sV` on the
+  # ports naabu found, for service/version detection.
+  source: local
+  binary: nmap

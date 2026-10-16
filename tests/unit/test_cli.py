@@ -178,6 +178,7 @@ class TestHelpAndUnknown:
             "gowitness",
             "httpx",
             "naabu",
+            "nmap",
             "nuclei",
             "rustscan",
             "subfinder",
@@ -2213,6 +2214,49 @@ class TestAlert:
         )
 
         assert res.exit_code == 2
+
+
+class TestLocalToolInCli:
+    """A `source: local` tool (nmap) is reported by PATH, skipped by init, and blocks
+    a pipeline that needs it when it is not installed."""
+
+    @staticmethod
+    def _add_nmap(root: Path) -> None:
+        with (root / "registry.yaml").open("a", encoding="utf-8") as handle:
+            handle.write("nmap:\n  source: local\n  binary: nmap\n")
+
+    def test_init_of_a_local_tool_skips_it_with_a_note(self, tmp_path: Path) -> None:
+        self._add_nmap(tmp_path)
+
+        res = runner.invoke(app, ["init", "nmap"])  # a local tool only → nothing to download
+
+        assert res.exit_code == 0, res.stdout
+        assert "local tool" in res.stdout and "skipping" in res.stdout
+        assert "Done: 0 tool(s) ready" in res.stdout
+
+    def test_status_lists_a_local_tool_found_on_path(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        self._add_nmap(tmp_path)
+        monkeypatch.setattr("cyberfw.manager.find_in_path", lambda cmd: "/usr/bin/nmap" if cmd == "nmap" else None)
+
+        res = runner.invoke(app, ["status"])
+
+        assert res.exit_code == 0, res.stdout
+        assert "nmap" in res.stdout and "local" in res.stdout  # listed, with source "local"
+
+    def test_a_pipeline_needing_an_absent_local_tool_is_blocked(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._add_nmap(tmp_path)
+        (tmp_path / "pipelines").mkdir(exist_ok=True)
+        (tmp_path / "pipelines" / "svc.yaml").write_text(
+            "nodes:\n  - tool: httpx\n    stage: live\n  - tool: nmap\n    stage: services\n", encoding="utf-8"
+        )
+        monkeypatch.setattr("cyberfw.manager.find_in_path", lambda cmd: None)  # nmap not on PATH
+
+        res = runner.invoke(app, ["pipeline", "svc", "-t", "example.com", "--no-mail"])
+
+        assert res.exit_code == 2
+        assert "nmap" in res.stdout and "not installed" in res.stdout
 
 
 class TestScheduleCommand:
