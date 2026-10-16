@@ -82,6 +82,19 @@ class RunDiff:
         """Findings of severity low or worse that the earlier run did not have."""
         return self._count("finding", "added", real=True)
 
+    def new_findings_at_least(self, level: str) -> int:
+        """Newly added findings whose severity is ``level`` or worse.
+
+        ``level`` is one of :data:`REAL` (``critical`` < ``high`` < ``medium``
+        < ``low``). ``info`` / unknown findings never count, so this is a
+        refinement of :attr:`new_findings` (which is the ``low`` case)."""
+        cutoff = REAL.index(level)
+        return sum(
+            1
+            for c in self.changes
+            if c.area == "finding" and c.status == "added" and c.severity in REAL and REAL.index(c.severity) <= cutoff
+        )
+
     def summary(self) -> list[str]:
         """Short phrases — ``["2 new findings", "1 port opened"]``; empty when nothing changed."""
         info = self._count("finding", "added", real=False) + self._count("finding", "removed", real=False)

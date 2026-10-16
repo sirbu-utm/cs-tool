@@ -2121,6 +2121,184 @@ class TestBaselineComparison:
         assert missing.exit_code == 2 and "no report.json" in missing.stdout
 
 
+class TestAlertExitCode:
+    """The exit code ranks a failed run above an alert above a clean run."""
+
+    def test_a_failed_run_outranks_an_alert(self) -> None:
+        from cyberfw.cli import _pipeline_exit_code
+
+        # Even with new findings to alert on, a broken scan is reported as broken.
+        assert _pipeline_exit_code(succeeded=False, alert_hits=5) == 1
+
+    def test_new_findings_exit_3(self) -> None:
+        from cyberfw.cli import _pipeline_exit_code
+
+        assert _pipeline_exit_code(succeeded=True, alert_hits=1) == 3
+
+    def test_a_clean_run_exits_0(self) -> None:
+        from cyberfw.cli import _pipeline_exit_code
+
+        assert _pipeline_exit_code(succeeded=True, alert_hits=0) == 0
+
+
+class TestAlert:
+    """`pipeline --alert` turns new findings into exit code 3 and an ALERT line."""
+
+    def _baseline_then_add_a_high_finding(self, tmp_path: Path) -> None:
+        first = runner.invoke(
+            app, ["pipeline", "recon-to-vuln", "-t", "example.com", "--session", "base", "--no-mail"]
+        )
+        assert first.exit_code == 0, first.stdout
+        # The next run's nuclei keeps the medium xss and adds a new high finding.
+        TestBaselineComparison._tool_prints(
+            tmp_path, "nuclei",
+            {"template-id": "xss", "matched-at": "https://sub.example.com/", "info": {"name": "XSS", "severity": "medium"}},
+            {"template-id": "sqli", "matched-at": "https://sub.example.com/login", "info": {"name": "SQLi", "severity": "high"}},
+        )
+
+    def test_a_new_finding_exits_3_with_an_alert_line(self, tmp_path: Path) -> None:
+        self._baseline_then_add_a_high_finding(tmp_path)
+
+        res = runner.invoke(
+            app, ["pipeline", "recon-to-vuln", "-t", "example.com", "--session", "watch", "--no-mail", "--alert"]
+        )
+
+        assert res.exit_code == 3, res.stdout
+        assert "ALERT" in res.stdout and "new finding" in res.stdout
+
+    def test_a_threshold_above_the_new_finding_does_not_alert(self, tmp_path: Path) -> None:
+        self._baseline_then_add_a_high_finding(tmp_path)  # the new finding is high, not critical
+
+        res = runner.invoke(
+            app, ["pipeline", "recon-to-vuln", "-t", "example.com", "--session", "watch", "--no-mail",
+                  "--alert", "--alert-severity", "critical"]
+        )
+
+        assert res.exit_code == 0, res.stdout
+        assert "ALERT" not in res.stdout
+
+    def test_an_unchanged_rescan_does_not_alert(self, tmp_path: Path) -> None:
+        first = runner.invoke(
+            app, ["pipeline", "recon-to-vuln", "-t", "example.com", "--session", "base", "--no-mail"]
+        )
+        assert first.exit_code == 0, first.stdout
+
+        res = runner.invoke(
+            app, ["pipeline", "recon-to-vuln", "-t", "example.com", "--session", "again", "--no-mail", "--alert"]
+        )
+
+        assert res.exit_code == 0, res.stdout
+        assert "ALERT" not in res.stdout
+
+    def test_the_first_scan_never_alerts(self) -> None:
+        # No earlier run to compare with, so nothing is "new".
+        res = runner.invoke(
+            app, ["pipeline", "recon-to-vuln", "-t", "example.com", "--session", "only", "--no-mail", "--alert"]
+        )
+
+        assert res.exit_code == 0, res.stdout
+        assert "ALERT" not in res.stdout
+
+    def test_alert_with_no_baseline_is_a_usage_error(self) -> None:
+        res = runner.invoke(
+            app, ["pipeline", "recon-to-vuln", "-t", "example.com", "--no-mail", "--alert", "--no-baseline"]
+        )
+
+        assert res.exit_code == 2
+        assert "baseline" in res.stdout.lower()
+
+    def test_alert_rejects_an_unknown_severity(self) -> None:
+        res = runner.invoke(
+            app, ["pipeline", "recon-to-vuln", "-t", "example.com", "--no-mail", "--alert", "--alert-severity", "nope"]
+        )
+
+        assert res.exit_code == 2
+
+
+class TestScheduleCommand:
+    """`cyberfw schedule` generates an OS-scheduler entry (and installs it with --install)."""
+
+    @staticmethod
+    def _posix(monkeypatch: pytest.MonkeyPatch, *, yes: bool = True) -> None:
+        monkeypatch.setattr("cyberfw.cli._is_posix", lambda: yes)
+        monkeypatch.setattr("cyberfw.cli._schedule_program", lambda: "cyberfw")
+
+    def test_prints_a_cron_line_by_default_on_posix(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self._posix(monkeypatch)
+        installed: list[str] = []
+        monkeypatch.setattr("cyberfw.schedule.install_cron", lambda *a, **k: installed.append("x"))
+
+        res = runner.invoke(app, ["schedule", "recon-to-vuln", "-t", "example.com", "--every", "daily", "--at", "09:00"])
+
+        assert res.exit_code == 0, res.stdout
+        assert "0 9 * * *" in res.stdout and "--alert" in res.stdout
+        assert "cyberfw-recon-to-vuln-example.com" in res.stdout
+        assert installed == []  # printed only — nothing touched
+
+    def test_prints_a_schtasks_command_on_windows(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr("cyberfw.cli._is_posix", lambda: False)
+        monkeypatch.setattr("cyberfw.cli._schedule_program", lambda: "cyberfw")
+
+        res = runner.invoke(app, ["schedule", "recon-to-vuln", "-t", "example.com"])
+
+        assert res.exit_code == 0, res.stdout
+        assert "schtasks" in res.stdout and "/Create" in res.stdout
+
+    def test_install_applies_the_entry_with_the_passed_through_flags(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self._posix(monkeypatch)
+        seen: dict[str, object] = {}
+
+        def fake_install(plan: object, *, program: str, root: str, log: str, expr: str | None = None) -> None:
+            seen.update(
+                pipeline=plan.pipeline, target=plan.target, severity=plan.alert_severity, args=plan.scan_args
+            )
+
+        monkeypatch.setattr("cyberfw.schedule.install_cron", fake_install)
+
+        res = runner.invoke(
+            app, ["schedule", "recon-to-vuln", "-t", "example.com", "--ffuf", "--no-mail",
+                  "--alert-severity", "high", "--install"]
+        )
+
+        assert res.exit_code == 0, res.stdout
+        assert seen["pipeline"] == "recon-to-vuln" and seen["target"] == "example.com"
+        assert seen["severity"] == "high"
+        assert "--ffuf" in seen["args"] and "--no-mail" in seen["args"]
+
+    def test_remove_deletes_the_entry(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self._posix(monkeypatch)
+        removed: list[str] = []
+        monkeypatch.setattr("cyberfw.schedule.remove_cron", lambda plan: bool(removed.append(plan.target)) or True)
+
+        res = runner.invoke(app, ["schedule", "recon-to-vuln", "-t", "example.com", "--remove"])
+
+        assert res.exit_code == 0, res.stdout
+        assert removed == ["example.com"]
+
+    def test_a_raw_cron_overrides_the_cadence_on_posix(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self._posix(monkeypatch)
+
+        res = runner.invoke(app, ["schedule", "recon-to-vuln", "-t", "example.com", "--cron", "*/5 * * * *"])
+
+        assert res.exit_code == 0, res.stdout
+        assert "*/5 * * * *" in res.stdout
+
+    def test_a_raw_cron_on_windows_is_a_usage_error(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr("cyberfw.cli._is_posix", lambda: False)
+
+        res = runner.invoke(app, ["schedule", "recon-to-vuln", "-t", "example.com", "--cron", "*/5 * * * *"])
+
+        assert res.exit_code == 2
+        assert "cron" in res.stdout.lower()
+
+    def test_a_bad_cadence_is_a_usage_error(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self._posix(monkeypatch)
+
+        res = runner.invoke(app, ["schedule", "recon-to-vuln", "-t", "example.com", "--every", "monthly"])
+
+        assert res.exit_code == 2
+
+
 class TestTriage:
     """`cyberfw mute` silences a finding; the next scan sets it aside and does not call it new."""
 

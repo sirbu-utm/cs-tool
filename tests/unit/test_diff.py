@@ -86,6 +86,27 @@ def test_new_gone_and_moved_assets_and_findings() -> None:
     assert result.new_findings == 1
 
 
+def test_new_findings_at_least_counts_added_findings_from_a_severity_up() -> None:
+    # One medium is already there (not new); the new run adds one finding of
+    # each severity. Only the real ones (low and worse) can ever alert.
+    old = _doc(_vuln("kept", "https://a.example.com/x", "medium"))
+    new = _doc(
+        _vuln("kept", "https://a.example.com/x", "medium"),
+        _vuln("crit", "https://a.example.com/c", "critical"),
+        _vuln("high", "https://a.example.com/h", "high"),
+        _vuln("med", "https://a.example.com/m", "medium"),
+        _vuln("low", "https://a.example.com/l", "low"),
+        _vuln("note", "https://a.example.com/i", "info"),
+    )
+    result = diff.compare(old, new)
+
+    assert result.new_findings_at_least("critical") == 1
+    assert result.new_findings_at_least("high") == 2
+    assert result.new_findings_at_least("medium") == 3
+    assert result.new_findings_at_least("low") == 4  # info is not a real finding
+    assert result.new_findings_at_least("low") == result.new_findings
+
+
 def test_a_failed_stage_never_makes_findings_gone_or_new() -> None:
     finding = _vuln("xss", "https://a.example.com/q")
     nuclei_failed = (("subfinder", True), ("httpx", True), ("nuclei", False))

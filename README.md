@@ -286,6 +286,16 @@ cyberfw diff pipeline-recon-to-vuln-20261005-140200 pipeline-recon-to-vuln-20261
 # Приглушить находку, чтобы она не всплывала в будущих сканах (см. «Триаж»)
 cyberfw mute tls-cert-self-signed --target "*.dev.example.com" --reason accepted_risk
 cyberfw mutes            # список приглушённых
+
+# Мониторинг: выйти с кодом 3, если по сравнению с прошлым прогоном появились
+# новые находки (порог severity — --alert-severity, по умолчанию low)
+cyberfw pipeline recon-to-vuln --target example.com --alert --alert-severity high
+
+# Поставить такой скан на расписание ОС: по умолчанию печатает готовую запись
+# (cron на Linux/macOS, schtasks на Windows); --install ставит, --remove снимает
+cyberfw schedule recon-to-vuln --target example.com --every daily --at 09:00
+cyberfw schedule recon-to-vuln --target example.com --every daily --install
+cyberfw schedule recon-to-vuln --target example.com --remove
 ```
 
 Перед стартом `pipeline` проверяет, что прогон вообще способен дать результат:
@@ -621,6 +631,38 @@ ffuf и секреты; находка, попавшая с прошлого р�
 `--baseline <сессия>` сравнивает с конкретным прогоном, `--no-baseline`
 выключает сравнение, а `cyberfw diff <старый> <новый>` сравнивает любые два
 сохранённых прогона.
+
+### Мониторинг: расписание и `--alert`
+
+`pipeline --alert` превращает «появилось новое» в **код выхода**: прогон идёт
+как обычно, сравнивается с прошлым сохранённым прогоном той же цели, и если
+появились новые находки с severity не ниже порога (`--alert-severity`, по
+умолчанию `low`) — печатается строка `ALERT: …` и процесс выходит с кодом **3**.
+Коды: `0` — чисто, `1` — этап упал (важнее алерта), `2` — ошибка аргументов,
+`3` — есть новое. Первый скан цели не алертит (сравнивать не с чем), а `--alert`
+вместе с `--no-baseline` — ошибка. Наружу ничего не отправляется: только код и
+строка в лог — это разбирает планировщик или скрипт.
+
+`cyberfw schedule <pipeline> -t <target>` ставит такой скан на **штатный
+планировщик ОС**. По умолчанию команда просто печатает готовую запись под
+текущую систему — строку `crontab` на Linux/macOS или команду `schtasks` на
+Windows — и ничего не трогает; `--install` ставит задание, `--remove` снимает
+его (по стабильному имени `cyberfw-<pipeline>-<target>`, так что повторный
+`--install` заменяет). Запись несёт текущий workspace (`CYBERFW_ROOT_DIR`) и
+дописывает вывод в `logs/schedule.log`.
+
+```bash
+cyberfw schedule recon-to-vuln -t example.com --every daily --at 09:00     # напечатать cron/schtasks
+cyberfw schedule recon-to-vuln -t example.com --every weekly --install     # поставить (пн, 09:00)
+cyberfw schedule recon-to-vuln -t example.com --cron "*/30 * * * *"        # свой cron (только POSIX)
+cyberfw schedule recon-to-vuln -t example.com --remove                     # снять
+```
+
+Частота — `--every daily|weekly|hourly` и `--at HH:MM` (для hourly время не
+нужно); `--cron "<выражение>"` задаёт cron напрямую (только POSIX). Флаги скана
+(`--ffuf`, `--no-mail`, `--alert-severity` и т.д.) пробрасываются в
+запланированный `pipeline`. Внешних каналов (Telegram, веб-хук, почта) пока нет
+— только локальный код выхода и лог.
 
 ### Приглушение находок (триаж)
 
