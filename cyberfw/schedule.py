@@ -18,6 +18,7 @@ take the current crontab text and return the new text); only the thin
 from __future__ import annotations
 
 import re
+import shlex
 import subprocess
 from dataclasses import dataclass, field
 
@@ -27,9 +28,10 @@ __all__ = [
     "cron_line",
     "cron_with",
     "cron_without",
-    "scan_command",
+    "scan_argv",
     "schtasks_command",
     "tag",
+    "validate_target",
     "install_cron",
     "remove_cron",
     "install_schtasks",
@@ -38,6 +40,26 @@ __all__ = [
 
 CADENCES = ("daily", "weekly", "hourly")
 _TIME = re.compile(r"^([01]\d|2[0-3]):([0-5]\d)$")
+
+#: A scheduled entry becomes a shell command that cron (``/bin/sh``) or
+#: ``schtasks`` (``cmd.exe``) runs later, so the target — the one field a caller
+#: controls freely — is restricted to what a host, IP or URL actually needs.
+#: Anything else (spaces, quotes, ``;`` ``|`` ``&`` ``$`` backticks, parentheses,
+#: redirects, newlines…) is refused rather than interpolated, which is what
+#: would otherwise allow command injection when the job fires.
+_SAFE_TARGET = re.compile(r"^[A-Za-z0-9._:/-]+$")
+
+
+def validate_target(target: str) -> None:
+    """Refuse a target that could inject a command into the scheduled entry.
+
+    A scan seed is a host, IP or URL; it never needs shell metacharacters.
+    Raises :class:`ValueError` for anything outside that safe set."""
+    if not _SAFE_TARGET.match(target):
+        raise ValueError(
+            f"target {target!r} may only contain letters, digits and . _ - : / "
+            "(it becomes part of a scheduled shell command)"
+        )
 
 
 @dataclass(frozen=True)
@@ -84,27 +106,35 @@ def tag(schedule: Schedule) -> str:
     return f"cyberfw-{schedule.pipeline}-{_slug(schedule.target)}"
 
 
-def scan_command(schedule: Schedule, *, program: str) -> str:
-    """The inner ``cyberfw pipeline … --alert`` call (no scheduler wrapper)."""
-    parts = [
-        program, "pipeline", schedule.pipeline, "-t", f'"{schedule.target}"',
+def scan_argv(schedule: Schedule, *, program: list[str]) -> list[str]:
+    """The inner ``cyberfw pipeline … --alert`` call as an argv (no scheduler
+    wrapper, no quoting). ``program`` is the launch prefix as tokens, e.g.
+    ``["cyberfw"]`` or ``[sys.executable, "-m", "cyberfw"]``."""
+    validate_target(schedule.target)
+    return [
+        *program, "pipeline", schedule.pipeline, "-t", schedule.target,
         "--alert", "--alert-severity", schedule.alert_severity, *schedule.scan_args,
     ]
-    return " ".join(parts)
 
 
-def cron_line(schedule: Schedule, *, program: str, root: str, log: str, expr: str | None = None) -> str:
+def cron_line(schedule: Schedule, *, program: list[str], root: str, log: str, expr: str | None = None) -> str:
     """A full crontab line, tagged so it can be found again.
 
-    ``expr`` overrides the cadence-derived schedule with a raw 5-field cron
-    expression (``cyberfw schedule --cron``)."""
+    Every interpolated value is shell-quoted (``shlex.quote``), so a path with
+    a space stays one argument and a target cannot inject a command; ``expr``
+    overrides the cadence with a raw 5-field cron expression."""
     schedule_expr = expr if expr is not None else cron_expr(schedule.every, schedule.at)
-    cmd = scan_command(schedule, program=program)
-    return f'{schedule_expr} CYBERFW_ROOT_DIR="{root}" {cmd} >> "{log}" 2>&1 # {tag(schedule)}'
+    cmd = " ".join(shlex.quote(token) for token in scan_argv(schedule, program=program))
+    env = f"CYBERFW_ROOT_DIR={shlex.quote(root)}"
+    return f"{schedule_expr} {env} {cmd} >> {shlex.quote(log)} 2>&1 # {tag(schedule)}"
 
 
-def schtasks_command(schedule: Schedule, *, program: str, root: str, log: str) -> list[str]:
-    """The ``schtasks /Create`` argv for Windows Task Scheduler."""
+def schtasks_command(schedule: Schedule, *, program: list[str], root: str, log: str) -> list[str]:
+    """The ``schtasks /Create`` argv for Windows Task Scheduler.
+
+    The inner command is quoted with Windows rules (``list2cmdline``), and the
+    target is validated (see :func:`validate_target`) so it cannot break out of
+    the ``cmd /c`` string."""
     if schedule.every == "hourly":
         sc = ["/SC", "HOURLY"]
     elif schedule.every == "weekly":
@@ -113,8 +143,9 @@ def schtasks_command(schedule: Schedule, *, program: str, root: str, log: str) -
         sc = ["/SC", "DAILY", "/ST", schedule.at]
     else:
         raise ValueError(f"cadence must be one of {', '.join(CADENCES)}, got {schedule.every!r}")
-    cmd = scan_command(schedule, program=program)
-    run = f'cmd /c "set CYBERFW_ROOT_DIR={root}&& {cmd} >> {log} 2>&1"'
+    inner = subprocess.list2cmdline(scan_argv(schedule, program=program))
+    log_part = f'"{log}"' if " " in log else log
+    run = f'cmd /c "set CYBERFW_ROOT_DIR={root}&& {inner} >> {log_part} 2>&1"'
     return ["schtasks", "/Create", *sc, "/TN", tag(schedule), "/TR", run, "/F"]
 
 
@@ -149,7 +180,7 @@ def _current_crontab() -> str:
     return done.stdout if done.returncode == 0 else ""
 
 
-def install_cron(schedule: Schedule, *, program: str, root: str, log: str, expr: str | None = None) -> None:
+def install_cron(schedule: Schedule, *, program: list[str], root: str, log: str, expr: str | None = None) -> None:
     """Replace (or add) this schedule's crontab entry."""
     line = cron_line(schedule, program=program, root=root, log=log, expr=expr)
     updated = cron_with(_current_crontab(), line, tag(schedule))
@@ -170,7 +201,7 @@ def remove_cron(schedule: Schedule) -> bool:
     return True
 
 
-def install_schtasks(schedule: Schedule, *, program: str, root: str, log: str) -> None:
+def install_schtasks(schedule: Schedule, *, program: list[str], root: str, log: str) -> None:
     """Create (or overwrite, via /F) this schedule's Windows task."""
     done = _run(schtasks_command(schedule, program=program, root=root, log=log))
     if done.returncode != 0:

@@ -2305,14 +2305,14 @@ def _is_posix() -> bool:
     return os.name != "nt"
 
 
-def _schedule_program() -> str:
-    """How a scheduled entry should invoke cyberfw: the installed command if it
-    is on PATH, else this interpreter with ``-m cyberfw``. Quoted if the path
-    has a space."""
+def _schedule_program() -> list[str]:
+    """How a scheduled entry should invoke cyberfw, as argv tokens: the installed
+    command if it is on PATH, else this interpreter with ``-m cyberfw``. Returned
+    as tokens so each is quoted correctly for its scheduler."""
     found = shutil.which("cyberfw")
     if found:
-        return f'"{found}"' if " " in found else found
-    return f'"{sys.executable}" -m cyberfw'
+        return [found]
+    return [sys.executable, "-m", "cyberfw"]
 
 
 @app.command("schedule")
@@ -2348,6 +2348,13 @@ def schedule_cmd(
     if alert_severity not in rundiff.REAL:
         console.print(f"[err]--alert-severity must be one of {', '.join(rundiff.REAL)}.[/err]")
         raise typer.Exit(2)
+    try:
+        # The target becomes part of a scheduled shell command; refuse an
+        # injection-shaped one up front, before anything is generated or written.
+        schedule.validate_target(target)
+    except ValueError as exc:
+        console.print(f"[err]{escape(str(exc))}[/err]")
+        raise typer.Exit(2) from exc
     posix = _is_posix()
     if cron is not None:
         if not posix:
@@ -2391,7 +2398,7 @@ def schedule_cmd(
 
 
 def _schedule_posix(
-    plan: schedule.Schedule, *, program: str, root: str, log: str, cron: str | None, install: bool, remove: bool
+    plan: schedule.Schedule, *, program: list[str], root: str, log: str, cron: str | None, install: bool, remove: bool
 ) -> None:
     if remove:
         gone = schedule.remove_cron(plan)
@@ -2409,7 +2416,7 @@ def _schedule_posix(
 
 
 def _schedule_windows(
-    plan: schedule.Schedule, *, program: str, root: str, log: str, install: bool, remove: bool
+    plan: schedule.Schedule, *, program: list[str], root: str, log: str, install: bool, remove: bool
 ) -> None:
     if remove:
         gone = schedule.remove_schtasks(plan)

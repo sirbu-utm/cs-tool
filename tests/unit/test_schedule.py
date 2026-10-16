@@ -6,6 +6,7 @@ so expectations are hand-written literals.
 
 from __future__ import annotations
 
+import shlex
 from subprocess import CompletedProcess
 
 import pytest
@@ -35,18 +36,50 @@ class TestCronExpr:
             schedule.cron_expr("monthly", "09:00")
 
 
-class TestScanCommand:
+class TestScanArgv:
     def test_the_inner_pipeline_call(self) -> None:
         s = Schedule("recon-to-vuln", "example.com")
-        assert schedule.scan_command(s, program="cyberfw") == (
-            'cyberfw pipeline recon-to-vuln -t "example.com" --alert --alert-severity low'
-        )
+        assert schedule.scan_argv(s, program=["cyberfw"]) == [
+            "cyberfw", "pipeline", "recon-to-vuln", "-t", "example.com", "--alert", "--alert-severity", "low",
+        ]
 
     def test_extra_flags_and_severity_ride_along(self) -> None:
         s = Schedule("recon-to-vuln", "example.com", alert_severity="high", scan_args=("--ffuf", "--no-mail"))
-        assert schedule.scan_command(s, program="cyberfw") == (
-            'cyberfw pipeline recon-to-vuln -t "example.com" --alert --alert-severity high --ffuf --no-mail'
-        )
+        assert schedule.scan_argv(s, program=["python", "-m", "cyberfw"]) == [
+            "python", "-m", "cyberfw", "pipeline", "recon-to-vuln", "-t", "example.com",
+            "--alert", "--alert-severity", "high", "--ffuf", "--no-mail",
+        ]
+
+
+class TestTargetValidation:
+    """A scheduled target becomes part of a shell command cron/schtasks later runs,
+    so a target carrying shell metacharacters must be refused — not interpolated."""
+
+    @pytest.mark.parametrize(
+        "bad",
+        ["example.com;rm -rf ~", "a$(id)", "a`id`", "a b", 'a"b', "a'b", "a|b", "a&b", "a>b", "a\nb", "a(b)", ""],
+    )
+    def test_a_dangerous_target_is_refused(self, bad: str) -> None:
+        with pytest.raises(ValueError):
+            schedule.validate_target(bad)
+
+    @pytest.mark.parametrize(
+        "ok", ["example.com", "192.0.2.10", "https://ex.com:8443/a/b", "a.b-c_d.example.com", "10.0.0.0/24"]
+    )
+    def test_a_normal_target_is_accepted(self, ok: str) -> None:
+        schedule.validate_target(ok)  # does not raise
+
+    def test_cron_line_refuses_an_injection_target(self) -> None:
+        with pytest.raises(ValueError):
+            schedule.cron_line(
+                Schedule("recon-to-vuln", "a$(touch pwned)"), program=["cyberfw"], root="/ws", log="/l"
+            )
+
+    def test_schtasks_refuses_an_injection_target(self) -> None:
+        with pytest.raises(ValueError):
+            schedule.schtasks_command(
+                Schedule("recon-to-vuln", 'a"&calc&"b'), program=["cyberfw"], root="C:\\ws", log="C:\\l"
+            )
 
 
 class TestTag:
@@ -62,18 +95,27 @@ class TestTag:
 class TestCronLine:
     def test_carries_the_workspace_log_and_tag(self) -> None:
         s = Schedule("recon-to-vuln", "example.com", every="daily", at="09:00")
-        line = schedule.cron_line(s, program="cyberfw", root="/ws", log="/ws/logs/schedule.log")
+        line = schedule.cron_line(s, program=["cyberfw"], root="/ws", log="/ws/logs/schedule.log")
+        # Safe values need no quoting, so the line reads plainly.
         assert line == (
-            '0 9 * * * CYBERFW_ROOT_DIR="/ws" '
-            'cyberfw pipeline recon-to-vuln -t "example.com" --alert --alert-severity low '
-            '>> "/ws/logs/schedule.log" 2>&1 # cyberfw-recon-to-vuln-example.com'
+            "0 9 * * * CYBERFW_ROOT_DIR=/ws "
+            "cyberfw pipeline recon-to-vuln -t example.com --alert --alert-severity low "
+            ">> /ws/logs/schedule.log 2>&1 # cyberfw-recon-to-vuln-example.com"
         )
+
+    def test_a_path_with_a_space_is_quoted_so_it_stays_one_argument(self) -> None:
+        s = Schedule("recon-to-vuln", "example.com", scan_args=("--wordlist", "/a b/w.txt"))
+        line = schedule.cron_line(s, program=["cyberfw"], root="/my ws", log="/my ws/s.log")
+        command = line.split(" # ")[0]
+        tokens = shlex.split(command)  # the shell would see exactly these tokens
+        assert "/a b/w.txt" in tokens  # not split into "/a" and "b/w.txt"
+        assert "CYBERFW_ROOT_DIR=/my ws" in tokens
 
 
 class TestSchtasksCommand:
     def test_daily(self) -> None:
         s = Schedule("recon-to-vuln", "example.com", every="daily", at="09:00")
-        argv = schedule.schtasks_command(s, program="cyberfw", root=r"C:\ws", log=r"C:\ws\logs\schedule.log")
+        argv = schedule.schtasks_command(s, program=["cyberfw"], root=r"C:\ws", log=r"C:\ws\logs\schedule.log")
         assert argv[:7] == ["schtasks", "/Create", "/SC", "DAILY", "/ST", "09:00", "/TN"]
         assert argv[7] == "cyberfw-recon-to-vuln-example.com"
         assert argv[8] == "/TR"
@@ -82,12 +124,12 @@ class TestSchtasksCommand:
 
     def test_weekly_and_hourly_map_to_schtasks_schedules(self) -> None:
         weekly = schedule.schtasks_command(
-            Schedule("recon-to-vuln", "x", every="weekly", at="08:30"), program="cyberfw", root="r", log="l"
+            Schedule("recon-to-vuln", "x", every="weekly", at="08:30"), program=["cyberfw"], root="r", log="l"
         )
         assert weekly[2:6] == ["/SC", "WEEKLY", "/D", "MON"] and "08:30" in weekly
 
         hourly = schedule.schtasks_command(
-            Schedule("recon-to-vuln", "x", every="hourly"), program="cyberfw", root="r", log="l"
+            Schedule("recon-to-vuln", "x", every="hourly"), program=["cyberfw"], root="r", log="l"
         )
         assert hourly[2:4] == ["/SC", "HOURLY"]
 

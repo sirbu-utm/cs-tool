@@ -2221,7 +2221,7 @@ class TestScheduleCommand:
     @staticmethod
     def _posix(monkeypatch: pytest.MonkeyPatch, *, yes: bool = True) -> None:
         monkeypatch.setattr("cyberfw.cli._is_posix", lambda: yes)
-        monkeypatch.setattr("cyberfw.cli._schedule_program", lambda: "cyberfw")
+        monkeypatch.setattr("cyberfw.cli._schedule_program", lambda: ["cyberfw"])
 
     def test_prints_a_cron_line_by_default_on_posix(self, monkeypatch: pytest.MonkeyPatch) -> None:
         self._posix(monkeypatch)
@@ -2237,12 +2237,25 @@ class TestScheduleCommand:
 
     def test_prints_a_schtasks_command_on_windows(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr("cyberfw.cli._is_posix", lambda: False)
-        monkeypatch.setattr("cyberfw.cli._schedule_program", lambda: "cyberfw")
+        monkeypatch.setattr("cyberfw.cli._schedule_program", lambda: ["cyberfw"])
 
         res = runner.invoke(app, ["schedule", "recon-to-vuln", "-t", "example.com"])
 
         assert res.exit_code == 0, res.stdout
         assert "schtasks" in res.stdout and "/Create" in res.stdout
+
+    def test_a_target_with_shell_metacharacters_is_rejected(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # The entry becomes a command cron/schtasks later runs, so an injection
+        # target must be refused before it is ever written anywhere.
+        self._posix(monkeypatch)
+        installed: list[str] = []
+        monkeypatch.setattr("cyberfw.schedule.install_cron", lambda *a, **k: installed.append("x"))
+
+        res = runner.invoke(app, ["schedule", "recon-to-vuln", "-t", "example.com$(touch pwned)", "--install"])
+
+        assert res.exit_code == 2
+        assert installed == []  # refused before anything was generated or written
+        assert "may only contain" in res.stdout  # and the reason is explained
 
     def test_install_applies_the_entry_with_the_passed_through_flags(self, monkeypatch: pytest.MonkeyPatch) -> None:
         self._posix(monkeypatch)
