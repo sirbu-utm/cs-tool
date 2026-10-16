@@ -7,6 +7,15 @@
 ## [Unreleased]
 
 ### Added
+- Контроль скана (всё опционально, по умолчанию выключено — без флагов прогон
+  прежний): `--severity` / `--tags` → nuclei `-severity`/`-tags`; `--rate-limit N`
+  → предел запросов/сек в собственный флаг инструмента (nuclei/httpx `-rate-limit`,
+  naabu/ffuf `-rate`); `--exclude "<glob>"` (повторяемый у `pipeline`) → найденный
+  хост под glob не сканируется дальше (запись о находке остаётся), печатается
+  `scope: N host(s) excluded`, seed не трогается. `--severity/--tags/--rate-limit`
+  есть у `pipeline` и `run`. Настройки-эквиваленты: `severity`, `tags`,
+  `rate_limit`, `exclude` (через `CYBERFW_*` / `config.local.yaml`); флаг
+  перекрывает настройку на запуск.
 - Локальные инструменты в реестре: запись с `source: local` (и опц. `path`)
   описывает инструмент, который фреймворк не качает, а берёт из `PATH`
   (ставит пользователь). `init` и автоустановка их пропускают; `status`

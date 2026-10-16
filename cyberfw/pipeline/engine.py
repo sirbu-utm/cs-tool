@@ -31,7 +31,8 @@ from cyberfw.manager import ToolManager
 from cyberfw.pipeline.context import SessionContext
 from cyberfw.pipeline.executor import run_stage
 from cyberfw.pipeline.schemas import ToolRecord
-from cyberfw.tools.base import BaseTool, ToolContext
+from cyberfw.tools.base import BaseTool, ScanControls, ToolContext
+from cyberfw.tools.targets import hostname_of, in_scope
 
 LOG = get_logger("engine")
 
@@ -116,6 +117,8 @@ class PipelineResult:
 
     nodes: list[NodeResult] = field(default_factory=list)
     records: list[ToolRecord] = field(default_factory=list)
+    #: Discovered hostnames dropped as out of scope (``--exclude``), in order.
+    excluded: list[str] = field(default_factory=list)
     #: Wall-clock bounds of :meth:`PipelineEngine.run` (UTC); ``None`` until it ran.
     started_at: datetime | None = None
     finished_at: datetime | None = None
@@ -244,7 +247,16 @@ class PipelineEngine:
                     failed.add(node.stage)
                 result.nodes.append(node_result)
                 result.records.extend(step_records)
-                inputs = [r.target for r in step_records]
+                # Keep every discovery record, but drop out-of-scope hosts from
+                # what later stages scan (and note them once).
+                inputs = []
+                for target in (r.target for r in step_records):
+                    if in_scope(target, self.settings.exclude):
+                        inputs.append(target)
+                    else:
+                        host = hostname_of(target)
+                        if host not in result.excluded:
+                            result.excluded.append(host)
                 outputs[node.stage] = inputs
                 previous = node.stage
         finally:
@@ -276,6 +288,14 @@ class PipelineEngine:
             seen.add(node.stage)
 
     # -- internals -----------------------------------------------------------
+    def _controls(self) -> ScanControls:
+        """The per-run scan knobs (rate limit, nuclei severity/tags) from settings."""
+        return ScanControls(
+            rate_limit=self.settings.rate_limit,
+            severity=self.settings.severity,
+            tags=self.settings.tags,
+        )
+
     async def _run_node(
         self,
         node: Node,
@@ -289,6 +309,7 @@ class PipelineEngine:
             target=seed,
             inputs=inputs,
             extra_input=extra_input if extra_input is not None else self.settings.wordlist,
+            controls=self._controls(),
         )
 
         node_result, records = await self._attempt(node, ctx, parse=parse)
@@ -353,6 +374,7 @@ class PipelineEngine:
             input_file=input_file,
             extra_input=ctx.extra_input,
             output_dir=self._output_dir(),
+            controls=ctx.controls,
         )
         try:
             cmd = adapter.build_cmd(run_ctx)
@@ -397,7 +419,9 @@ class PipelineEngine:
         async def run_target(target: str) -> list[ToolRecord]:
             async with semaphore:
                 cmd = adapter.build_cmd(
-                    ToolContext(target=target, extra_input=ctx.extra_input, output_dir=output_dir)
+                    ToolContext(
+                        target=target, extra_input=ctx.extra_input, output_dir=output_dir, controls=ctx.controls
+                    )
                 )
                 try:
                     return await run_stage(

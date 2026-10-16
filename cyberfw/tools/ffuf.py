@@ -49,6 +49,7 @@ class FfufTool(BaseTool):
             wordlist,
             "-json",
             *self._static_flags(),
+            *self._rate_args(ctx, "-rate"),  # ffuf: requests/sec
         ]
         return cmd
 

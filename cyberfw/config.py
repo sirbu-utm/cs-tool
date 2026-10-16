@@ -83,6 +83,18 @@ class Settings(BaseSettings):
         "fails (each fan-out target is its own process). Unset = no limit.",
     )
     wordlist: str | None = Field(default=None, description="Custom fuzz wordlist path for Ffuf.")
+    # Scan controls (all optional; empty/None = no control, today's behaviour).
+    severity: str = Field(
+        default="", description="Comma list for nuclei -severity (e.g. critical,high); empty = all."
+    )
+    tags: str = Field(default="", description="Comma list for nuclei -tags (e.g. cve,exposure); empty = all.")
+    rate_limit: int | None = Field(
+        default=None, ge=1, description="Max requests/sec, mapped to each tool's own rate flag; unset = no cap."
+    )
+    exclude: list[str] = Field(
+        default_factory=list,
+        description="Hostname globs to keep out of scope: a discovered host matching any is not scanned.",
+    )
     parse: bool = Field(
         default=True,
         description="Validate tool stdout against Pydantic schemas. Set false (or pass --no-parse) "

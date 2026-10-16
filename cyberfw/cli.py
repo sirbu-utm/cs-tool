@@ -390,6 +390,23 @@ def _print_changes(changes: rundiff.RunDiff, *, limit: int | None) -> None:
         console.print(f"  [muted]not compared: {escape(note)}[/muted]")
 
 
+def _scan_control_overrides(
+    *, severity: str, tags: str, rate_limit: int | None, exclude: list[str]
+) -> dict[str, object]:
+    """The ``Settings`` fields to override for this run — only the controls the
+    caller actually set, so an unset flag leaves the env/YAML/default in place."""
+    overrides: dict[str, object] = {}
+    if severity:
+        overrides["severity"] = severity
+    if tags:
+        overrides["tags"] = tags
+    if rate_limit is not None:
+        overrides["rate_limit"] = rate_limit
+    if exclude:
+        overrides["exclude"] = exclude
+    return overrides
+
+
 def _pipeline_exit_code(*, succeeded: bool, alert_hits: int) -> int:
     """The process exit code: a failed run (1) outranks an alert (3), which
     outranks a clean run (0). A broken scan is reported as broken, never as
@@ -1873,6 +1890,16 @@ def run_cmd(
             "Omit both to be asked once the results are on screen.",
         ),
     ] = None,
+    severity: Annotated[
+        str, typer.Option("--severity", help="nuclei -severity, e.g. critical,high (overrides the setting).")
+    ] = "",
+    tags: Annotated[
+        str, typer.Option("--tags", help="nuclei -tags, e.g. cve,exposure (overrides the setting).")
+    ] = "",
+    rate_limit: Annotated[
+        int | None,
+        typer.Option("--rate-limit", min=1, help="Max requests/sec for nuclei/httpx/naabu/ffuf (overrides the setting)."),
+    ] = None,
     verbose: VerboseOption = False,
 ) -> None:
     """Run a single registered tool and print its records to the screen."""
@@ -1883,6 +1910,9 @@ def run_cmd(
         _checked_session(session)
 
     settings, manager = _bootstrap(verbose=verbose)
+    overrides = _scan_control_overrides(severity=severity, tags=tags, rate_limit=rate_limit, exclude=[])
+    if overrides:
+        settings = settings.model_copy(update=overrides)
     try:
         # The adapter knows what kind of target it takes; check that before
         # looking for the binary so a wrong target is a usage error (exit 2).
@@ -1913,7 +1943,9 @@ def run_cmd(
     engine = PipelineEngine(settings, manager, context=context)
 
     hosts = _read_hosts(list_file) if list_file is not None else []
-    ctx = ToolContext(target=target, inputs=hosts, extra_input=wordlist or settings.wordlist)
+    ctx = ToolContext(
+        target=target, inputs=hosts, extra_input=wordlist or settings.wordlist, controls=engine._controls()
+    )
     target_label = target or f"{len(hosts)} host(s) from {list_file}"
     console.print(f"[info]tool:[/info] [tool]{tool}[/tool]  [info]target:[/info] {target_label}")
 
@@ -2103,6 +2135,21 @@ def pipeline_cmd(
             help="Lowest severity that counts for --alert: critical|high|medium|low (default low).",
         ),
     ] = "low",
+    severity: Annotated[
+        str,
+        typer.Option("--severity", help="nuclei -severity, e.g. critical,high (overrides the setting; empty = all)."),
+    ] = "",
+    tags: Annotated[
+        str, typer.Option("--tags", help="nuclei -tags, e.g. cve,exposure (overrides the setting; empty = all).")
+    ] = "",
+    rate_limit: Annotated[
+        int | None,
+        typer.Option("--rate-limit", min=1, help="Max requests/sec for nuclei/httpx/naabu/ffuf (overrides the setting)."),
+    ] = None,
+    exclude: Annotated[
+        list[str] | None,
+        typer.Option("--exclude", help="Hostname glob to keep out of scope; repeatable. A discovered host matching any is not scanned."),
+    ] = None,
     verbose: VerboseOption = False,
 ) -> None:
     """Run a ready-made pipeline and render HTML/JSON reports.
@@ -2133,6 +2180,11 @@ def pipeline_cmd(
         _checked_session(session)
 
     settings, manager = _bootstrap(verbose=verbose)
+    overrides = _scan_control_overrides(
+        severity=severity, tags=tags, rate_limit=rate_limit, exclude=exclude or []
+    )
+    if overrides:
+        settings = settings.model_copy(update=overrides)
     # Resolve the VirusTotal key up front (and prompt if needed) before the live
     # view takes over the terminal — a prompt and a Live render cannot coexist.
     vt_key = _resolve_vt_key(settings, vt_enrich)
@@ -2254,6 +2306,9 @@ def pipeline_cmd(
                 view.finish()
                 live.refresh()
         _after_live()
+
+    if result.excluded:
+        console.print(f"[muted]scope: {len(result.excluded)} host(s) excluded[/muted]")
 
     animate = settings.animations
     _check_tls(result)

@@ -9,7 +9,7 @@ import pytest
 from cyberfw.exceptions import ToolNotFoundError
 from cyberfw.manager.registry import ToolSpec
 from cyberfw.tools import adapter_for
-from cyberfw.tools.base import ToolContext
+from cyberfw.tools.base import ScanControls, ToolContext
 from cyberfw.tools.targets import hostname_of
 
 
@@ -199,6 +199,53 @@ class TestNmapAdapter:
     def test_malformed_or_empty_xml_yields_no_records(self) -> None:
         assert self._nmap().parse_output("not xml <<<") == []  # type: ignore[attr-defined]
         assert self._nmap().parse_output("") == []  # type: ignore[attr-defined]
+
+
+class TestScanControls:
+    """ScanControls on the ToolContext reach the tools that understand them, and
+    add nothing to a tool that does not (or when unset)."""
+
+    def test_nuclei_takes_severity_tags_and_rate(self) -> None:
+        cmd = _adapter("nuclei").build_cmd(  # type: ignore[attr-defined]
+            ToolContext(target="https://x", controls=ScanControls(rate_limit=50, severity="critical,high", tags="cve"))
+        )
+        assert "-severity" in cmd and "critical,high" in cmd
+        assert "-tags" in cmd and "cve" in cmd
+        assert "-rate-limit" in cmd and "50" in cmd
+
+    def test_nuclei_without_controls_is_byte_for_byte_the_same(self) -> None:
+        plain = _adapter("nuclei").build_cmd(ToolContext(target="https://x"))  # type: ignore[attr-defined]
+        empty = _adapter("nuclei").build_cmd(  # type: ignore[attr-defined]
+            ToolContext(target="https://x", controls=ScanControls())
+        )
+        assert plain == empty
+        assert "-severity" not in plain and "-tags" not in plain and "-rate-limit" not in plain
+
+    def test_httpx_takes_the_rate_limit(self) -> None:
+        cmd = _adapter("httpx").build_cmd(  # type: ignore[attr-defined]
+            ToolContext(target="https://x", controls=ScanControls(rate_limit=20))
+        )
+        assert "-rate-limit" in cmd and "20" in cmd
+
+    def test_naabu_takes_the_rate(self) -> None:
+        cmd = _adapter("naabu").build_cmd(  # type: ignore[attr-defined]
+            ToolContext(target="example.com", controls=ScanControls(rate_limit=100))
+        )
+        assert "-rate" in cmd and "100" in cmd
+
+    def test_ffuf_takes_the_rate(self, tmp_path: Path) -> None:
+        wordlist = tmp_path / "w.txt"
+        wordlist.write_text("admin\n", encoding="utf-8")
+        cmd = _adapter("ffuf").build_cmd(  # type: ignore[attr-defined]
+            ToolContext(target="https://x", extra_input=str(wordlist), controls=ScanControls(rate_limit=30))
+        )
+        assert "-rate" in cmd and "30" in cmd
+
+    def test_a_passive_tool_ignores_the_controls(self) -> None:
+        cmd = _adapter("subfinder").build_cmd(  # type: ignore[attr-defined]
+            ToolContext(target="example.com", controls=ScanControls(rate_limit=10, severity="high", tags="cve"))
+        )
+        assert not any(flag in cmd for flag in ("-rate", "-rate-limit", "-severity", "-tags"))
 
 
 def test_ffuf_falls_back_to_the_bundled_wordlist(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

@@ -16,6 +16,7 @@ class HttpxTool(BaseTool):
         # expired/self-signed/mismatched) to the same probe — no second
         # connection — which cyberfw.posture.tls turns into certificate health.
         cmd: list[str] = [str(self.binary), "-silent", "-json", "-tls-grab", *self._static_flags()]
+        cmd += self._rate_args(ctx)  # httpx: -rate-limit
         if ctx.target:
             cmd += ["-u", ctx.target]
         elif ctx.input_file:

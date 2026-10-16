@@ -61,6 +61,17 @@ class _PerTargetTool(BaseTool):
         return [ctx.target or ""]
 
 
+class _CaptureCtxTool(BaseTool):
+    """Records the ToolContext it was built with (controls + prepared inputs),
+    then runs a no-op so the stage succeeds with no records."""
+
+    seen: ToolContext | None = None
+
+    def build_cmd(self, ctx: ToolContext) -> list[str]:
+        type(self).seen = ctx
+        return [sys.executable, "-c", "pass"]
+
+
 def _make_engine(tmp_path: Path, registry_path: Path) -> PipelineEngine:
     settings = Settings(root_dir=tmp_path, reports_dir=tmp_path / "reports")
     settings.ensure_dirs()
@@ -97,6 +108,54 @@ class TestEngine:
         assert len(result.records) == 1
         assert result.records[0].target == "seed.example.com"
         assert result.totals_by_tool["subfinder"] == 1
+
+    async def test_scan_controls_from_settings_reach_the_stage(self, tmp_path: Path) -> None:
+        registry_path = tmp_path / "registry.yaml"
+        registry_path.write_text(
+            "nuclei:\n  repo: org/nuclei\n  asset_patterns: []\n  binary: stub.py\n", encoding="utf-8"
+        )
+        engine = _make_engine(tmp_path, registry_path)
+        engine.settings.severity = "high"
+        engine.settings.rate_limit = 10
+        capture = _CaptureCtxTool(engine.tool_manager.spec("nuclei"), tmp_path / "stub.py")
+        engine.build_tool = lambda name: capture  # type: ignore[method-assign]
+
+        await engine.run([Node(tool="nuclei", stage="vulns")], seed="example.com")
+
+        assert _CaptureCtxTool.seen is not None
+        assert _CaptureCtxTool.seen.controls.severity == "high"
+        assert _CaptureCtxTool.seen.controls.rate_limit == 10
+
+    async def test_excluded_hosts_are_not_scanned_downstream(self, tmp_path: Path) -> None:
+        registry_path = tmp_path / "registry.yaml"
+        registry_path.write_text(
+            "subfinder:\n  repo: org/subfinder\n  asset_patterns: []\n  binary: two.py\n"
+            "httpx:\n  repo: org/httpx\n  asset_patterns: []\n  binary: cap.py\n",
+            encoding="utf-8",
+        )
+        two_hosts = tmp_path / "two.py"
+        two_hosts.write_text(
+            'import json, sys\n'
+            'for h in ("api.example.com", "x.dev.example.com"):\n'
+            '    sys.stdout.write(json.dumps({"host": h, "source": "stub"}) + "\\n")\n',
+            encoding="utf-8",
+        )
+        engine = _make_engine(tmp_path, registry_path)
+        engine.settings.exclude = ["*.dev.example.com"]
+        discover = _StubTool(engine.tool_manager.spec("subfinder"), two_hosts)
+        capture = _CaptureCtxTool(engine.tool_manager.spec("httpx"), tmp_path / "cap.py")
+        engine.build_tool = lambda name: discover if name == "subfinder" else capture  # type: ignore[method-assign]
+
+        result = await engine.run(
+            [Node(tool="subfinder", stage="subs"), Node(tool="httpx", stage="live")], seed="example.com"
+        )
+
+        # The discovery record for the excluded host is kept...
+        assert {r.target for r in result.records} == {"api.example.com", "x.dev.example.com"}
+        # ...but the next stage only scans the in-scope host.
+        assert _CaptureCtxTool.seen is not None
+        assert _CaptureCtxTool.seen.inputs == ["api.example.com"]
+        assert result.excluded == ["x.dev.example.com"]
 
     async def test_max_records_caps(self, tmp_path: Path) -> None:
         registry_path = tmp_path / "registry.yaml"

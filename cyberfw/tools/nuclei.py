@@ -12,6 +12,11 @@ class NucleiTool(BaseTool):
 
     def build_cmd(self, ctx: ToolContext) -> list[str]:
         cmd: list[str] = [str(self.binary), "-silent", "-jsonl", *self._static_flags()]
+        if ctx.controls.severity:
+            cmd += ["-severity", ctx.controls.severity]
+        if ctx.controls.tags:
+            cmd += ["-tags", ctx.controls.tags]
+        cmd += self._rate_args(ctx)  # nuclei: -rate-limit
         if ctx.target:
             cmd += ["-u", ctx.target]
         elif ctx.input_file:

@@ -23,6 +23,7 @@ class NaabuTool(BaseTool):
 
     def build_cmd(self, ctx: ToolContext) -> list[str]:
         cmd: list[str] = [str(self.binary), "-silent", "-json", *self._static_flags()]
+        cmd += self._rate_args(ctx, "-rate")  # naabu: packets/sec
         if ctx.target:
             cmd += ["-host", hostname_of(ctx.target)]
         elif ctx.input_file:

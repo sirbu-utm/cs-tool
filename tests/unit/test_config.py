@@ -128,6 +128,23 @@ class TestSettingsEnv:
     def test_pipelines_dir_resolves_against_root(self, tmp_path: Path) -> None:
         assert Settings(root_dir=tmp_path).pipelines_dir == (tmp_path / "pipelines").resolve()
 
+    def test_scan_controls_default_to_off(self, tmp_path: Path) -> None:
+        settings = Settings(root_dir=tmp_path)
+        assert settings.severity == "" and settings.tags == ""
+        assert settings.rate_limit is None and settings.exclude == []
+
+    def test_scan_controls_via_env(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("CYBERFW_SEVERITY", "critical,high")
+        monkeypatch.setenv("CYBERFW_TAGS", "cve,exposure")
+        monkeypatch.setenv("CYBERFW_RATE_LIMIT", "50")
+        settings = Settings(root_dir=tmp_path)
+        assert settings.severity == "critical,high" and settings.tags == "cve,exposure"
+        assert settings.rate_limit == 50
+
+    def test_zero_rate_limit_rejected(self, tmp_path: Path) -> None:
+        with pytest.raises(ValidationError):
+            Settings(root_dir=tmp_path, rate_limit=0)
+
 
 class TestRootDirDiscovery:
     """``load_settings()`` without an explicit root: the current directory when it is a

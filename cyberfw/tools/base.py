@@ -24,7 +24,21 @@ from typing import ClassVar
 from cyberfw.manager.registry import ToolSpec
 from cyberfw.pipeline.schemas import ToolRecord, validate_record
 
-__all__ = ["ToolContext", "BaseTool"]
+__all__ = ["ScanControls", "ToolContext", "BaseTool"]
+
+
+@dataclass(frozen=True)
+class ScanControls:
+    """Optional per-run knobs the CLI/settings pass to the tools that honour them.
+
+    Each is off by default; an unset control adds no flag, so a command is
+    unchanged from today when nothing is configured. ``rate_limit`` maps to each
+    tool's own rate flag; ``severity`` / ``tags`` are nuclei's template filters.
+    """
+
+    rate_limit: int | None = None
+    severity: str = ""
+    tags: str = ""
 
 
 @dataclass
@@ -55,6 +69,9 @@ class ToolContext:
     input_file: Path | None = None
     extra_input: str | None = None
     output_dir: Path | None = None
+    #: Optional scan controls (rate limit, nuclei severity/tags); the engine
+    #: fills this from settings and every stage receives it.
+    controls: ScanControls = field(default_factory=ScanControls)
 
 
 class BaseTool(ABC):
@@ -135,6 +152,12 @@ class BaseTool(ABC):
         return []
 
     # -- shared flag helpers --------------------------------------------------
+    def _rate_args(self, ctx: ToolContext, flag: str = "-rate-limit") -> list[str]:
+        """``[flag, N]`` when a rate limit is set, else ``[]`` — most tools spell
+        the flag ``-rate-limit``; naabu/ffuf use ``-rate``."""
+        limit = ctx.controls.rate_limit
+        return [flag, str(limit)] if limit else []
+
     def _static_flags(self) -> list[str]:
         """Flatten ``spec.interactive_input`` ({flag: value}) into argv args.
 

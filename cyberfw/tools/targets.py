@@ -8,9 +8,11 @@ a host-only tool normalises its targets here.
 
 from __future__ import annotations
 
+from collections.abc import Iterable
+from fnmatch import fnmatchcase
 from urllib.parse import urlsplit
 
-__all__ = ["hostname_of"]
+__all__ = ["hostname_of", "in_scope"]
 
 
 def hostname_of(target: str) -> str:
@@ -29,3 +31,14 @@ def hostname_of(target: str) -> str:
         return parsed.hostname or target
     except ValueError:  # e.g. an invalid IPv6 literal
         return target
+
+
+def in_scope(target: str, excludes: Iterable[str]) -> bool:
+    """False when ``target``'s hostname matches any exclude glob (case-insensitively).
+
+    The same fnmatch shape as triage targets (``*`` wildcard): a discovered host
+    out of scope is dropped before any later stage scans it. No patterns → every
+    target is in scope.
+    """
+    host = hostname_of(target).lower()
+    return not any(fnmatchcase(host, pattern.lower()) for pattern in excludes)

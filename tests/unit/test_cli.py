@@ -2259,6 +2259,37 @@ class TestLocalToolInCli:
         assert "nmap" in res.stdout and "not installed" in res.stdout
 
 
+class TestScanControlsCli:
+    """`--severity/--tags/--rate-limit/--exclude` override the settings for one run."""
+
+    def test_overrides_picks_only_the_flags_that_were_set(self) -> None:
+        from cyberfw.cli import _scan_control_overrides
+
+        assert _scan_control_overrides(severity="", tags="", rate_limit=None, exclude=[]) == {}
+        assert _scan_control_overrides(severity="high", tags="", rate_limit=None, exclude=[]) == {"severity": "high"}
+        assert _scan_control_overrides(severity="high", tags="cve", rate_limit=20, exclude=["*.dev"]) == {
+            "severity": "high", "tags": "cve", "rate_limit": 20, "exclude": ["*.dev"],
+        }
+
+    def test_rate_limit_zero_is_a_usage_error(self) -> None:
+        res = runner.invoke(app, ["pipeline", "recon-to-vuln", "-t", "example.com", "--rate-limit", "0"])
+        assert res.exit_code == 2
+
+    def test_exclude_drops_a_discovered_host_and_reports_it(self, tmp_path: Path) -> None:
+        # The fake subfinder finds sub.example.com; excluding it must keep it out
+        # of the downstream stages and print the scope line.
+        res = runner.invoke(
+            app, ["pipeline", "recon-to-vuln", "-t", "example.com", "--no-mail", "--no-report",
+                  "--exclude", "sub.example.com"]
+        )
+        assert res.exit_code == 0, res.stdout
+        assert "scope: 1 host(s) excluded" in res.stdout
+
+    def test_run_accepts_the_scan_control_flags(self) -> None:
+        res = runner.invoke(app, ["run", "nuclei", "-t", "https://sub.example.com/", "--severity", "high", "--no-save"])
+        assert res.exit_code == 0, res.stdout
+
+
 class TestScheduleCommand:
     """`cyberfw schedule` generates an OS-scheduler entry (and installs it with --install)."""
 

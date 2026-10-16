@@ -306,6 +306,14 @@ cyberfw pipeline ports-to-vuln --target example.com
 # этого можно выключить (см. «Проверки после скана»)
 cyberfw pipeline recon-to-vuln --target example.com --no-mail --no-intel --no-vt
 
+# Контроль скана: nuclei только по нужной severity/тегам, общий лимит скорости
+# и исключения из скоупа (найденный хост под glob не сканируется дальше)
+cyberfw pipeline recon-to-vuln --target example.com \
+  --severity critical,high --tags cve --rate-limit 50 --exclude "*.dev.example.com"
+
+# Те же severity/tags/rate-limit доступны и одиночному запуску
+cyberfw run nuclei --target https://example.com --severity critical,high --rate-limit 50
+
 # Репутация одной цели в VirusTotal (домен, IP, URL или хэш файла)
 cyberfw vt example.com
 
@@ -693,6 +701,25 @@ cyberfw schedule recon-to-vuln -t example.com --remove                     # с�
 (`--ffuf`, `--no-mail`, `--alert-severity` и т.д.) пробрасываются в
 запланированный `pipeline`. Внешних каналов (Telegram, веб-хук, почта) пока нет
 — только локальный код выхода и лог.
+
+### Контроль скана: severity, теги, скоуп, лимит скорости
+
+Прогон можно сделать прицельнее и аккуратнее (всё по умолчанию выключено — без
+флагов поведение прежнее):
+
+- `--severity critical,high` и `--tags cve,exposure` → nuclei запускает только
+  нужные шаблоны (`-severity` / `-tags`), быстрее и тише;
+- `--rate-limit N` → общий предел запросов/сек, отражается в собственный флаг
+  каждого инструмента (nuclei/httpx `-rate-limit`, naabu/ffuf `-rate`);
+- `--exclude "<glob>"` (повторяемый) → найденный хост, чей hostname подходит
+  под glob (fnmatch, как в триаже), **не** сканируется дальше: запись о находке
+  остаётся, но следующие этапы его не трогают. Печатается строка
+  `scope: N host(s) excluded`. Явно заданный seed не исключается.
+
+`--severity/--tags/--rate-limit` есть и у `pipeline`, и у `run`; `--exclude` —
+только у `pipeline` (у `run` одна явная цель). Любой флаг перекрывает настройку
+из `config.local.yaml`/`CYBERFW_*` на этот запуск; без флага берётся значение
+настройки. Через настройки это `severity`, `tags`, `rate_limit`, `exclude`.
 
 ### Приглушение находок (триаж)
 
