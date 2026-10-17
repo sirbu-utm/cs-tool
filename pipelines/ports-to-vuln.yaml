@@ -12,6 +12,8 @@
 #   stage        — имя этапа (файл reports/<session>/<stage>.jsonl)
 #   input_from   — этап, чьи записи получает узел (по умолчанию — предыдущий)
 #   max_records  — обрезать вывод этапа (0 = без ограничения)
+#   severity/tags/rate_limit — необяз. опции скана этого этапа (перекрывают
+#                  общие --severity/--tags/--rate-limit; пустое — берётся общее)
 description: Active port scan, HTTP probe of the open ports, then nuclei on the live services
 nodes:
   - tool: naabu

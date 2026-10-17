@@ -126,6 +126,36 @@ class TestEngine:
         assert _CaptureCtxTool.seen.controls.severity == "high"
         assert _CaptureCtxTool.seen.controls.rate_limit == 10
 
+    async def test_a_node_option_overrides_the_run_wide_control(self, tmp_path: Path) -> None:
+        registry_path = tmp_path / "registry.yaml"
+        registry_path.write_text(
+            "nuclei:\n  repo: org/nuclei\n  asset_patterns: []\n  binary: stub.py\n", encoding="utf-8"
+        )
+        engine = _make_engine(tmp_path, registry_path)
+        engine.settings.severity = "low"  # the run-wide default
+        capture = _CaptureCtxTool(engine.tool_manager.spec("nuclei"), tmp_path / "stub.py")
+        engine.build_tool = lambda name: capture  # type: ignore[method-assign]
+
+        await engine.run([Node(tool="nuclei", stage="vulns", severity="critical")], seed="example.com")
+
+        assert _CaptureCtxTool.seen is not None
+        assert _CaptureCtxTool.seen.controls.severity == "critical"  # the node wins for its stage
+
+    async def test_a_node_without_an_option_falls_back_to_the_run_wide_control(self, tmp_path: Path) -> None:
+        registry_path = tmp_path / "registry.yaml"
+        registry_path.write_text(
+            "nuclei:\n  repo: org/nuclei\n  asset_patterns: []\n  binary: stub.py\n", encoding="utf-8"
+        )
+        engine = _make_engine(tmp_path, registry_path)
+        engine.settings.rate_limit = 7
+        capture = _CaptureCtxTool(engine.tool_manager.spec("nuclei"), tmp_path / "stub.py")
+        engine.build_tool = lambda name: capture  # type: ignore[method-assign]
+
+        await engine.run([Node(tool="nuclei", stage="vulns")], seed="example.com")
+
+        assert _CaptureCtxTool.seen is not None
+        assert _CaptureCtxTool.seen.controls.rate_limit == 7
+
     async def test_excluded_hosts_are_not_scanned_downstream(self, tmp_path: Path) -> None:
         registry_path = tmp_path / "registry.yaml"
         registry_path.write_text(

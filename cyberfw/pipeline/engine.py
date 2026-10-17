@@ -74,6 +74,11 @@ class Node:
     stage: str
     max_records: int = 0  # 0 = unlimited
     input_from: str | None = None
+    #: Per-stage scan controls; each overrides the run-wide control (settings /
+    #: CLI) for this stage, and an unset one falls back to it.
+    severity: str = ""
+    tags: str = ""
+    rate_limit: int | None = None
 
     def __post_init__(self) -> None:
         allow = {"-", "_", ".", "/", "\\", ":"}
@@ -288,12 +293,14 @@ class PipelineEngine:
             seen.add(node.stage)
 
     # -- internals -----------------------------------------------------------
-    def _controls(self) -> ScanControls:
-        """The per-run scan knobs (rate limit, nuclei severity/tags) from settings."""
+    def _controls(self, node: Node | None = None) -> ScanControls:
+        """The scan knobs for a stage: the run-wide controls (settings / CLI),
+        with a node's own ``severity`` / ``tags`` / ``rate_limit`` overriding them
+        for that stage when set."""
         return ScanControls(
-            rate_limit=self.settings.rate_limit,
-            severity=self.settings.severity,
-            tags=self.settings.tags,
+            rate_limit=(node.rate_limit if node and node.rate_limit is not None else self.settings.rate_limit),
+            severity=(node.severity if node and node.severity else self.settings.severity),
+            tags=(node.tags if node and node.tags else self.settings.tags),
         )
 
     async def _run_node(
@@ -309,7 +316,7 @@ class PipelineEngine:
             target=seed,
             inputs=inputs,
             extra_input=extra_input if extra_input is not None else self.settings.wordlist,
-            controls=self._controls(),
+            controls=self._controls(node),
         )
 
         node_result, records = await self._attempt(node, ctx, parse=parse)

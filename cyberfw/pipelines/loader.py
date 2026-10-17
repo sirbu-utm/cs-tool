@@ -14,6 +14,13 @@ stem, next to the built-in Python ones::
         stage: vulns
         input_from: live_http   # optional: defaults to the previous stage
         max_records: 50         # optional: 0 = unlimited
+        severity: critical,high # optional: nuclei -severity for this stage
+        tags: cve               # optional: nuclei -tags for this stage
+        rate_limit: 50          # optional: this stage's rate cap (>=1)
+
+The per-stage ``severity`` / ``tags`` / ``rate_limit`` override the run-wide
+controls (``--severity`` / ``--tags`` / ``--rate-limit`` / settings) for that
+stage; a stage that omits one falls back to the run-wide value.
 
 The engine is already data-driven, so this is only a validated loader: unknown
 keys, an ``input_from`` that does not name an earlier stage and duplicate stage
@@ -43,6 +50,11 @@ class NodeSpec(BaseModel):
     stage: str = Field(min_length=1)
     input_from: str | None = None
     max_records: int = Field(default=0, ge=0)
+    #: Per-stage scan controls (override the run-wide --severity/--tags/--rate-limit
+    #: for this stage); unset falls back to the run-wide value.
+    severity: str = ""
+    tags: str = ""
+    rate_limit: int | None = Field(default=None, ge=1)
 
 
 class PipelineSpec(BaseModel):
@@ -82,7 +94,15 @@ def load_pipeline_file(path: Path) -> list[Node]:
         seen.add(node.stage)
 
     return [
-        Node(tool=node.tool, stage=node.stage, max_records=node.max_records, input_from=node.input_from)
+        Node(
+            tool=node.tool,
+            stage=node.stage,
+            max_records=node.max_records,
+            input_from=node.input_from,
+            severity=node.severity,
+            tags=node.tags,
+            rate_limit=node.rate_limit,
+        )
         for node in spec.nodes
     ]
 

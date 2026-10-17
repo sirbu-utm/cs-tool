@@ -43,6 +43,26 @@ class TestLoadPipelineFile:
         assert nodes[2].max_records == 50
         assert nodes[0].input_from is None and nodes[0].max_records == 0
 
+    def test_per_stage_scan_options_are_read(self, tmp_path: Path) -> None:
+        path = _write(
+            tmp_path, "tuned",
+            "nodes:\n  - tool: nuclei\n    stage: vulns\n"
+            "    severity: critical,high\n    tags: cve\n    rate_limit: 50\n",
+        )
+        node = load_pipeline_file(path)[0]
+
+        assert node.severity == "critical,high" and node.tags == "cve" and node.rate_limit == 50
+
+    def test_a_stage_without_options_leaves_them_unset(self, tmp_path: Path) -> None:
+        node = load_pipeline_file(_write(tmp_path, "plain", "nodes:\n  - tool: httpx\n    stage: live\n"))[0]
+
+        assert node.severity == "" and node.tags == "" and node.rate_limit is None
+
+    def test_a_bad_per_stage_rate_limit_is_rejected(self, tmp_path: Path) -> None:
+        path = _write(tmp_path, "slow", "nodes:\n  - tool: nuclei\n    stage: v\n    rate_limit: 0\n")
+        with pytest.raises(RegistryError, match="rate_limit"):
+            load_pipeline_file(path)
+
     def test_unknown_key_is_rejected_with_the_file_named(self, tmp_path: Path) -> None:
         """A typo such as ``inputs_from`` must not be silently ignored."""
         path = _write(tmp_path, "typo", "nodes:\n  - tool: httpx\n    stage: a\n    inputs_from: x\n")
