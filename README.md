@@ -295,8 +295,10 @@ cyberfw run subfinder --target example.com --no-save
 cyberfw pipeline recon-to-vuln --target example.com
 
 # Дополнительные этапы pipeline (--ffuf берёт встроенный wordlists/common.txt,
-# если не передан свой --wordlist)
-cyberfw pipeline recon-to-vuln --target example.com --ffuf --gowitness
+# если не передан свой --wordlist). gowitness-скриншоты по умолчанию включены,
+# когда могут отработать (установлен + есть Chrome); выключить — --no-gowitness
+cyberfw pipeline recon-to-vuln --target example.com --ffuf
+cyberfw pipeline recon-to-vuln --target example.com --no-gowitness   # без скриншотов
 
 # Pipeline из файла pipelines/<name>.yaml (см. раздел «Свои pipeline»)
 cyberfw pipeline ports-to-vuln --target example.com
@@ -447,9 +449,13 @@ nuclei (`critical`/`high` — красный, `medium` — жёлтый, `low`/`
 пропуске.
 
 По завершении последний кадр остаётся на экране, а под ним печатается сводка:
-статус, число записей, длительность, записи по инструментам, идентификатор
-сессии и пути к отчётам. Если вывод перенаправлен в файл или идёт в лог CI,
-таблица печатается один раз в финальном виде, а не мелькает кадрами.
+статус, число записей, длительность, записи по инструментам, затем блок
+**Findings** — разбивка находок по severity (`critical 1 · high 1 · …`),
+счётчики находок по категориям (`hosts · live · ports · services · secrets`) и
+**Fix first**: несколько самых важных находок (critical→high) с целью и
+названием, — и, наконец, идентификатор сессии и пути к отчётам. Если вывод
+перенаправлен в файл или идёт в лог CI, таблица печатается один раз в финальном
+виде, а не мелькает кадрами.
 
 ### Карта топологии (вид по умолчанию)
 

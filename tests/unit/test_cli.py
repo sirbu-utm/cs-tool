@@ -2260,6 +2260,113 @@ class TestLocalToolInCli:
         assert "nmap" in res.stdout and "not installed" in res.stdout
 
 
+class TestGowitnessDefault:
+    """On a vanilla run gowitness is included only when it can actually run; an
+    explicit --gowitness/--no-gowitness is honoured as given."""
+
+    class _Reg:
+        def __init__(self, names: list[str]) -> None:
+            self._names = names
+
+        def names(self) -> list[str]:
+            return self._names
+
+    class _Mgr:
+        def __init__(self, names: list[str], installed: bool) -> None:
+            self.registry = TestGowitnessDefault._Reg(names)
+            self._installed = installed
+
+        def is_installed(self, name: str) -> bool:
+            return self._installed
+
+    def test_an_explicit_flag_is_honoured(self, tmp_path: Path) -> None:
+        from cyberfw.cli import _resolve_gowitness
+
+        mgr = self._Mgr(["gowitness"], True)
+        assert _resolve_gowitness(True, mgr, tmp_path) is True
+        assert _resolve_gowitness(False, mgr, tmp_path) is False
+
+    def test_default_includes_it_only_when_registered_installed_and_chrome_present(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from cyberfw.cli import _resolve_gowitness
+
+        monkeypatch.setattr("cyberfw.tools.gowitness._find_chrome", lambda _d: "/usr/bin/chrome")
+        assert _resolve_gowitness(None, self._Mgr(["gowitness"], True), tmp_path) is True
+
+        monkeypatch.setattr("cyberfw.tools.gowitness._find_chrome", lambda _d: None)  # no browser
+        assert _resolve_gowitness(None, self._Mgr(["gowitness"], True), tmp_path) is False
+
+        monkeypatch.setattr("cyberfw.tools.gowitness._find_chrome", lambda _d: "/usr/bin/chrome")
+        assert _resolve_gowitness(None, self._Mgr(["gowitness"], False), tmp_path) is False  # not installed
+        assert _resolve_gowitness(None, self._Mgr([], True), tmp_path) is False  # not registered
+
+
+class TestSummaryDetail:
+    """A vanilla run's closing summary breaks findings down, not just per-tool counts."""
+
+    @staticmethod
+    def _records() -> list[object]:
+        from cyberfw.pipeline.schemas import NaabuResult, NucleiResult, SubfinderResult
+
+        return [
+            SubfinderResult(tool="subfinder", host="a.example.com", target="a.example.com", kind="host"),
+            SubfinderResult(tool="subfinder", host="b.example.com", target="b.example.com", kind="host"),
+            NaabuResult(tool="naabu", host="a.example.com", port=22, target="a.example.com:22", kind="port"),
+            NucleiResult(tool="nuclei", target="https://a.example.com/x", kind="vuln",
+                         template_id="sqli", info={"name": "SQL injection", "severity": "critical"}),
+            NucleiResult(tool="nuclei", target="https://a.example.com/y", kind="vuln",
+                         template_id="xss", info={"name": "XSS", "severity": "high"}),
+            NucleiResult(tool="nuclei", target="https://a.example.com/z", kind="vuln",
+                         template_id="info", info={"name": "Tech", "severity": "info"}),
+        ]
+
+    def test_severity_tally_counts_only_vulns(self) -> None:
+        from cyberfw.cli import _severity_tally
+
+        tally = _severity_tally(self._records())
+        assert tally["critical"] == 1 and tally["high"] == 1 and tally["info"] == 1
+        assert tally["medium"] == 0 and tally["low"] == 0
+
+    def test_asset_counts_are_by_kind(self) -> None:
+        from cyberfw.cli import _asset_counts
+
+        assert _asset_counts(self._records()) == {"hosts": 2, "ports": 1}
+
+    def test_fix_first_lists_the_worst_findings_first(self) -> None:
+        from cyberfw.cli import _fix_first
+
+        worst = _fix_first(self._records())
+        # critical before high; the info-level finding is not "fix first"
+        assert [getattr(r, "name", "") for r in worst] == ["SQL injection", "XSS"]
+
+    def test_fix_first_skips_a_muted_finding(self) -> None:
+        from cyberfw.cli import _fix_first
+        from cyberfw.pipeline.schemas import NucleiResult
+
+        records = [
+            NucleiResult(tool="nuclei", target="https://a/x", kind="vuln", template_id="c",
+                         info={"name": "Crit", "severity": "critical"}, muted={"reason": "false_positive"}),
+        ]
+        assert _fix_first(records) == []
+
+    def test_summary_shows_the_breakdown(self) -> None:
+        from cyberfw.cli import _run_summary
+        from cyberfw.pipeline.engine import Node, NodeResult, PipelineResult
+
+        result = PipelineResult(
+            nodes=[NodeResult(node=Node(tool="nuclei", stage="vulns"), ok=True, count=3)],
+            records=self._records(),
+        )
+        output = Console(theme=THEME, record=True, width=100)
+        output.print(_run_summary(result, name="recon-to-vuln", session_id="s", reports=[]))
+        text = output.export_text()
+
+        assert "critical" in text and "high" in text  # severity breakdown
+        assert "hosts" in text and "ports" in text  # asset counts
+        assert "SQL injection" in text  # the worst finding is named
+
+
 class TestExportCommand:
     """`cyberfw export <run> --sarif|--csv` converts a saved report.json."""
 

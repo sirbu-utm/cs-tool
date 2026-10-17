@@ -459,6 +459,11 @@ class TopologyView:
         now = self._clock()
         vuln_total = sum(len(h.vulns) for h in self._hosts.values())
         live_total = sum(1 for h in self._hosts.values() if h.live)
+        # Call out the worst severity so the running header is not just a count.
+        severities = [sev.lower() for h in self._hosts.values() for sev, _name in h.vulns]
+        crit = severities.count("critical")
+        high = severities.count("high")
+        worst = f" ({crit} crit)" if crit else f" ({high} high)" if high else ""
         spin = spinner(now) if self._running and self._moving else "•"
         header = Text.assemble(
             (f"{spin} ", "info" if self._running else "muted"),
@@ -470,7 +475,7 @@ class TopologyView:
             ("  ·  ", "muted"),
             (f"{live_total} live", "ok" if live_total else "muted"),
             ("  ·  ", "muted"),
-            (f"{vuln_total} vulns", "err" if vuln_total else "muted"),
+            (f"{vuln_total} vulns{worst}", "err" if vuln_total else "muted"),
         )
         root = Tree(Text.assemble((str(self._seed or "scan"), "bold")), guide_style="muted")
         for host in self._order[:_MAX_HOSTS]:

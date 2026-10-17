@@ -500,6 +500,89 @@ def _preflight(
     return blocking, warnings
 
 
+#: Severities a run summary breaks findings down by, worst first.
+_SUMMARY_SEVERITIES = ("critical", "high", "medium", "low", "info")
+#: ``record.kind`` → the human label the summary counts it under.
+_ASSET_KINDS = (
+    ("host", "hosts"),
+    ("http", "live"),
+    ("port", "ports"),
+    ("service", "services"),
+    ("secret", "secrets"),
+)
+
+
+def _severity_tally(records: list[ToolRecord]) -> dict[str, int]:
+    """How many findings (``kind == vuln``) at each severity."""
+    counts = dict.fromkeys(_SUMMARY_SEVERITIES, 0)
+    for record in records:
+        if getattr(record, "kind", "") == "vuln":
+            severity = str(getattr(record, "severity", "") or "").lower()
+            if severity in counts:
+                counts[severity] += 1
+    return counts
+
+
+def _asset_counts(records: list[ToolRecord]) -> dict[str, int]:
+    """What the run found, by category — only the non-empty ones, in fixed order."""
+    counts: dict[str, int] = {}
+    for kind, label in _ASSET_KINDS:
+        found = sum(1 for record in records if getattr(record, "kind", "") == kind)
+        if found:
+            counts[label] = found
+    return counts
+
+
+def _fix_first(records: list[ToolRecord], limit: int = 5) -> list[ToolRecord]:
+    """The worst findings to act on: critical then high, un-muted, capped at ``limit``."""
+    rank = {severity: index for index, severity in enumerate(_SUMMARY_SEVERITIES)}
+    worst = [
+        record
+        for record in records
+        if getattr(record, "kind", "") == "vuln"
+        and not getattr(record, "muted", None)
+        and str(getattr(record, "severity", "") or "").lower() in ("critical", "high")
+    ]
+    worst.sort(key=lambda record: rank.get(str(getattr(record, "severity", "") or "").lower(), 99))
+    return worst[:limit]
+
+
+def _findings_pane(records: list[ToolRecord]) -> Pane | None:
+    """A breakdown of what the run found: severities, asset counts, worst first.
+    ``None`` when there is nothing to describe."""
+    lines: list[RenderableType] = []
+    tally = _severity_tally(records)
+    severities = join(
+        (
+            Text.assemble((f"{level} ", SEVERITY_STYLES.get(level, NEUTRAL_STYLE)), (str(count), "bold white"))
+            for level in _SUMMARY_SEVERITIES
+            if (count := tally[level])
+        ),
+        "  ",
+    )
+    if severities.cell_len:
+        lines.append(severities)
+    assets = _asset_counts(records)
+    if assets:
+        lines.append(join((Text.assemble((f"{label} ", "muted"), (str(n), "bold white")) for label, n in assets.items()), "   "))
+    worst = _fix_first(records)
+    if worst:
+        lines.append(Text(""))
+        lines.append(Text("Fix first", style="accent"))
+        table = Table.grid(padding=(0, 2))
+        table.add_column(no_wrap=True)  # severity badge
+        table.add_column(no_wrap=True)  # target
+        table.add_column(overflow="fold")  # finding name
+        for record in worst:
+            severity = str(getattr(record, "severity", "") or "").lower()
+            name = str(getattr(record, "name", "") or _finding_detail(record))
+            table.add_row(
+                _severity_cell(severity), PathText(record.target, style=record_style(record)), Text(name, style="white")
+            )
+        lines.append(table)
+    return Pane(Group(*lines), title="Findings", pad=2) if lines else None
+
+
 def _run_summary(
     result: PipelineResult,
     *,
@@ -562,6 +645,11 @@ def _run_summary(
         return table
 
     rows = [Pane(Group(Text(""), headline, Text(""), ByWidth(yields)), title=Text(name), pad=2)]
+
+    # What the run found, broken down — shown at full (it does not count up).
+    findings = _findings_pane(result.records) if progress >= 1 else None
+    if findings is not None:
+        rows.append(findings)
 
     # Name the stages that did not deliver, and why the failed ones failed: the
     # frame is the last thing on screen, and the live table cuts long reasons off.
@@ -1210,24 +1298,45 @@ def _pipeline_options(names: list[str], pipelines_dir: Path | None) -> list[comp
     return options
 
 
+def _resolve_gowitness(flag: bool | None, manager: ToolManager, tools_dir: Path) -> bool:
+    """Whether recon-to-vuln should run gowitness.
+
+    An explicit ``--gowitness`` / ``--no-gowitness`` is taken as given. The
+    vanilla default (``None``) includes it only when it can actually run —
+    registered, installed, and a Chrome/Chromium present — so a plain run gains
+    screenshots where possible and never fails for the lack of a browser."""
+    if flag is not None:
+        return flag
+    from cyberfw.tools.gowitness import _find_chrome
+
+    return (
+        "gowitness" in manager.registry.names()
+        and manager.is_installed("gowitness")
+        and _find_chrome(tools_dir) is not None
+    )
+
+
 def _interactive_pipeline() -> None:
     pipelines_dir = load_settings().pipelines_dir
     choices = available_pipelines(pipelines_dir)
     with completion.offering(_pipeline_options(choices, pipelines_dir)):
         name = Prompt.ask("Pipeline", choices=choices, default=choices[0])
     target = Prompt.ask("Seed target (domain or URL)")
-    include_ffuf = include_gowitness = False
+    include_ffuf = False
+    gowitness: bool | None = None
     wordlist = None
     if name in PIPELINES:  # the optional stages are recon-to-vuln's; YAML pipelines have none
         include_ffuf = Confirm.ask("Include Ffuf?", default=False)
         if include_ffuf:
             wordlist = Prompt.ask("Ffuf wordlist path", default="") or None
-        include_gowitness = Confirm.ask("Include Gowitness?", default=False)
+        # Default yes, but graceful: accepting keeps the sensible default (run it
+        # where it can), None, rather than forcing it even without a browser.
+        gowitness = None if Confirm.ask("Include Gowitness?", default=True) else False
     pipeline_cmd(
         name,
         target=target,
         ffuf=include_ffuf,
-        gowitness=include_gowitness,
+        gowitness=gowitness,
         wordlist=wordlist,
     )
 
@@ -2083,7 +2192,15 @@ def pipeline_cmd(
     name: Annotated[str, typer.Argument(help="Pipeline name: recon-to-vuln or a file from pipelines/<name>.yaml.")],
     target: Annotated[str | None, typer.Option("--target", "-t", help="Seed domain/URL for the first stage.")] = None,
     ffuf: Annotated[bool, typer.Option("--ffuf", help="Include the Ffuf node.")] = False,
-    gowitness: Annotated[bool, typer.Option("--gowitness", help="Include the Gowitness node.")] = False,
+    gowitness: Annotated[
+        bool | None,
+        typer.Option(
+            "--gowitness/--no-gowitness",
+            help="Include the Gowitness (screenshots) stage. Default: on when it can run "
+            "(installed, and a Chrome/Chromium is present), off otherwise — so a plain run "
+            "gains screenshots where possible and never fails for the lack of a browser.",
+        ),
+    ] = None,
     max_httpx: Annotated[int, typer.Option("--max-httpx", min=0, help="Cap live hosts passed onward (0 = all).")] = 0,
     wordlist: Annotated[str | None, typer.Option("--wordlist", "-w", help="Wordlist for the Ffuf stage (required with --ffuf).")] = None,
     session: Annotated[str | None, typer.Option("--session", help="Session id for the context store.")] = None,
@@ -2233,12 +2350,13 @@ def pipeline_cmd(
     # Resolve the VirusTotal key up front (and prompt if needed) before the live
     # view takes over the terminal — a prompt and a Live render cannot coexist.
     vt_key = _resolve_vt_key(settings, vt_enrich)
+    include_gowitness = _resolve_gowitness(gowitness, manager, settings.tools_dir)
     try:
         nodes = build(
             name,
             pipelines_dir=settings.pipelines_dir,
             include_ffuf=ffuf,
-            include_gowitness=gowitness,
+            include_gowitness=include_gowitness,
             max_httpx=max_httpx,
         )
         for node in nodes:  # a YAML pipeline may name a tool the registry (or the code) lacks

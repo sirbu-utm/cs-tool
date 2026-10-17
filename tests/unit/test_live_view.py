@@ -294,6 +294,29 @@ class TestTopologyView:
         assert "critical" in text and "Critical RCE" in text
         assert "1 live" in text and "1 vulns" in text
 
+    def test_header_flags_the_worst_severity(self) -> None:
+        view = TopologyView(self._nodes(), seed="example.com")
+        view.on_record(
+            NucleiResult.from_json(
+                "nuclei",
+                '{"template-id": "rce", "matched-at": "https://a.example.com/x", '
+                '"info": {"name": "RCE", "severity": "critical"}}',
+                1,
+            )
+        )
+        view.on_record(
+            NucleiResult.from_json(
+                "nuclei",
+                '{"template-id": "xss", "matched-at": "https://a.example.com/y", '
+                '"info": {"name": "XSS", "severity": "high"}}',
+                2,
+            )
+        )
+
+        text = _render_topology(view)
+
+        assert "2 vulns" in text and "1 crit" in text  # the worst severity is called out
+
     def test_ports_from_naabu_and_rustscan(self) -> None:
         view = TopologyView(self._nodes(), seed="example.com")
         view.on_record(NaabuResult.from_json("naabu", '{"host": "a.example.com", "port": 443}', 1))
