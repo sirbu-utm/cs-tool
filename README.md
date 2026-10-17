@@ -300,6 +300,9 @@ cyberfw pipeline recon-to-vuln --target example.com
 cyberfw pipeline recon-to-vuln --target example.com --ffuf
 cyberfw pipeline recon-to-vuln --target example.com --no-gowitness   # без скриншотов
 
+# Сухой прогон: показать граф этапов, готовность инструментов и опции — без скана
+cyberfw pipeline recon-to-vuln --plan
+
 # Pipeline из файла pipelines/<name>.yaml (см. раздел «Свои pipeline»)
 cyberfw pipeline ports-to-vuln --target example.com
 
@@ -353,6 +356,12 @@ cyberfw schedule recon-to-vuln --target example.com --remove
 с кодом 2, не тратя минуты сканирования. Запустить вопреки этому —
 `--force-start`: доступные этапы отработают, недоступный будет помечен
 `failed`, а зависящие от него — `skipped`.
+
+Увидеть план наперёд, ничего не запуская, — `cyberfw pipeline <name> --plan`:
+печатает граф этапов (что из чего получает), состояние инструмента каждого
+этапа (`ready`/`blocked`/`not installed`), заданные у этапа опции
+(severity/tags/rate/max) и вердикт «ready to run» или сколько этапов не
+стартует. `--plan` работает и без `--target` (скана нет).
 
 Необязательные зависимости (`check_deps` в `registry.yaml`, сейчас это `nmap`
 для `rustscan`) прогон не останавливают: о них печатается предупреждение с

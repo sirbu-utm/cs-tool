@@ -2367,6 +2367,43 @@ class TestSummaryDetail:
         assert "SQL injection" in text  # the worst finding is named
 
 
+class TestPipelinePlan:
+    """`pipeline --plan` prints the stage graph and pre-flight, and does not scan."""
+
+    def test_plan_lists_the_stages_without_running(self) -> None:
+        res = runner.invoke(app, ["pipeline", "recon-to-vuln", "-t", "example.com", "--plan"])
+
+        assert res.exit_code == 0, res.stdout
+        for stage_tool in ("subfinder", "httpx", "nuclei"):
+            assert stage_tool in res.stdout
+        # it planned, it did not scan: no run summary, no report
+        assert "record(s)" not in res.stdout and "elapsed" not in res.stdout
+
+    def test_plan_needs_no_target(self) -> None:
+        res = runner.invoke(app, ["pipeline", "recon-to-vuln", "--plan"])
+
+        assert res.exit_code == 0, res.stdout
+        assert "nuclei" in res.stdout
+
+    def test_plan_shows_pre_flight_readiness(self) -> None:
+        res = runner.invoke(app, ["pipeline", "recon-to-vuln", "-t", "example.com", "--plan"])
+
+        assert "ready" in res.stdout  # the pre-flight state of each stage's tool
+
+    def test_plan_shows_per_stage_options(self, tmp_path: Path) -> None:
+        TestYamlPipelines._write_pipeline(
+            tmp_path, "tuned", "nodes:\n  - tool: nuclei\n    stage: vulns\n    severity: critical,high\n"
+        )
+
+        res = runner.invoke(app, ["pipeline", "tuned", "--plan"])
+
+        assert res.exit_code == 0, res.stdout
+        assert "critical,high" in res.stdout
+
+    def test_plan_on_an_unknown_pipeline_is_a_usage_error(self) -> None:
+        assert runner.invoke(app, ["pipeline", "nope", "--plan"]).exit_code == 2
+
+
 class TestExportCommand:
     """`cyberfw export <run> --sarif|--csv` converts a saved report.json."""
 

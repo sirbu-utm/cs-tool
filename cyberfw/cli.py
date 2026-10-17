@@ -468,6 +468,53 @@ def _run_info(manager: ToolManager, *, name: str, seed: str | None, session_id: 
     )
 
 
+def _plan_view(
+    manager: ToolManager,
+    name: str,
+    seed: str | None,
+    nodes: list[Node],
+    blocking: list[tuple[str, str, str]],
+    warnings: list[str],
+    tools_dir: Path,
+) -> HudFrame:
+    """A dry-run picture of a pipeline: each stage, what it consumes, the state
+    of its tool and any per-stage options, then the pre-flight verdict."""
+    table = hud_table()
+    table.add_column("#", style="muted", justify="right", no_wrap=True)
+    table.add_column("tool", style="tool", no_wrap=True)
+    table.add_column("stage", no_wrap=True)
+    table.add_column("consumes", style="muted", no_wrap=True)
+    table.add_column("state", no_wrap=True)
+    table.add_column("options", style="muted", overflow="fold", ratio=1)
+    previous: str | None = None
+    for index, node in enumerate(nodes, start=1):
+        consumes = node.input_from or ("seed" if previous is None else previous)
+        opts = []
+        if node.severity:
+            opts.append(f"severity={node.severity}")
+        if node.tags:
+            opts.append(f"tags={node.tags}")
+        if node.rate_limit:
+            opts.append(f"rate={node.rate_limit}")
+        if node.max_records:
+            opts.append(f"max={node.max_records}")
+        state = _tool_state(manager, node.tool, tools_dir)
+        table.add_row(
+            str(index), node.tool, node.stage, consumes, pip_word(state, state_style(state)), "  ".join(opts)
+        )
+        previous = node.stage
+    verdict = (
+        Text(f"{len(blocking)} stage(s) cannot run as-is — --force-start runs the rest", style="warn")
+        if blocking
+        else Text("ready to run", style="ok")
+    )
+    footer = join([Text(f"plan · {seed or '<target>'}", style="muted"), verdict], "   ")
+    panes = [Pane(table, title=f"Plan · {name}", pad=0)]
+    if warnings:
+        panes.append(Pane(Group(*(Text(w, style="warn") for w in warnings)), title="Notes"))
+    return HudFrame(panes, footer=footer)
+
+
 def _preflight(
     manager: ToolManager, nodes: list[Node], tools_dir: Path
 ) -> tuple[list[tuple[str, str, str]], list[str]]:
@@ -2312,6 +2359,10 @@ def pipeline_cmd(
         list[str] | None,
         typer.Option("--exclude", help="Hostname glob to keep out of scope; repeatable. A discovered host matching any is not scanned."),
     ] = None,
+    plan: Annotated[
+        bool,
+        typer.Option("--plan", help="Print the stage graph and pre-flight, then exit without scanning (a dry run)."),
+    ] = False,
     verbose: VerboseOption = False,
 ) -> None:
     """Run a ready-made pipeline and render HTML/JSON reports.
@@ -2327,7 +2378,7 @@ def pipeline_cmd(
     previous scan of the same target (new findings, opened ports, renewed
     certificates...) — --baseline picks another run, --no-baseline skips it.
     """
-    if target is None:
+    if target is None and not plan:
         console.print("[err]Provide a seed target via --target.[/err]")
         raise typer.Exit(2)
     if alert and no_baseline:
@@ -2349,7 +2400,8 @@ def pipeline_cmd(
         settings = settings.model_copy(update=overrides)
     # Resolve the VirusTotal key up front (and prompt if needed) before the live
     # view takes over the terminal — a prompt and a Live render cannot coexist.
-    vt_key = _resolve_vt_key(settings, vt_enrich)
+    # A --plan dry run scans nothing, so it never prompts for a key.
+    vt_key = None if plan else _resolve_vt_key(settings, vt_enrich)
     include_gowitness = _resolve_gowitness(gowitness, manager, settings.tools_dir)
     try:
         nodes = build(
@@ -2371,6 +2423,11 @@ def pipeline_cmd(
     # minutes: report what is unavailable up front instead of spending the
     # time only to say that a stage never ran.
     blocking, dep_warnings = _preflight(manager, nodes, settings.tools_dir)
+    if plan:
+        console.print(_plan_view(manager, name, target, nodes, blocking, dep_warnings, settings.tools_dir))
+        manager.close()
+        return
+    assert target is not None  # a non-plan run required --target above; narrows for the scan path
     for warning in dep_warnings:
         console.print(f"[warn]{warning}[/warn]")
     if blocking and not force_start:
