@@ -53,6 +53,17 @@ class SessionContext:
         for handle in handles.values():
             handle.close()
 
+    def close_stage(self, stage: str) -> None:
+        """Release just one stage's file (idempotent); other stages stay open.
+
+        A pipeline may run several stages at once, each streaming to its own
+        JSONL file, so closing a finished stage must not disturb a sibling's
+        open handle the way :meth:`close` would.
+        """
+        handle = self._handles.pop(self._stage_path(stage), None)
+        if handle is not None:
+            handle.close()
+
     # -- writers --------------------------------------------------------------
     def append(self, stage: str, record: ToolRecord) -> None:
         """Persist one validated record to ``<session_dir>/<stage>.jsonl``."""

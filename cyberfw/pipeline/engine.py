@@ -3,9 +3,12 @@
 A pipeline is an ordered list of :class:`Node` values. Each node runs its tool
 with a :class:`ToolContext` seeded either from the original ``-d`` target or from
 an earlier stage's validated records — the immediately preceding node by
-default, or the node named by ``Node.input_from``. Tools that accept a host
-list run in one process via ``-l``/``-iL``; ``per_target`` tools fan out one
-invocation per input.
+default, or the node named by ``Node.input_from``. That single edge per node
+makes the stages a dependency graph, so nodes with no edge between them (two
+stages reading the same upstream stage) run concurrently; a whole ``concurrency``
+budget of tool processes is shared across every stage in flight. Tools that
+accept a host list run in one process via ``-l``/``-iL``; ``per_target`` tools
+fan out one invocation per input.
 A crashed, non-zero or timed-out child (:class:`ExecutionError`) is recorded on
 the node but never aborts the whole pipeline — the stage keeps whatever records
 it emitted before failing, and the stages that read it are skipped.
@@ -167,6 +170,11 @@ class PipelineEngine:
         self._on_stderr: Any = None
         self._on_stdout_raw: Any = None
         self._on_stage: Callable[[StageEvent], Awaitable[None]] | None = None
+        #: One budget of concurrent tool processes shared by every stage running
+        #: at once (``concurrency``). Built lazily on the running loop, and reset
+        #: at the start of each :meth:`run` / :meth:`run_single` so it never
+        #: carries over to a different event loop.
+        self._proc_sem: asyncio.Semaphore | None = None
 
     # -- public --------------------------------------------------------------
     def set_record_callback(self, callback: Callable[[ToolRecord], Awaitable[None]]) -> None:
@@ -211,62 +219,124 @@ class PipelineEngine:
     async def run(
         self, nodes: list[Node], seed: str | None, *, extra_input: str | None = None
     ) -> PipelineResult:
-        """Run ``nodes`` in order, threading results forward.
+        """Run ``nodes`` as a dependency graph, threading results forward.
 
         Each node consumes the targets of the node named by its ``input_from``,
-        or of the immediately preceding node when unset. ``extra_input`` (e.g.
-        an Ffuf wordlist) is offered to every stage that wants it; stages that
-        don't consume it simply ignore it.
+        or of the immediately preceding node when unset. Nodes with no edge
+        between them — two stages reading the same upstream stage (nmap and
+        httpx both probing naabu's open ports; nuclei, ffuf and gowitness all
+        reading httpx's live hosts) — run concurrently, bounded by
+        ``concurrency`` (a budget shared across every stage running at once).
+        ``extra_input`` (e.g. an Ffuf wordlist) is offered to every stage that
+        wants it; stages that don't consume it simply ignore it. The aggregate
+        keeps the nodes and their records in plan order, so a run reads
+        top-to-bottom and reproduces however the stages happen to interleave.
         """
         self._validate_wiring(nodes)
+        self._proc_sem = None  # a fresh budget, built on this loop at this concurrency
         result = PipelineResult(started_at=datetime.now(timezone.utc))
-        outputs: dict[str, list[str]] = {}  # stage -> targets it produced
-        failed: set[str] = set()  # stages that failed, so their consumers cannot run
-        inputs: list[str] = []
+        # Resolve each stage's single upstream dependency: its ``input_from``,
+        # else the stage immediately before it (the positional default), else
+        # None for a root stage that seeds from the ``-d`` target.
+        deps: dict[str, str | None] = {}
         previous: str | None = None
+        for node in nodes:
+            deps[node.stage] = node.input_from if node.input_from is not None else previous
+            previous = node.stage
+        order = {node.stage: index for index, node in enumerate(nodes)}
+
+        outputs: dict[str, list[str]] = {}  # stage -> in-scope targets it produced
+        failed: set[str] = set()  # failed/skipped stages: their consumers cannot run
+        done: set[str] = set()  # stages already processed (ran or skipped)
+        node_results: dict[str, NodeResult] = {}
+        stage_records: dict[str, list[ToolRecord]] = {}
+        excluded: dict[str, list[str]] = {}  # per-stage out-of-scope hosts
         try:
-            for node in nodes:
-                source = node.input_from if node.input_from is not None else previous
-                if node.input_from is not None:
-                    inputs = outputs[node.input_from]
-                if source in failed:
-                    # Running anyway would fall back to the seed and quietly change
-                    # what this stage means (probe the seed, not what the previous
-                    # stage found), so the failure would look like a thin result.
-                    node_result = NodeResult(
-                        node=node,
-                        ok=False,
-                        skipped=True,
-                        error=f"skipped: stage {source!r} failed, so it produced no targets",
-                    )
-                    await self._emit(
-                        StageEvent(kind="done", stage=node.stage, tool=node.tool, result=node_result)
-                    )
-                    step_records: list[ToolRecord] = []
-                    LOG.warning("stage %s skipped: source stage %s failed", node.stage, source)
-                else:
-                    node_result, step_records = await self._run_node(
-                        node, seed, inputs, extra_input=extra_input
-                    )
-                if not node_result.ok:
-                    failed.add(node.stage)
-                result.nodes.append(node_result)
-                result.records.extend(step_records)
-                # Keep every discovery record, but drop out-of-scope hosts from
-                # what later stages scan (and note them once).
-                inputs = []
-                for target in (r.target for r in step_records):
-                    if in_scope(target, self.settings.exclude):
-                        inputs.append(target)
-                    else:
-                        host = hostname_of(target)
-                        if host not in result.excluded:
-                            result.excluded.append(host)
-                outputs[node.stage] = inputs
-                previous = node.stage
+            remaining = list(nodes)
+            while remaining:
+                ready = [n for n in remaining if deps[n.stage] is None or deps[n.stage] in done]
+                if not ready:  # pragma: no cover - wiring validation makes a stall impossible
+                    raise RuntimeError("pipeline stalled: unresolved stage dependencies")
+                runnable = await self._skip_failed(ready, deps, failed, done, node_results, stage_records)
+                gathered = await asyncio.gather(
+                    *(self._run_in_graph(node, deps, outputs, seed, extra_input) for node in runnable)
+                )
+                # Fold the wave in plan order so the aggregate is deterministic.
+                for node, (node_result, step_records) in sorted(gathered, key=lambda pair: order[pair[0].stage]):
+                    node_results[node.stage] = node_result
+                    stage_records[node.stage] = step_records
+                    if not node_result.ok:
+                        failed.add(node.stage)
+                    in_scope_inputs: list[str] = []
+                    out_of_scope: list[str] = []
+                    for target in (r.target for r in step_records):
+                        if in_scope(target, self.settings.exclude):
+                            in_scope_inputs.append(target)
+                        else:
+                            out_of_scope.append(hostname_of(target))
+                    outputs[node.stage] = in_scope_inputs
+                    excluded[node.stage] = out_of_scope
+                    done.add(node.stage)
+                remaining = [n for n in remaining if n.stage not in done]
         finally:
             result.finished_at = datetime.now(timezone.utc)
+        # Emit nodes, records and excluded hosts in plan order (the latter
+        # deduplicated, keeping the first stage that dropped each host).
+        seen: set[str] = set()
+        for node in nodes:
+            result.nodes.append(node_results[node.stage])
+            result.records.extend(stage_records[node.stage])
+            for host in excluded.get(node.stage, []):
+                if host not in seen:
+                    seen.add(host)
+                    result.excluded.append(host)
         return result
+
+    async def _skip_failed(
+        self,
+        ready: list[Node],
+        deps: dict[str, str | None],
+        failed: set[str],
+        done: set[str],
+        node_results: dict[str, NodeResult],
+        stage_records: dict[str, list[ToolRecord]],
+    ) -> list[Node]:
+        """Record a skipped ``done`` event for each ready node whose source failed,
+        and return the nodes that may actually run."""
+        runnable: list[Node] = []
+        for node in ready:
+            source = deps[node.stage]
+            if source in failed:
+                node_result = NodeResult(
+                    node=node,
+                    ok=False,
+                    skipped=True,
+                    error=f"skipped: stage {source!r} failed, so it produced no targets",
+                )
+                await self._emit(
+                    StageEvent(kind="done", stage=node.stage, tool=node.tool, result=node_result)
+                )
+                node_results[node.stage] = node_result
+                stage_records[node.stage] = []
+                failed.add(node.stage)
+                done.add(node.stage)
+                LOG.warning("stage %s skipped: source stage %s failed", node.stage, source)
+            else:
+                runnable.append(node)
+        return runnable
+
+    async def _run_in_graph(
+        self,
+        node: Node,
+        deps: dict[str, str | None],
+        outputs: dict[str, list[str]],
+        seed: str | None,
+        extra_input: str | None,
+    ) -> tuple[Node, tuple[NodeResult, list[ToolRecord]]]:
+        """Run one node against its upstream stage's in-scope targets (or the seed)."""
+        source = deps[node.stage]
+        inputs = outputs.get(source, []) if source is not None else []
+        return node, await self._run_node(node, seed, inputs, extra_input=extra_input)
 
     async def run_single(
         self, node: Node, ctx: ToolContext, *, parse: bool = True
@@ -276,9 +346,21 @@ class PipelineEngine:
         Same fan-out, list materialisation, timeout and failure handling as a
         pipeline stage; ``ctx.inputs`` plays the role of the previous stage.
         """
+        self._proc_sem = None  # a fresh budget, built on this loop at this concurrency
         return await self._run_node(
             node, ctx.target, ctx.inputs, parse=parse, extra_input=ctx.extra_input
         )
+
+    def _proc_semaphore(self) -> asyncio.Semaphore:
+        """The shared tool-process budget, created lazily on the running loop.
+
+        Sized to ``concurrency`` so the total number of external processes in
+        flight is bounded across every stage running at once — not merely within
+        one fan-out, which is what the setting always promised.
+        """
+        if self._proc_sem is None:
+            self._proc_sem = asyncio.Semaphore(max(1, self.settings.concurrency))
+        return self._proc_sem
 
     @staticmethod
     def _validate_wiring(nodes: list[Node]) -> None:
@@ -348,9 +430,11 @@ class PipelineEngine:
             return NodeResult(node=node, ok=False, count=0, error=f"{type(exc).__name__}: {exc}"), []
         finally:
             # The store keeps this stage's JSONL file open while records stream
-            # in; release it now rather than leaving it to the caller (or GC).
+            # in; release just this stage's file now rather than leaving it to the
+            # caller (or GC). Only this stage's — a sibling stage running
+            # concurrently keeps streaming to its own file.
             if self.context is not None:
-                self.context.close()
+                self.context.close_stage(node.stage_id)
 
         if node.max_records:
             records = records[: node.max_records]
@@ -386,19 +470,20 @@ class PipelineEngine:
         try:
             cmd = adapter.build_cmd(run_ctx)
             await self._emit(StageEvent(kind="start", stage=node.stage, tool=node.tool, done=0, total=1))
-            return await run_stage(
-                cmd,
-                tool=node.tool,
-                stage=node.stage_id,
-                context=self.context,
-                on_record=self._on_record,
-                on_stderr=self._on_stderr,
-                on_stdout_raw=self._on_stdout_raw,
-                parse_line=adapter.parse_line,
-                parse_buffer=adapter.parse_output if adapter.buffered else None,
-                parse=parse,
-                timeout=self.settings.stage_timeout,
-            )
+            async with self._proc_semaphore():
+                return await run_stage(
+                    cmd,
+                    tool=node.tool,
+                    stage=node.stage_id,
+                    context=self.context,
+                    on_record=self._on_record,
+                    on_stderr=self._on_stderr,
+                    on_stdout_raw=self._on_stdout_raw,
+                    parse_line=adapter.parse_line,
+                    parse_buffer=adapter.parse_output if adapter.buffered else None,
+                    parse=parse,
+                    timeout=self.settings.stage_timeout,
+                )
         finally:
             # A session keeps its .input next to the stage's JSONL; without one
             # it is a temp file only this process uses, so it goes with the stage.
@@ -409,7 +494,7 @@ class PipelineEngine:
         self, adapter: BaseTool, ctx: ToolContext, node: Node, *, parse: bool = True
     ) -> list[ToolRecord]:
         targets = ctx.inputs or ([ctx.target] if ctx.target else [])
-        semaphore = asyncio.Semaphore(self.settings.concurrency)
+        semaphore = self._proc_semaphore()
         failures: list[tuple[str, ExecutionError]] = []
         finished = 0
         await self._emit(StageEvent(kind="start", stage=node.stage, tool=node.tool, done=0, total=len(targets)))

@@ -1046,3 +1046,138 @@ class TestFailedSourceIsNotSilentlyReplacedByTheSeed:
         skipped = [e for e in events if e.stage == "live_http"]
         assert [e.kind for e in skipped] == ["done"], "a skipped stage never starts"
         assert skipped[0].result is not None and skipped[0].result.skipped is True
+
+
+class TestParallelStages:
+    """Stages that do not depend on one another run at the same time.
+
+    The dependency graph is ``input_from`` (or, when unset, the immediately
+    preceding stage). Two stages that read the same upstream stage — nmap and
+    httpx both probing naabu's open ports, or nuclei/ffuf/gowitness all reading
+    httpx's live hosts — have no edge between them, so the engine runs them
+    concurrently instead of one after another.
+    """
+
+    _REGISTRY_4 = (
+        "subfinder:\n  repo: org/subfinder\n  asset_patterns: []\n  binary: stub_probe.py\n"
+        "httpx:\n  repo: org/httpx\n  asset_patterns: []\n  binary: stub_probe.py\n"
+        "nuclei:\n  repo: org/nuclei\n  asset_patterns: []\n  binary: stub_probe.py\n"
+        "ffuf:\n  repo: org/ffuf\n  asset_patterns: []\n  binary: stub_probe.py\n"
+    )
+
+    @classmethod
+    def _engine(cls, tmp_path: Path) -> PipelineEngine:
+        registry_path = tmp_path / "registry.yaml"
+        registry_path.write_text(cls._REGISTRY_4, encoding="utf-8")
+        engine = _make_engine(tmp_path, registry_path)
+        engine.build_tool = lambda name: _StubTool(  # type: ignore[method-assign]
+            engine.tool_manager.spec(name), tmp_path / "stub_probe.py"
+        )
+        return engine
+
+    async def test_independent_stages_run_concurrently(self, tmp_path: Path, monkeypatch) -> None:
+        """A diamond — two stages both reading the root — runs those two at once."""
+        engine = self._engine(tmp_path)
+        active = 0
+        peak = 0
+
+        async def fake_run_stage(command, *, tool, stage, **kwargs):
+            nonlocal active, peak
+            active += 1
+            peak = max(peak, active)
+            await asyncio.sleep(0.02)
+            active -= 1
+            return [ToolRecord(tool=tool, target="h", kind="host")]
+
+        monkeypatch.setattr("cyberfw.pipeline.engine.run_stage", fake_run_stage)
+        await engine.run(
+            [
+                Node(tool="subfinder", stage="root"),
+                Node(tool="httpx", stage="a", input_from="root"),
+                Node(tool="nuclei", stage="b", input_from="root"),
+            ],
+            seed="seed.example.com",
+        )
+
+        assert peak == 2, "the two independent stages should overlap"
+
+    async def test_concurrency_setting_caps_stages_running_at_once(self, tmp_path: Path, monkeypatch) -> None:
+        """``concurrency`` is a budget across stages (its docstring), not per stage:
+        with 1, two otherwise-independent stages must serialise."""
+        engine = self._engine(tmp_path)
+        engine.settings.concurrency = 1
+        active = 0
+        peak = 0
+
+        async def fake_run_stage(command, *, tool, stage, **kwargs):
+            nonlocal active, peak
+            active += 1
+            peak = max(peak, active)
+            await asyncio.sleep(0.02)
+            active -= 1
+            return [ToolRecord(tool=tool, target="h", kind="host")]
+
+        monkeypatch.setattr("cyberfw.pipeline.engine.run_stage", fake_run_stage)
+        await engine.run(
+            [
+                Node(tool="subfinder", stage="root"),
+                Node(tool="httpx", stage="a", input_from="root"),
+                Node(tool="nuclei", stage="b", input_from="root"),
+            ],
+            seed="seed.example.com",
+        )
+
+        assert peak == 1, "concurrency=1 must serialise even independent stages"
+
+    async def test_results_stay_in_plan_order_regardless_of_finish_order(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """Stage ``b`` finishes before ``a``, but the report keeps plan order so a
+        run is reproducible and the summary reads top-to-bottom."""
+        engine = self._engine(tmp_path)
+
+        async def fake_run_stage(command, *, tool, stage, **kwargs):
+            await asyncio.sleep(0.03 if stage == "a" else 0.0)
+            return [ToolRecord(tool=tool, target=f"{stage}-host", kind="host")]
+
+        monkeypatch.setattr("cyberfw.pipeline.engine.run_stage", fake_run_stage)
+        result = await engine.run(
+            [
+                Node(tool="subfinder", stage="root"),
+                Node(tool="httpx", stage="a", input_from="root"),
+                Node(tool="nuclei", stage="b", input_from="root"),
+            ],
+            seed="seed.example.com",
+        )
+
+        assert [n.node.stage for n in result.nodes] == ["root", "a", "b"]
+        assert [r.target for r in result.records] == ["root-host", "a-host", "b-host"]
+
+    async def test_a_failed_stage_skips_its_dependents_but_not_its_siblings(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """root → (a, b); c reads a. When a fails, c is skipped but b — which reads
+        root, not a — still runs."""
+        engine = self._engine(tmp_path)
+
+        async def fake_run_stage(command, *, tool, stage, **kwargs):
+            if stage == "a":
+                raise ExecutionError("boom", exit_code=1, stderr_tail=[])
+            return [ToolRecord(tool=tool, target=f"{stage}-host", kind="host")]
+
+        monkeypatch.setattr("cyberfw.pipeline.engine.run_stage", fake_run_stage)
+        result = await engine.run(
+            [
+                Node(tool="subfinder", stage="root"),
+                Node(tool="httpx", stage="a", input_from="root"),
+                Node(tool="nuclei", stage="b", input_from="root"),
+                Node(tool="ffuf", stage="c", input_from="a"),
+            ],
+            seed="seed.example.com",
+        )
+
+        by_stage = {n.node.stage: n for n in result.nodes}
+        assert by_stage["root"].ok is True
+        assert by_stage["a"].ok is False and by_stage["a"].skipped is False
+        assert by_stage["b"].ok is True, "sibling reads root, not the failed stage"
+        assert by_stage["c"].skipped is True, "dependent of the failed stage is skipped"
