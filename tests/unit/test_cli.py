@@ -6,6 +6,7 @@ so the whole code path runs without network and without real precompiled tools.
 
 from __future__ import annotations
 
+import csv
 import io
 import json
 import os
@@ -2257,6 +2258,67 @@ class TestLocalToolInCli:
 
         assert res.exit_code == 2
         assert "nmap" in res.stdout and "not installed" in res.stdout
+
+
+class TestExportCommand:
+    """`cyberfw export <run> --sarif|--csv` converts a saved report.json."""
+
+    @staticmethod
+    def _save_report(tmp_path: Path, session: str = "exp") -> str:
+        payload = {
+            "ok": True,
+            "run": {"cyberfw_version": "9.9.9", "pipeline": "recon-to-vuln", "seed": "example.com"},
+            "stages": [],
+            "total_records": 2,
+            "records": [
+                {
+                    "tool": "nuclei", "kind": "vuln", "target": "https://a.example.com/x",
+                    "template_id": "xss", "matched_at": "https://a.example.com/x",
+                    "info": {"name": "Reflected XSS", "severity": "critical"},
+                },
+                {"tool": "subfinder", "kind": "host", "target": "a.example.com", "host": "a.example.com"},
+            ],
+        }
+        session_dir = tmp_path / "reports" / session
+        session_dir.mkdir(parents=True, exist_ok=True)
+        (session_dir / "report.json").write_text(json.dumps(payload), encoding="utf-8")
+        return session
+
+    def test_sarif_to_stdout_is_valid_json(self, tmp_path: Path) -> None:
+        session = self._save_report(tmp_path)
+
+        res = runner.invoke(app, ["export", session, "--sarif"])
+
+        assert res.exit_code == 0, res.stdout
+        doc = json.loads(res.stdout)  # the whole stdout is the document, nothing else
+        assert doc["version"] == "2.1.0"
+        assert doc["runs"][0]["results"][0]["ruleId"] == "xss"
+
+    def test_csv_to_stdout_parses(self, tmp_path: Path) -> None:
+        session = self._save_report(tmp_path)
+
+        res = runner.invoke(app, ["export", session, "--csv"])
+
+        assert res.exit_code == 0, res.stdout
+        rows = list(csv.DictReader(io.StringIO(res.stdout)))
+        assert len(rows) == 2 and rows[0]["severity"] == "critical"
+
+    def test_output_file_is_written(self, tmp_path: Path) -> None:
+        session = self._save_report(tmp_path)
+        out = tmp_path / "out.sarif"
+
+        res = runner.invoke(app, ["export", session, "--sarif", "-o", str(out)])
+
+        assert res.exit_code == 0, res.stdout
+        assert out.is_file() and json.loads(out.read_text(encoding="utf-8"))["version"] == "2.1.0"
+
+    def test_exactly_one_format_is_required(self, tmp_path: Path) -> None:
+        session = self._save_report(tmp_path)
+        assert runner.invoke(app, ["export", session]).exit_code == 2
+        assert runner.invoke(app, ["export", session, "--sarif", "--csv"]).exit_code == 2
+
+    def test_an_unknown_run_is_a_usage_error(self) -> None:
+        assert runner.invoke(app, ["export", "nope", "--sarif"]).exit_code == 2
 
 
 class TestScanControlsCli:

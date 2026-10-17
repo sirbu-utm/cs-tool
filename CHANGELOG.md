@@ -7,6 +7,13 @@
 ## [Unreleased]
 
 ### Added
+- Экспорт сохранённого прогона: `cyberfw export <run> --sarif | --csv [-o файл]`
+  читает `report.json` (id сессии / каталог / путь) и переводит без повторного
+  скана. `--sarif` — находки (nuclei, gitleaks, posture TLS/почта/takeover) в
+  SARIF 2.1.0 для GitHub code scanning / CI (severity → error/warning/note);
+  `--csv` — все записи таблицей (`tool, kind, severity, target, detail, muted`).
+  По умолчанию stdout, `-o` пишет файл; нужен ровно один формат. Новые модули
+  `cyberfw/report/sarif.py` и `cyberfw/report/csv_report.py`.
 - Контроль скана (всё опционально, по умолчанию выключено — без флагов прогон
   прежний): `--severity` / `--tags` → nuclei `-severity`/`-tags`; `--rate-limit N`
   → предел запросов/сек в собственный флаг инструмента (nuclei/httpx `-rate-limit`,

@@ -79,9 +79,11 @@ from cyberfw.posture import mail as mailcheck
 from cyberfw.posture import takeover as takeovercheck
 from cyberfw.posture import tls as tlscheck
 from cyberfw.report import diff as rundiff
+from cyberfw.report.csv_report import to_csv
 from cyberfw.report.html_report import generate_html_report
 from cyberfw.report.json_report import generate_json_report, report_payload
 from cyberfw.report.run_info import RunInfo
+from cyberfw.report.sarif import to_sarif
 from cyberfw.resources import default_wordlist, packaged_data
 from cyberfw.tools import adapter_class
 from cyberfw.tools.base import ToolContext
@@ -1592,6 +1594,49 @@ def diff_cmd(
         print(json.dumps(changes.as_dict(), ensure_ascii=False, indent=2))
         return
     _print_changes(changes, limit=None)
+
+
+@app.command("export")
+def export_cmd(
+    run: Annotated[
+        str, typer.Argument(help="A saved run: a session id, its directory, or a path to report.json.")
+    ],
+    sarif: Annotated[
+        bool, typer.Option("--sarif", help="Export the findings as SARIF 2.1.0 (for CI / code scanning).")
+    ] = False,
+    csv_out: Annotated[
+        bool, typer.Option("--csv", help="Export every record as CSV (for triage in a spreadsheet).")
+    ] = False,
+    output: Annotated[
+        Path | None, typer.Option("--output", "-o", help="Write to this file instead of stdout.")
+    ] = None,
+) -> None:
+    """Convert a saved run to SARIF (findings) or CSV (every record).
+
+    Reads the run's ``report.json`` (from `pipeline` / `run --save`), so any
+    past run re-exports without re-scanning. By default the document is written
+    to stdout; ``-o`` writes a file.
+    """
+    if sarif == csv_out:  # neither, or both
+        console.print("[err]Choose exactly one format: --sarif or --csv.[/err]")
+        raise typer.Exit(2)
+    settings = load_settings()
+    try:
+        payload = rundiff.load_report(rundiff.resolve_report(run, settings.reports_dir))
+    except (FileNotFoundError, ValueError) as exc:
+        console.print(f"[err]{escape(str(exc))}[/err]")
+        raise typer.Exit(2) from exc
+
+    document = json.dumps(to_sarif(payload), ensure_ascii=False, indent=2) if sarif else to_csv(payload)
+    if output is None:
+        print(document)  # the whole of stdout is the document — nothing themed
+        return
+    try:
+        output.write_text(document if document.endswith("\n") else document + "\n", encoding="utf-8")
+    except OSError as exc:
+        console.print(f"[err]cannot write {output}: {escape(str(exc))}[/err]")
+        raise typer.Exit(1) from exc
+    console.print(f"[ok]Wrote[/ok] {output}")
 
 
 @app.command("mute")

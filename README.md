@@ -321,6 +321,11 @@ cyberfw vt example.com
 # или пути к report.json); --json — для скриптов
 cyberfw diff pipeline-recon-to-vuln-20261005-140200 pipeline-recon-to-vuln-20261012-140200
 
+# Экспорт сохранённого прогона: SARIF (находки — для GitHub code scanning / CI)
+# или CSV (все записи — для триажа в таблице). По умолчанию в stdout, -o пишет файл
+cyberfw export pipeline-recon-to-vuln-20261012-140200 --sarif -o findings.sarif
+cyberfw export pipeline-recon-to-vuln-20261012-140200 --csv > records.csv
+
 # Приглушить находку, чтобы она не всплывала в будущих сканах (см. «Триаж»)
 cyberfw mute tls-cert-self-signed --target "*.dev.example.com" --reason accepted_risk
 cyberfw mutes            # список приглушённых
@@ -669,6 +674,21 @@ ffuf и секреты; находка, попавшая с прошлого р�
 `--baseline <сессия>` сравнивает с конкретным прогоном, `--no-baseline`
 выключает сравнение, а `cyberfw diff <старый> <новый>` сравнивает любые два
 сохранённых прогона.
+
+### Экспорт: SARIF и CSV
+
+`cyberfw export <прогон> --sarif | --csv` переводит сохранённый `report.json`
+(по id сессии, каталогу или пути — как `diff`) в формат для внешних систем, без
+повторного скана:
+
+- **`--sarif`** — находки (nuclei, gitleaks, проверки TLS/почты/takeover) в
+  SARIF 2.1.0, чтобы их подхватил GitHub code scanning или гейт в CI
+  (severity → `error`/`warning`/`note`);
+- **`--csv`** — все записи плоской таблицей (`tool, kind, severity, target,
+  detail, muted`) для триажа в Excel/Sheets.
+
+По умолчанию документ идёт в stdout (удобно пайпить), `-o <файл>` пишет файл.
+Нужен ровно один формат.
 
 ### Мониторинг: расписание и `--alert`
 
