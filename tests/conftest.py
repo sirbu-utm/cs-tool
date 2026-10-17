@@ -58,11 +58,12 @@ def keyboard() -> Callable[..., str]:
     ``keyboard(ask, "nu", "\\t", "\\r")`` runs ``ask()`` with prompt_toolkit
     reading keys from a pipe and sends the batches one after another. Tab
     completion runs as a background task, so an Enter read together with the
-    Tab before it would win the race: each batch goes in only once the previous
-    one has landed (the line, or its list of completions, changed). When
-    ``ask()`` never starts prompt_toolkit (it fell back to plain input), nothing
-    is typed. ``output=`` captures what the question draws; by default it is
-    discarded.
+    Tab before it would win the race. Each non-final batch therefore waits for
+    the line (its text or its list of completions) to change **and then settle**
+    — stop changing for a few polls — before the next batch, so a completion is
+    fully applied before the key that acts on it. When ``ask()`` never starts
+    prompt_toolkit (it fell back to plain input), nothing is typed. ``output=``
+    captures what the question draws; by default it is discarded.
     """
 
     def type_into(ask: Callable[[], str], *batches: str, output: Output | None = None) -> str:
@@ -78,7 +79,26 @@ def keyboard() -> Callable[..., str]:
             def wait_until(landed: Callable[[], bool]) -> None:
                 deadline = time.monotonic() + 5
                 while not landed() and not done.is_set() and time.monotonic() < deadline:
-                    time.sleep(0.002)
+                    time.sleep(0.004)
+
+            def wait_settled(before: object) -> None:
+                """Wait for the line to change from ``before``, then stop changing.
+
+                The change alone can be a half-applied completion (the menu opens
+                a tick before its text lands); requiring several identical polls
+                lets the async completer finish, so the next key acts on the
+                settled line rather than racing it."""
+                wait_until(lambda: line() != before)
+                last = line()
+                stable = 0
+                deadline = time.monotonic() + 5
+                while stable < 4 and not done.is_set() and time.monotonic() < deadline:
+                    time.sleep(0.004)
+                    now = line()
+                    if now == last:
+                        stable += 1
+                    else:
+                        stable, last = 0, now
 
             def feed() -> None:
                 wait_until(lambda: line() is not None)
@@ -88,7 +108,7 @@ def keyboard() -> Callable[..., str]:
                     before = line()
                     pipe.send_text(batch)
                     if index < len(batches) - 1:
-                        wait_until(lambda before=before: line() != before)
+                        wait_settled(before)
 
             feeder = threading.Thread(target=feed, daemon=True)
             feeder.start()
