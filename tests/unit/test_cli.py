@@ -136,7 +136,7 @@ def fake_github(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> object:
     fake = FakeClient()
     monkeypatch.setattr(ToolManager, "client", property(lambda self: fake))
     with (tmp_path / "registry.yaml").open("a", encoding="utf-8") as handle:
-        handle.write("pinme:\n  repo: org/pinme\n  asset_patterns: ['pinme_*']\n  binary: pinme\n  needs_checksum: false\n")
+        handle.write("pinme:\n  repo: org/pinme\n  asset_patterns: ['pinme_*']\n  binary: pinme\n")
     return FakeClient
 
 

@@ -38,7 +38,6 @@ class TestLoadRegistry:
         path.write_text(yaml.dump(data), encoding="utf-8")
         spec = load_registry(path).require("x")
         assert spec.archive == "auto"
-        assert spec.needs_checksum is True
         assert spec.check_deps == []
 
     def test_missing_file_raises(self, tmp_path: Path) -> None:
@@ -136,7 +135,6 @@ class TestVersionPinning:
         spec = load_registry(path).require("x")
         assert spec.version == "latest"
         assert spec.pinned_version is None
-        assert spec.sha256 == {}
 
     def test_pinned_tag_is_kept_and_normalised(self, tmp_path: Path) -> None:
         path = tmp_path / "registry.yaml"
@@ -147,19 +145,20 @@ class TestVersionPinning:
         assert spec.version == "v2.6.6"
         assert spec.pinned_version == "2.6.6"
 
-    def test_registry_checksums_are_a_mapping_of_asset_to_hex(self, tmp_path: Path) -> None:
-        digest = "a" * 64
-        path = tmp_path / "registry.yaml"
-        path.write_text(
-            yaml.dump({"x": {"repo": "o/x", "asset_patterns": [], "sha256": {"x_1.0.0_linux_amd64.zip": digest}}}),
-            encoding="utf-8",
-        )
-        assert load_registry(path).require("x").sha256 == {"x_1.0.0_linux_amd64.zip": digest}
 
-    def test_malformed_registry_checksum_is_rejected(self, tmp_path: Path) -> None:
+class TestLegacyIntegrityKeys:
+    """1.x `sha256:` / `needs_checksum:` moved to tools.lock: still loadable, ignored, flagged."""
+
+    def test_they_load_with_a_warning_pointing_at_tools_lock(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
         path = tmp_path / "registry.yaml"
-        path.write_text(
-            yaml.dump({"x": {"repo": "o/x", "asset_patterns": [], "sha256": {"x.zip": "not-hex"}}}), encoding="utf-8"
-        )
-        with pytest.raises(RegistryError, match="sha256"):
-            load_registry(path)
+        block = {"repo": "o/x", "asset_patterns": [], "needs_checksum": True, "sha256": {"x.zip": "not-hex"}}
+        path.write_text(yaml.dump({"x": block}), encoding="utf-8")
+
+        with caplog.at_level("WARNING", logger="cyberfw.manager"):
+            spec = load_registry(path).require("x")
+
+        assert spec.repo == "o/x"
+        assert not hasattr(spec, "sha256") and not hasattr(spec, "needs_checksum")
+        assert any("tools.lock" in r.getMessage() for r in caplog.records)

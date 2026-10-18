@@ -10,16 +10,15 @@
 #                     приоритетом платформенных (пробуем сначала их).
 #   archive         — zip | tar | auto (auto = по расширению файла)
 #   binary          — имя исполняемого файла внутри архива (иначе угадывается)
-#   version         — тег релиза ("v2.6.6") или latest (по умолчанию). Пин даёт
-#                     воспроизводимую установку: `init` ничего не качает, если
-#                     эта версия уже стоит, и сообщает "up to date".
-#   needs_checksum  — сверять скачанный архив с checksums.txt релиза (когда есть);
-#                     если у релиза нет контрольной суммы для ассета, установка
-#                     проходит с предупреждением "not verified".
-#   sha256          — {имя ассета: hex-дайджест} для релизов без checksums.txt
-#                     (имеет смысл только вместе с version). Несовпадение — ошибка.
+#   version         — тег релиза ("v2.6.6") или latest (по умолчанию). Это
+#                     ограничение для `cyberfw lock`; какая версия реально
+#                     ставится, записано в tools.lock.
 #   check_deps      — внешние зависимости (например, nmap для RustScan)
 #   interactive_input — статические CLI-флаги, которые адаптер вставляет в argv
+#
+# Целостность: точный релиз и SHA-256 ассета для каждой платформы хранит
+# tools.lock рядом с этим файлом (`cyberfw lock`); `cyberfw init` ставит ровно
+# их и отказывается от архива с другим хэшем.
 #
 # ВАЖНО (PlatformDiscovery naming): ProjectDiscovery-инструменты используют
 # "_<os>_<arch>"; gitleaks использует "x64" вместо "amd64"; ffuf/rustscan
@@ -36,7 +35,6 @@ subfinder:
     - "subfinder_*_windows_amd64.zip"
   archive: zip
   binary: subfinder
-  needs_checksum: true
   interactive_input: {}
 
 naabu:
@@ -49,7 +47,6 @@ naabu:
     - "naabu_*_windows_amd64.zip"
   archive: zip
   binary: naabu
-  needs_checksum: true
   interactive_input: {}
 
 httpx:
@@ -62,7 +59,6 @@ httpx:
     - "httpx_*_windows_amd64.zip"
   archive: zip
   binary: httpx
-  needs_checksum: true
   interactive_input: {}
 
 nuclei:
@@ -75,7 +71,6 @@ nuclei:
     - "nuclei_*_windows_amd64.zip"
   archive: zip
   binary: nuclei
-  needs_checksum: true
   interactive_input: {}
 
 ffuf:
@@ -89,7 +84,6 @@ ffuf:
     - "ffuf_*_windows_amd64.zip"
   archive: auto
   binary: ffuf
-  needs_checksum: true
   interactive_input: {}
 
 rustscan:
@@ -104,7 +98,6 @@ rustscan:
     - "*aarch64*windows*rustscan*.zip"
   archive: auto
   binary: rustscan
-  needs_checksum: false
   # RustScan itself only discovers open ports; Nmap does service/version
   # detection and is not run automatically. Missing nmap only produces a
   # warning with install instructions (graceful degradation), never a hard
@@ -125,7 +118,6 @@ gitleaks:
     - "gitleaks_*_windows_x64.zip"
   archive: auto
   binary: gitleaks
-  needs_checksum: true
   interactive_input: {}
 
 gowitness:
@@ -144,7 +136,6 @@ gowitness:
     - "gowitness-*-windows-arm64.exe"
   archive: raw
   binary: gowitness
-  needs_checksum: false
   interactive_input: {}
 nmap:
   # A local tool: nmap is installed by the user (apt/brew/winget), not

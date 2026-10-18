@@ -9,16 +9,21 @@ an entry here (plus, when its JSONL schema is novel, a parser in ``tools/``).
 
 from __future__ import annotations
 
-import re
 from collections.abc import Iterator
 from pathlib import Path
 
 import yaml
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, Field, model_validator
 
 from cyberfw.exceptions import RegistryError
+from cyberfw.logging import get_logger
 
 __all__ = ["ToolSpec", "ToolRegistry", "load_registry"]
+
+LOG = get_logger("manager.registry")
+
+#: 1.x integrity keys that ``tools.lock`` replaced: still accepted, but ignored.
+_LEGACY_KEYS = ("sha256", "needs_checksum")
 
 
 class ToolSpec(BaseModel):
@@ -35,27 +40,15 @@ class ToolSpec(BaseModel):
     #: An explicit binary path for a ``local`` tool; without it the binary is
     #: found on PATH by ``binary`` (or the tool name).
     path: str | None = None
-    #: Release tag to install (``v2.6.6``) or ``latest``. Pin it for reproducible
-    #: installs: a tool that changes its output format under you is otherwise
-    #: only noticed as "N lines did not match the schema".
+    #: Release tag (``v2.6.6``) or ``latest``: the constraint ``cyberfw lock``
+    #: resolves within. The release that actually installs — and its SHA-256 on
+    #: every platform — is recorded in ``tools.lock``.
     version: str = "latest"
-    needs_checksum: bool = True
-    #: ``asset name -> SHA-256`` for releases whose upstream publishes no
-    #: checksums file (only meaningful together with a pinned ``version``).
-    sha256: dict[str, str] = Field(default_factory=dict)
     check_deps: list[str] = Field(default_factory=list)  # e.g. ["nmap"]
     interactive_input: dict[str, str] = Field(
         default_factory=dict,
         description="Static CLI flags injected by the tool adapter (e.g. JSON output).",
     )
-
-    @field_validator("sha256")
-    @classmethod
-    def _hex_digests(cls, value: dict[str, str]) -> dict[str, str]:
-        for asset, digest in value.items():
-            if not re.fullmatch(r"[0-9a-fA-F]{64}", digest):
-                raise ValueError(f"sha256 for {asset!r} must be 64 hex characters")
-        return {asset: digest.lower() for asset, digest in value.items()}
 
     @model_validator(mode="after")
     def _check_source(self) -> ToolSpec:
@@ -130,6 +123,15 @@ def load_registry(path: Path | str) -> ToolRegistry:
     for name, block in payload.items():
         if not isinstance(block, dict):
             raise RegistryError(f"registry entry {name!r} must be a mapping")
+        legacy = [key for key in _LEGACY_KEYS if key in block]
+        if legacy:
+            LOG.warning(
+                "registry entry %s: %s no longer used — integrity now comes from tools.lock "
+                "(run `cyberfw lock`)",
+                name,
+                " and ".join(f"`{key}`" for key in legacy),
+            )
+            block = {key: value for key, value in block.items() if key not in _LEGACY_KEYS}
         try:
             tools[name] = ToolSpec(**block, name=str(name))
         except Exception as exc:  # pydantic.ValidationError → RegistryError
