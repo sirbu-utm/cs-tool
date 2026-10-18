@@ -11,6 +11,7 @@ from __future__ import annotations
 import contextlib
 import fnmatch
 import json
+import re
 import shutil
 import time
 from pathlib import Path
@@ -70,13 +71,32 @@ def _raise_download_error(what: str, exc: BaseException) -> NoReturn:
     raise DownloadError(f"{what}: {exc}") from exc
 
 
+#: A SHA-256 as GitHub prints it after ``sha256:``.
+_SHA256_HEX = re.compile(r"[0-9a-f]{64}")
+
+
+def _sha256_digest(value: object) -> str | None:
+    """``"sha256:<hex>"`` → lowercase ``<hex>``; another algorithm or shape → ``None``."""
+    if not isinstance(value, str):
+        return None
+    algorithm, _, hexdigest = value.partition(":")
+    hexdigest = hexdigest.strip().lower()
+    if algorithm.strip().lower() != "sha256" or not _SHA256_HEX.fullmatch(hexdigest):
+        return None
+    return hexdigest
+
+
 class ReleaseAsset:
     """A single downloadable asset of a GitHub release."""
 
-    def __init__(self, name: str, url: str, size: int) -> None:
+    def __init__(self, name: str, url: str, size: int, digest: str | None = None) -> None:
         self.name = name
         self.url = url
         self.size = size
+        #: Lowercase hex SHA-256 GitHub computed for the upload (the API's
+        #: ``digest: "sha256:<hex>"``); ``None`` for assets uploaded before GitHub
+        #: recorded digests, or when it names another algorithm.
+        self.digest = digest
 
     def __repr__(self) -> str:  # pragma: no cover - debug aid
         return f"ReleaseAsset(name={self.name!r}, size={self.size})"
@@ -174,7 +194,15 @@ class GitHubClient:
             "saved_at": time.time(),
             "tag": release.tag,
             "checksums_url": release.checksums_url,
-            "assets": [{"name": a.name, "url": a.url, "size": a.size} for a in release.assets],
+            "assets": [
+                {
+                    "name": a.name,
+                    "url": a.url,
+                    "size": a.size,
+                    "digest": f"sha256:{a.digest}" if a.digest else None,
+                }
+                for a in release.assets
+            ],
         }
         path.write_text(json.dumps(payload), encoding="utf-8")
 
@@ -192,7 +220,12 @@ class GitHubClient:
                 if not isinstance(url, str) or not url.startswith("http"):
                     continue
                 assets.append(
-                    ReleaseAsset(str(item.get("name", "")), url, int(item.get("size", 0)))
+                    ReleaseAsset(
+                        str(item.get("name", "")),
+                        url,
+                        int(item.get("size", 0)),
+                        _sha256_digest(item.get("digest")),
+                    )
                 )
         return GitHubRelease(tag=tag, assets=assets, checksums_url=checksum_url)
 
@@ -269,6 +302,7 @@ class GitHubClient:
                     name=name,
                     url=url,
                     size=int(asset.get("size", 0)),
+                    digest=_sha256_digest(asset.get("digest")),
                 )
             )
         release = GitHubRelease(tag=tag_name, assets=assets, checksums_url=checksums)

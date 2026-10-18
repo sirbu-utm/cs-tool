@@ -445,3 +445,55 @@ class TestReleaseByTag:
             assert client.release("org", "tool", "v2.6.6").version == "2.6.6"
         finally:
             client.close()
+
+
+class TestAssetDigest:
+    """GitHub reports `digest: "sha256:<hex>"` for assets uploaded since mid-2025."""
+
+    def test_a_sha256_digest_is_parsed_and_anything_else_is_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        client = GitHubClient()
+        payload = {
+            "tag_name": "v1.0.0",
+            "assets": [
+                {"name": "t_linux_amd64.zip", "browser_download_url": "https://example.test/l.zip", "size": 3,
+                 "digest": "sha256:" + "AB" * 32},
+                {"name": "t_darwin_amd64.zip", "browser_download_url": "https://example.test/d.zip", "size": 3,
+                 "digest": None},
+                {"name": "t_windows_amd64.zip", "browser_download_url": "https://example.test/w.zip", "size": 3,
+                 "digest": "md5:" + "0" * 32},
+            ],
+        }
+        monkeypatch.setattr(client._client, "get", lambda url, *, headers: _json_response(url, 200, payload))
+        try:
+            release = client.release("org", "tool", "latest")
+        finally:
+            client.close()
+
+        assert {a.name: a.digest for a in release.assets} == {
+            "t_linux_amd64.zip": "ab" * 32,
+            "t_darwin_amd64.zip": None,
+            "t_windows_amd64.zip": None,
+        }
+
+    def test_the_release_cache_keeps_the_digest(self, tmp_path: Path) -> None:
+        client = GitHubClient(cache_dir=tmp_path)
+        asset = ReleaseAsset("t.zip", "https://example.test/t.zip", 3, digest="cd" * 32)
+        try:
+            client._cache_save("org", "tool", GitHubRelease(tag="v1.0.0", assets=[asset], checksums_url=None))
+            cached = client._cache_may_load("org", "tool")
+        finally:
+            client.close()
+
+        assert cached is not None and cached.assets[0].digest == "cd" * 32
+
+    def test_a_cache_written_before_digests_loads_with_none(self, tmp_path: Path) -> None:
+        client = GitHubClient(cache_dir=tmp_path)
+        try:
+            cached = client._from_cache_dict(
+                {"tag": "v1.0.0", "checksums_url": None,
+                 "assets": [{"name": "t.zip", "url": "https://example.test/t.zip", "size": 1}]}
+            )
+        finally:
+            client.close()
+
+        assert cached.assets[0].digest is None
