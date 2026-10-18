@@ -47,6 +47,7 @@ packages = ["cyberfw"]
 # installed `cyberfw` works from any directory (see cyberfw/resources.py).
 [tool.hatch.build.targets.wheel.force-include]
 "registry.yaml" = "cyberfw/data/registry.yaml"
+"tools.lock" = "cyberfw/data/tools.lock"
 "pipelines" = "cyberfw/data/pipelines"
 "wordlists" = "cyberfw/data/wordlists"
 
