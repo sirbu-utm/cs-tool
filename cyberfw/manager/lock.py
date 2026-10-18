@@ -11,6 +11,8 @@ it pins, so every machine installs byte-identical tools.
 from __future__ import annotations
 
 import contextlib
+import hashlib
+import json
 import os
 import re
 from dataclasses import dataclass
@@ -31,6 +33,7 @@ from cyberfw.manager.verify import checksum_for, sha256_hex
 __all__ = [
     "LOCK_FORMAT",
     "LOCK_NAME",
+    "SELECTION_RULES",
     "ChangeKind",
     "HashSource",
     "LockChange",
@@ -41,8 +44,10 @@ __all__ = [
     "ToolLock",
     "dump_lock",
     "read_lock",
-    "rehashed_platforms",
+    "replaced_files",
+    "reselected_platforms",
     "resolve_tool",
+    "selection_fingerprint",
     "stale_reason",
     "write_lock",
 ]
@@ -53,6 +58,12 @@ LOG = get_logger("manager.lock")
 LOCK_NAME = "tools.lock"
 #: The file-format version this cyberfw writes and reads.
 LOCK_FORMAT = 1
+#: Version of the asset-selection rules (``installer.select_asset``). Bump it
+#: whenever a change to the rules can pick a different file for an existing
+#: tool: entries locked under the old rules then read as stale, so
+#: ``cyberfw lock`` re-resolves them instead of ``--upgrade`` mistaking the new
+#: pick for an upstream change.
+SELECTION_RULES = 1
 
 #: Where a locked hash came from: the GitHub API's asset digest, the release's
 #: own checksums file, or hashing the downloaded asset at lock time.
@@ -100,6 +111,9 @@ class LockedTool(BaseModel):
 
     repo: str
     tag: str
+    #: :func:`selection_fingerprint` of the registry entry the assets were picked
+    #: with; empty for an entry locked before fingerprints (always stale).
+    selection: str = ""
     #: ``Mapping.label`` (``"linux/amd64"``) → that platform's asset.
     assets: dict[str, LockedAsset]
 
@@ -141,6 +155,12 @@ def read_lock(path: Path) -> ToolLock | None:
         return None
     try:
         document = yaml.safe_load(path.read_text(encoding="utf-8"))
+    except UnicodeDecodeError as exc:
+        # Windows PowerShell 5.1 saves UTF-16 with `>` and cp1252 with Set-Content.
+        raise LockError(
+            f"cannot read {path}: it is not UTF-8 ({exc.reason} at byte {exc.start}) — "
+            "save it as UTF-8 or regenerate it with `cyberfw lock`"
+        ) from exc
     except (OSError, yaml.YAMLError) as exc:
         raise LockError(f"cannot read {path}: {exc}") from exc
     if not isinstance(document, dict) or "version" not in document:
@@ -169,6 +189,7 @@ def dump_lock(lock: ToolLock) -> str:
             name: {
                 "repo": tool.repo,
                 "tag": tool.tag,
+                "selection": tool.selection,
                 "assets": {
                     label: {"name": asset.name, "url": asset.url, "sha256": asset.sha256, "source": asset.source}
                     for label, asset in sorted(tool.assets.items(), key=lambda item: _platform_rank(item[0]))
@@ -236,7 +257,23 @@ def resolve_tool(client: ReleaseSource, spec: ToolSpec, *, work_dir: Path) -> Lo
         raise LockError(
             f"{spec.name}: release {release.tag} of {spec.repo} has no asset for any supported platform"
         )
-    return LockedTool(repo=spec.repo, tag=release.tag, assets=assets)
+    return LockedTool(repo=spec.repo, tag=release.tag, selection=selection_fingerprint(spec), assets=assets)
+
+
+def selection_fingerprint(spec: ToolSpec) -> str:
+    """What decides which file each platform gets: the selection rules, the
+    supported platforms and the tool's ``asset_patterns``. Stored with each lock
+    entry; when it no longer matches, the entry is stale and ``cyberfw lock``
+    re-resolves it."""
+    payload = json.dumps(
+        {
+            "rules": SELECTION_RULES,
+            "platforms": [mapping.label for mapping in SUPPORTED_PLATFORMS],
+            "asset_patterns": spec.asset_patterns,
+        },
+        sort_keys=True,
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
 
 
 def _hash_of(
@@ -258,7 +295,11 @@ def _hash_of(
         client.download(asset.url, target, expected_size=asset.size or None)
         return sha256_hex(target), "download"
     finally:
-        target.unlink(missing_ok=True)
+        # Windows Defender may still be scanning the file it just saw arrive; it
+        # lives in a throwaway directory, so failing to delete it must not lose
+        # the hash (or the whole lock run).
+        with contextlib.suppress(OSError):
+            target.unlink(missing_ok=True)
 
 
 def stale_reason(spec: ToolSpec, entry: LockedTool) -> str | None:
@@ -267,6 +308,8 @@ def stale_reason(spec: ToolSpec, entry: LockedTool) -> str | None:
         return f"repo changed (lock: {entry.repo}, registry: {spec.repo})"
     if spec.pinned_version is not None and entry.version != spec.pinned_version:
         return f"registry pins {spec.version}, lock has {entry.tag}"
+    if entry.selection != selection_fingerprint(spec):
+        return "asset selection changed (the registry's asset_patterns or cyberfw's selection rules)"
     return None
 
 
@@ -299,12 +342,19 @@ class LockUpdate:
         return any(change.change == "failed" for change in self.changes)
 
 
-def rehashed_platforms(locked: LockedTool, fresh: LockedTool) -> list[str]:
-    """Platforms locked in both whose asset name or hash differs — under one tag,
-    that means upstream replaced a file it had already published."""
+def replaced_files(locked: LockedTool, fresh: LockedTool) -> list[str]:
+    """Platforms whose locked file is still picked but now has another SHA-256 —
+    under one tag, upstream replaced a file it had already published."""
     return [
         label
         for label, asset in locked.assets.items()
-        if label in fresh.assets
-        and (fresh.assets[label].sha256 != asset.sha256 or fresh.assets[label].name != asset.name)
+        if label in fresh.assets and fresh.assets[label].name == asset.name and fresh.assets[label].sha256 != asset.sha256
+    ]
+
+
+def reselected_platforms(locked: LockedTool, fresh: LockedTool) -> list[str]:
+    """Platforms that now get a different file. Under one tag and unchanged
+    selection rules, that means the release's asset list changed upstream."""
+    return [
+        label for label, asset in locked.assets.items() if label in fresh.assets and fresh.assets[label].name != asset.name
     ]

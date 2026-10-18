@@ -25,7 +25,8 @@ from cyberfw.manager.lock import (
     LockUpdate,
     ToolLock,
     read_lock,
-    rehashed_platforms,
+    replaced_files,
+    reselected_platforms,
     resolve_tool,
     stale_reason,
     write_lock,
@@ -94,7 +95,8 @@ class ToolManager:
         return read_lock(self.lock_path) or ToolLock()
 
     def _resolve(self, spec: ToolSpec) -> LockedTool:
-        with tempfile.TemporaryDirectory(prefix="cyberfw-lock-") as work:
+        # A file Windows Defender is still scanning must not fail the cleanup.
+        with tempfile.TemporaryDirectory(prefix="cyberfw-lock-", ignore_cleanup_errors=True) as work:
             return resolve_tool(self.client, spec, work_dir=Path(work))
 
     def locked(self, name: str) -> LockedTool:
@@ -145,6 +147,19 @@ class ToolManager:
             except CyberfwError as exc:
                 changes.append(LockChange(name, before, None, "failed", error=str(exc)))
                 continue
+            if entry is not None and entry.repo.lower() == fresh.repo.lower() and entry.tag == fresh.tag:
+                # The same release as locked: a file it already published must not
+                # change — and unless our own selection changed (a stale entry),
+                # neither may which file a platform gets.
+                suspicious = replaced_files(entry, fresh) or ([] if stale else reselected_platforms(entry, fresh))
+                if suspicious:
+                    error = (
+                        f"{entry.tag} changed upstream after it was locked ({', '.join(suspicious)}); "
+                        f"kept the locked files — to accept the new ones, remove {name} from "
+                        f"{LOCK_NAME} and run `cyberfw lock {name}`"
+                    )
+                    changes.append(LockChange(name, before, before, "failed", error=error))
+                    continue
             change: ChangeKind
             if entry is None:
                 change = "added"
@@ -152,14 +167,6 @@ class ToolManager:
                 change = "re-resolved"
             elif fresh.tag != entry.tag:
                 change = "upgraded"
-            elif replaced := rehashed_platforms(entry, fresh):
-                error = (
-                    f"{entry.tag} changed upstream after it was locked ({', '.join(replaced)}); "
-                    f"kept the locked files — to accept the new ones, remove {name} from "
-                    f"{LOCK_NAME} and run `cyberfw lock {name}`"
-                )
-                changes.append(LockChange(name, before, before, "failed", error=error))
-                continue
             else:
                 change = "unchanged" if fresh == entry else "updated"
             tools[name] = fresh

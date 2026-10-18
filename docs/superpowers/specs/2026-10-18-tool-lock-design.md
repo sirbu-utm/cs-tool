@@ -33,8 +33,9 @@ and leaves the previous install in place.
   optional `version:` constraint); `tools.lock` is the resolved, verified state,
   written only by cyberfw.
 - **All supported platforms.** One lock covers linux/amd64, linux/arm64,
-  darwin/amd64, darwin/arm64 and windows/amd64, so a lock made on Windows works
-  in WSL and on macOS.
+  darwin/amd64, darwin/arm64, windows/amd64 and windows/arm64 (the README
+  promises x64 and ARM64 on all three OSes), so a lock made on Windows works
+  in WSL and on macOS. (windows/arm64 added after review — see the end.)
 - **Hash source order at lock time:** GitHub API asset `digest` → the release's
   `checksums.txt` → download and hash locally. When both a digest and a
   checksums entry exist they must agree, or locking that tool fails.
@@ -248,3 +249,28 @@ forced include, which would break `uv run` for every earlier task.
 - Re-verifying installed binaries at rest (e.g. in `doctor`).
 - `cyberfw lock --check` for CI.
 - Platforms beyond the five above.
+
+## Changes after the whole-branch review
+
+- **windows/arm64** joins the supported platforms. Where a release has no
+  native build, a platform gets the one it emulates: x64 on Windows on ARM,
+  x86_64 under Rosetta on Apple silicon. Linux never falls back across
+  architectures.
+- **Architecture-aware selection.** `select_asset`'s registry-pattern fallback
+  no longer uses patterns that name another architecture. Before, RustScan
+  (arch-first names, aarch64 listed first) pinned `aarch64-linux-rustscan.zip`
+  for linux/amd64 — a non-runnable binary for every x86_64 Linux / WSL user.
+- **Selection fingerprint.** Each lock entry records `selection:` — a hash of
+  the selection-rules version (`SELECTION_RULES`), the supported platforms and
+  the tool's `asset_patterns`. A mismatch makes the entry stale: plain
+  `cyberfw lock` re-resolves it, `init` asks for `cyberfw lock`. An entry
+  without the field (locked before it existed) is stale.
+- **Same-release check, split.** When a re-resolved entry keeps its repo and
+  tag, a locked file that is still picked must keep its SHA-256 (else
+  "changed upstream", entry kept) — even while the entry is stale. A platform
+  getting a *different* file is refused only when nothing of ours changed
+  (the entry is not stale); after a registry edit or a rules change it is an
+  ordinary re-resolve, not a false tampering alarm.
+- A lock that is not UTF-8 (Windows PowerShell 5.1 writes UTF-16 / cp1252) is a
+  `LockError` naming the file; a just-hashed file that Windows Defender still
+  holds no longer loses the hash or the whole lock run.

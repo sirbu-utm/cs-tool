@@ -201,6 +201,73 @@ class TestSelectAsset:
 
         assert picked is not None and picked.name == "gowitness-3.2.0-linux-arm64"
 
+    #: RustScan 2.4.1's assets in the order GitHub lists them (arch-first names).
+    _RUSTSCAN_2_4_1 = (
+        "aarch64-linux-rustscan.zip",
+        "aarch64-macos-rustscan.tar.gz.zip",
+        "rustscan.deb.zip",
+        "x86-linux-rustscan.zip",
+        "x86-windows-rustscan.exe.zip",
+        "x86_64-linux-rustscan.tar.gz.1.zip",
+        "x86_64-linux-rustscan.tar.gz.zip",
+        "x86_64-macos-rustscan.tar.gz.zip",
+        "x86_64-windows-rustscan.exe.zip",
+    )
+
+    @pytest.mark.parametrize(
+        ("platform", "expected"),
+        [
+            (Mapping("linux", "amd64"), "x86_64-linux-rustscan.tar.gz.1.zip"),
+            (Mapping("linux", "arm64"), "aarch64-linux-rustscan.zip"),
+            (Mapping("darwin", "amd64"), "x86_64-macos-rustscan.tar.gz.zip"),
+            (Mapping("darwin", "arm64"), "aarch64-macos-rustscan.tar.gz.zip"),
+            (Mapping("windows", "amd64"), "x86_64-windows-rustscan.exe.zip"),
+            (Mapping("windows", "arm64"), "x86_64-windows-rustscan.exe.zip"),
+        ],
+        ids=["linux-amd64", "linux-arm64", "darwin-amd64", "darwin-arm64", "windows-amd64", "windows-arm64"],
+    )
+    def test_rustscan_gets_its_own_architecture(self, platform: Mapping, expected: str) -> None:
+        """Real registry.yaml entry and release: RustScan names assets arch-first and lists the
+        aarch64 build first, so an x86_64 Linux host (WSL) must not be handed the aarch64 binary.
+        Windows on ARM, with no native build, gets the x64 one it runs under emulation."""
+        from cyberfw.manager.registry import load_registry
+
+        spec = load_registry(Path(__file__).resolve().parents[2] / "registry.yaml").require("rustscan")
+        assets = [ReleaseAsset(name, f"https://x/{name}", 1) for name in self._RUSTSCAN_2_4_1]
+        release = GitHubRelease(tag="2.4.1", assets=assets, checksums_url=None)
+
+        picked = select_asset(release, spec, platform)
+
+        assert picked is not None and picked.name == expected
+
+    def test_windows_on_arm_without_a_native_build_gets_the_x64_one(self) -> None:
+        """Windows 11 on ARM emulates x64: prefer that build over the bare `*windows*` catch-all,
+        which would take the 32-bit one listed first."""
+        assets = [
+            ReleaseAsset(name, f"https://x/{name}", 1)
+            for name in ("nuclei_3.11.1_windows_386.zip", "nuclei_3.11.1_windows_amd64.zip")
+        ]
+        release = GitHubRelease(tag="v3.11.1", assets=assets, checksums_url=None)
+
+        picked = select_asset(release, _spec(name="nuclei", asset_patterns=["nuclei_*"]), Mapping("windows", "arm64"))
+
+        assert picked is not None and picked.name == "nuclei_3.11.1_windows_amd64.zip"
+
+    def test_apple_silicon_without_a_native_build_gets_the_x86_64_one(self) -> None:
+        """Apple silicon runs x86_64 builds under Rosetta 2."""
+        mac = ReleaseAsset("tool_1.0.0_darwin_amd64.zip", "https://x/mac", 1)
+        release = GitHubRelease(tag="v1.0.0", assets=[mac], checksums_url=None)
+
+        assert select_asset(release, _spec(asset_patterns=[]), Mapping("darwin", "arm64")) is mac
+
+    def test_linux_on_arm_never_falls_back_to_an_x64_build(self) -> None:
+        """Linux has no such emulation: an aarch64 host cannot run an x86_64 binary."""
+        linux = ReleaseAsset("tool_1.0.0_linux_amd64.zip", "https://x/linux", 1)
+        release = GitHubRelease(tag="v1.0.0", assets=[linux], checksums_url=None)
+        spec = _spec(asset_patterns=["tool_*_linux_amd64.zip"])
+
+        assert select_asset(release, spec, Mapping("linux", "arm64")) is None
+
 
 class TestInstall:
     def test_install_extracts_binary(self, tmp_path: Path) -> None:

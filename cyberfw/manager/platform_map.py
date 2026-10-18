@@ -43,14 +43,17 @@ class Mapping:
         return "arm64" if self.arch == "arm64" else self.arch
 
 
-#: The platforms a ``tools.lock`` covers — the OS/arch pairs registry.yaml lists
-#: assets for — in the order the lock file lists them.
+#: The platforms a ``tools.lock`` covers — Windows, Linux and macOS on x64 and
+#: ARM64, as the README promises — in the order the lock file lists them. A
+#: platform with no native build of a tool may still get the one it emulates
+#: (see ``installer.select_asset``).
 SUPPORTED_PLATFORMS: tuple[Mapping, ...] = (
     Mapping("linux", "amd64"),
     Mapping("linux", "arm64"),
     Mapping("darwin", "amd64"),
     Mapping("darwin", "arm64"),
     Mapping("windows", "amd64"),
+    Mapping("windows", "arm64"),
 )
 
 

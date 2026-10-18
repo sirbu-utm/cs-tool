@@ -16,6 +16,7 @@ from cyberfw.manager.lock import (
     dump_lock,
     read_lock,
     resolve_tool,
+    selection_fingerprint,
     stale_reason,
     write_lock,
 )
@@ -135,6 +136,18 @@ class TestLockFile:
         with pytest.raises(LockError, match="tools.lock"):
             read_lock(path)
 
+    @pytest.mark.parametrize("encoding", ["utf-16", "cp1252"])
+    def test_a_lock_saved_in_another_encoding_is_a_lock_error_naming_the_file(
+        self, tmp_path: Path, encoding: str
+    ) -> None:
+        """Windows PowerShell 5.1 writes UTF-16 with `>` and cp1252 with Set-Content (the
+        header's em dashes then are not UTF-8): a clean LockError, not a traceback."""
+        path = tmp_path / "tools.lock"
+        path.write_bytes(dump_lock(_lock()).encode(encoding))
+
+        with pytest.raises(LockError, match="tools.lock"):
+            read_lock(path)
+
     def test_an_unwritable_location_is_a_lock_error_and_keeps_the_old_file(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -227,7 +240,12 @@ class TestResolveTool:
         entry = resolve_tool(client, _spec(), work_dir=tmp_path)
 
         assert entry.repo == "org/t" and entry.tag == "v1.0.0"
-        assert {label: a.name for label, a in entry.assets.items()} == _PLATFORM_NAMES
+        assert entry.selection == selection_fingerprint(_spec())
+        # Windows on ARM has no native build here, so it gets the x64 one (emulated).
+        assert {label: a.name for label, a in entry.assets.items()} == {
+            **_PLATFORM_NAMES,
+            "windows/arm64": _PLATFORM_NAMES["windows/amd64"],
+        }
         assert {a.source for a in entry.assets.values()} == {"digest"}
         linux = entry.assets["linux/amd64"]
         assert linux.sha256 == _sha(_payload(linux.name))
@@ -278,7 +296,26 @@ class TestResolveTool:
 
         entry = resolve_tool(_Releases(_release(names)), _spec(), work_dir=tmp_path)
 
-        assert set(entry.assets) == {"linux/amd64", "windows/amd64"}
+        assert set(entry.assets) == {"linux/amd64", "windows/amd64", "windows/arm64"}
+
+    def test_a_file_the_antivirus_still_holds_keeps_its_hash(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Windows Defender may still be scanning the zip that was just hashed: deleting it then
+        fails with PermissionError, which must not throw away the hash (or the whole lock run)."""
+        client = _Releases(_release(digests=False))
+        real_unlink = Path.unlink
+
+        def held_by_antivirus(self: Path, missing_ok: bool = False) -> None:
+            if self.parent == tmp_path:
+                raise PermissionError(32, "The process cannot access the file because it is being used")
+            real_unlink(self, missing_ok=missing_ok)
+
+        monkeypatch.setattr(Path, "unlink", held_by_antivirus)
+
+        entry = resolve_tool(client, _spec(), work_dir=tmp_path)
+
+        assert {a.source for a in entry.assets.values()} == {"download"}
 
     def test_a_release_with_no_usable_asset_is_a_lock_error(self, tmp_path: Path) -> None:
         with pytest.raises(LockError, match="no asset"):
@@ -311,7 +348,19 @@ class TestResolveTool:
 class TestStaleReason:
     @staticmethod
     def _entry(repo: str = "org/t", tag: str = "v1.0.0") -> LockedTool:
-        return LockedTool(repo=repo, tag=tag, assets={"linux/amd64": _asset("t.zip")})
+        return LockedTool(
+            repo=repo, tag=tag, selection=selection_fingerprint(_spec()), assets={"linux/amd64": _asset("t.zip")}
+        )
+
+    def test_edited_asset_patterns_are_stale(self) -> None:
+        reason = stale_reason(_spec(asset_patterns=["t_*_linux_x64.zip"]), self._entry())
+
+        assert reason is not None and "selection" in reason
+
+    def test_an_entry_locked_before_selection_fingerprints_is_stale(self) -> None:
+        entry = LockedTool(repo="org/t", tag="v1.0.0", assets={"linux/amd64": _asset("t.zip")})
+
+        assert stale_reason(_spec(), entry) is not None
 
     def test_a_latest_tool_is_satisfied_by_any_tag(self) -> None:
         assert stale_reason(_spec(), self._entry(tag="v9.9.9")) is None

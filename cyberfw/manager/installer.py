@@ -52,32 +52,64 @@ _CORRUPT_ARCHIVE_ERRORS: tuple[type[BaseException], ...] = (
 )
 
 
+#: How release asset names spell each 64-bit architecture (``x64`` is gitleaks').
+_ARCH_TOKENS: dict[str, tuple[str, ...]] = {
+    "amd64": ("amd64", "x86_64", "x64"),
+    "arm64": ("arm64", "aarch64"),
+}
+
+#: The architecture a platform can also run when there is no native build:
+#: Windows 11 on ARM emulates x64 and Apple silicon runs x86_64 under Rosetta 2.
+#: Linux has no such fallback — an aarch64 host cannot run an x86_64 binary.
+_EMULATED_ARCH: dict[tuple[str, str], str] = {
+    ("windows", "arm64"): "amd64",
+    ("darwin", "arm64"): "amd64",
+}
+
+
 def _os_patterns(spec: ToolSpec, mapping: Mapping) -> list[str]:
-    """The registry patterns that name ``mapping``'s OS (``macos`` counts as darwin)."""
+    """The registry patterns for ``mapping``'s platform: those naming its OS
+    (``macos`` counts as darwin) and not another architecture."""
     os_tokens = {mapping.os_name}
     if mapping.os_name == "darwin":
         os_tokens.add("macos")
-    return [pattern for pattern in spec.asset_patterns if any(token in pattern.lower() for token in os_tokens)]
+    foreign = [token for arch, tokens in _ARCH_TOKENS.items() if arch != mapping.arch for token in tokens]
+    return [
+        pattern
+        for pattern in spec.asset_patterns
+        if any(token in pattern.lower() for token in os_tokens)
+        and not any(token in pattern.lower() for token in foreign)
+    ]
 
 
-def select_asset(release: GitHubRelease, spec: ToolSpec, mapping: Mapping) -> ReleaseAsset | None:
-    """The asset of ``release`` that ``spec`` installs on ``mapping``'s platform, or ``None``.
-
-    The platform's own spellings come first (without the bare ``*windows*``
-    catch-all), then the registry patterns naming this OS, and only then the
-    catch-all. Registry patterns for *other* OSes are never eligible: a Linux
-    build must never be picked as a fallback on macOS just because it is listed
-    first. Shared by the installer and ``tools.lock`` so they cannot disagree.
-    """
-    platform_patterns = asset_patterns(mapping)
-    exact = [pattern for pattern in platform_patterns if pattern != "*windows*"]
+def _native_asset(release: GitHubRelease, spec: ToolSpec, mapping: Mapping) -> ReleaseAsset | None:
+    """A build for exactly ``mapping``: the platform's own spellings (without the
+    bare ``*windows*`` catch-all), then the registry patterns for that platform."""
+    exact = [pattern for pattern in asset_patterns(mapping) if pattern != "*windows*"]
     asset = release.find_asset(*exact)
     if asset is None:
         os_patterns = _os_patterns(spec, mapping)
         if os_patterns:
             asset = release.find_asset(*os_patterns)
+    return asset
+
+
+def select_asset(release: GitHubRelease, spec: ToolSpec, mapping: Mapping) -> ReleaseAsset | None:
+    """The asset of ``release`` that ``spec`` installs on ``mapping``'s platform, or ``None``.
+
+    A native build first; failing that, the build the platform runs under
+    emulation (x64 on Windows on ARM, x86_64 under Rosetta on Apple silicon);
+    only then the bare ``*windows*`` catch-all. Registry patterns for another
+    OS or another architecture are never eligible: a Linux build must never be
+    picked on macOS, nor an aarch64 binary on an x86_64 host, just because it is
+    listed first. Shared by the installer and ``tools.lock`` so they cannot disagree.
+    """
+    asset = _native_asset(release, spec, mapping)
+    emulated = _EMULATED_ARCH.get((mapping.os_name, mapping.arch))
+    if asset is None and emulated is not None:
+        asset = _native_asset(release, spec, Mapping(mapping.os_name, emulated))
     if asset is None:
-        asset = release.find_asset(*platform_patterns)
+        asset = release.find_asset(*asset_patterns(mapping))
     return asset
 
 

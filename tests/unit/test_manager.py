@@ -21,7 +21,14 @@ from cyberfw.exceptions import (
 )
 from cyberfw.manager import ToolManager
 from cyberfw.manager.github_client import GitHubRelease, ReleaseAsset
-from cyberfw.manager.lock import LockedAsset, LockedTool, ToolLock, read_lock, write_lock
+from cyberfw.manager.lock import (
+    LockedAsset,
+    LockedTool,
+    ToolLock,
+    read_lock,
+    selection_fingerprint,
+    write_lock,
+)
 from cyberfw.manager.platform_map import Mapping
 from cyberfw.manager.registry import load_registry
 
@@ -309,10 +316,23 @@ class TestLockedInstall:
             sha256="a" * 64,
             source="digest",
         )
-        entry = LockedTool(repo="org/subfinder", tag="v1.0.0", assets={"windows/amd64": windows})
+        entry = LockedTool(
+            repo="org/subfinder",
+            tag="v1.0.0",
+            selection=selection_fingerprint(manager.spec("subfinder")),
+            assets={"windows/amd64": windows},
+        )
         write_lock(tmp_path / "tools.lock", ToolLock(tools={"subfinder": entry}))
 
         with pytest.raises(DownloadError, match="no locked asset for linux/amd64"):
+            manager.install("subfinder")
+
+    def test_a_registry_edit_to_asset_patterns_makes_install_ask_for_cyberfw_lock(self, tmp_path: Path) -> None:
+        manager, _ = _manager_with(tmp_path)
+        manager.install("subfinder")
+        _use_registry(manager, tmp_path, _LATEST.replace("['*linux*amd64*']", "['subfinder_*_linux_amd64.zip']"))
+
+        with pytest.raises(LockError, match="run `cyberfw lock`"):
             manager.install("subfinder")
 
     def test_a_hash_mismatch_fails_and_records_no_state(self, tmp_path: Path) -> None:
@@ -383,6 +403,68 @@ class TestUpdateLock:
         assert change.change == "failed" and "changed upstream" in change.error
         assert update.failed and not update.written
         assert (tmp_path / "tools.lock").read_bytes() == before
+
+    @staticmethod
+    def _x64_release(*builds: tuple[str, bytes]) -> GitHubRelease:
+        """gitleaks-style `x64` names: the platform patterns miss them, so the registry decides."""
+        return GitHubRelease(
+            tag="v1.0.0",
+            assets=[
+                ReleaseAsset(name, f"https://example.test/{name}", len(data), hashlib.sha256(data).hexdigest())
+                for name, data in builds
+            ],
+            checksums_url=None,
+        )
+
+    _X64 = "subfinder:\n  repo: org/subfinder\n  asset_patterns: ['subfinder_*_linux_x64.tar.gz']\n  binary: subfinder\n"
+
+    @pytest.mark.parametrize("upgrade", [False, True], ids=["lock", "lock-upgrade"])
+    def test_a_registry_edit_that_picks_another_file_re_resolves(self, tmp_path: Path, upgrade: bool) -> None:
+        """The user's own asset_patterns edit changes which file a platform gets under the same
+        tag: that is a re-resolve, never a "changed upstream" alarm."""
+        manager, client = _manager_with(tmp_path, self._X64)
+        client.current = self._x64_release(
+            ("subfinder_1.0.0_linux_x64.tar.gz", b"tar build"), ("subfinder_1.0.0_linux_x64.zip", b"zip build")
+        )
+        manager.update_lock()
+        _use_registry(manager, tmp_path, self._X64.replace(".tar.gz", ".zip"))
+
+        update = manager.update_lock(upgrade=upgrade)
+
+        [change] = update.changes
+        assert (change.change, change.error) == ("re-resolved", "")
+        lock = read_lock(tmp_path / "tools.lock")
+        assert lock is not None
+        assert lock.tools["subfinder"].assets["linux/amd64"].name == "subfinder_1.0.0_linux_x64.zip"
+
+    def test_a_new_file_under_the_same_tag_is_refused_when_nothing_of_ours_changed(self, tmp_path: Path) -> None:
+        """Same tag, same registry, same rules — yet a platform now gets another file: the release's
+        asset list changed upstream."""
+        registry = self._X64.replace("linux_x64.tar.gz", "linux_x64*")
+        manager, client = _manager_with(tmp_path, registry)
+        client.current = self._x64_release(("subfinder_1.0.0_linux_x64.tar.gz", b"tar build"))
+        manager.update_lock()
+        client.current = self._x64_release(
+            ("subfinder_1.0.0_linux_x64.bin", b"planted"), ("subfinder_1.0.0_linux_x64.tar.gz", b"tar build")
+        )
+
+        update = manager.update_lock(upgrade=True)
+
+        [change] = update.changes
+        assert change.change == "failed" and "changed upstream" in change.error
+
+    def test_a_replaced_file_is_refused_even_while_re_resolving(self, tmp_path: Path) -> None:
+        """An edit that makes the entry stale must not open a window for a replaced same-name file."""
+        manager, client = _manager_with(tmp_path, self._X64)
+        client.current = self._x64_release(("subfinder_1.0.0_linux_x64.tar.gz", b"tar build"))
+        manager.update_lock()
+        _use_registry(manager, tmp_path, self._X64.replace("linux_x64.tar.gz", "linux_x64*"))
+        client.current = self._x64_release(("subfinder_1.0.0_linux_x64.tar.gz", b"replaced upstream"))
+
+        update = manager.update_lock()
+
+        [change] = update.changes
+        assert change.change == "failed" and "changed upstream" in change.error
 
     def test_a_tool_that_fails_to_resolve_is_reported_and_the_rest_written(self, tmp_path: Path) -> None:
         manager, client = _manager_with(tmp_path, _LATEST + _BROKEN)
