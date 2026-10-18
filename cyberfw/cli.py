@@ -64,6 +64,7 @@ from cyberfw.hud import (
 from cyberfw.live_view import PipelineLiveView, TopologyView
 from cyberfw.logging import console, ensure_utf8_stdio, get_logger, setup_logging
 from cyberfw.manager import ToolManager, load_registry
+from cyberfw.manager.lock import LOCK_NAME, LockChange
 from cyberfw.pipeline.context import SessionContext
 from cyberfw.pipeline.engine import (
     Node,
@@ -185,7 +186,8 @@ def _bootstrap(*, verbose: bool = False) -> tuple[Settings, ToolManager]:
         settings = settings.model_copy(update={"log_level": "DEBUG"})
     settings.ensure_dirs()
     setup_logging(level=settings.log_level, log_dir=settings.logs_dir, log_to_file=settings.log_to_file)
-    manager = ToolManager(settings, load_registry(_registry_path()))
+    registry_path = _registry_path()
+    manager = ToolManager(settings, load_registry(registry_path), lock_path=registry_path.with_name(LOCK_NAME))
     return settings, manager
 
 
@@ -1421,7 +1423,7 @@ def init_cmd(
     settings, manager = _bootstrap(verbose=verbose)
     if token:
         settings = settings.model_copy(update={"github_token": token})
-        manager = ToolManager(settings, manager.registry, manager.mapping)
+        manager = ToolManager(settings, manager.registry, manager.mapping, lock_path=manager.lock_path)
 
     requested = tools or manager.registry.names()
     # A local tool (source: local) is the user's to install — never downloaded.
@@ -1431,6 +1433,7 @@ def init_cmd(
             "(apt/brew/winget); skipping.[/muted]"
         )
     targets = [n for n in requested if not manager.spec(n).is_local]
+    lock_existed = manager.lock_path.exists()
     console.print(
         Text.assemble(
             (f"Installing {len(targets)} tool(s) into ", "info"), (str(settings.tools_dir), "tool")
@@ -1470,10 +1473,97 @@ def init_cmd(
     finally:
         manager.close()
 
+    if not lock_existed and manager.lock_path.exists():
+        console.print(
+            f"[info]Created {manager.lock_path.name}[/info] — commit it so every machine "
+            "installs the same, verified tools."
+        )
     if failed:
         console.print(f"[warn]{ok} ready, {failed} failed.[/warn]")
         raise typer.Exit(1)
     console.print(f"[ok]Done: {ok} tool(s) ready.[/ok]")
+
+
+#: How each ``cyberfw lock`` outcome is coloured.
+_LOCK_CHANGE_STYLES = {
+    "added": "ok",
+    "upgraded": "ok",
+    "updated": "info",
+    "re-resolved": "warn",
+    "removed": "muted",
+    "unchanged": "muted",
+    "failed": "err",
+}
+
+
+def _lock_table(changes: list[LockChange]) -> HudFrame:
+    """``cyberfw lock``'s report: a row per tool, before → now, and where its hashes came from."""
+    table = hud_table()
+    table.add_column("tool", style="tool", no_wrap=True)
+    table.add_column("before", style="muted", no_wrap=True)
+    table.add_column("now", no_wrap=True)
+    table.add_column("change", no_wrap=True)
+    table.add_column("hashes", style="muted", overflow="fold", ratio=1)
+    for change in changes:
+        table.add_row(
+            change.tool,
+            change.before or "—",
+            change.after or "—",
+            Text(change.change, style=_LOCK_CHANGE_STYLES[change.change]),
+            Text(change.error, style="err") if change.error else change.sources,
+        )
+    return HudFrame([Pane(table, title=LOCK_NAME, pad=0)])
+
+
+@app.command("lock")
+def lock_cmd(
+    tools: Annotated[
+        list[str] | None, typer.Argument(help="Tool names to lock; omit for every downloadable tool.")
+    ] = None,
+    upgrade: Annotated[
+        bool, typer.Option("--upgrade", help="Also move tools to the newest release registry.yaml allows.")
+    ] = False,
+    token: Annotated[str | None, typer.Option("--token", envvar="CYBERFW_GITHUB_TOKEN",
+                                             help="GitHub token to raise the rate limit.")] = None,
+    verbose: VerboseOption = False,
+) -> None:
+    """Pin tools to exact releases and record each platform's SHA-256 in ``tools.lock``.
+
+    Only what the registry no longer matches changes: missing tools are added,
+    stale entries (a changed ``repo`` / ``version:``) re-resolved and removed
+    tools dropped. ``--upgrade`` also moves tools to their newest allowed
+    release; a release whose files changed under the same tag is refused.
+    ``cyberfw init`` installs exactly what the lock pins — commit it.
+    """
+    settings, manager = _bootstrap(verbose=verbose)
+    if token:
+        settings = settings.model_copy(update={"github_token": token})
+        manager = ToolManager(settings, manager.registry, manager.mapping, lock_path=manager.lock_path)
+    for name in tools or []:
+        if name not in manager.registry:
+            console.print(f"[err]Unknown tool {name!r}.[/err] Known: {', '.join(manager.registry.names())}")
+            manager.close()
+            raise typer.Exit(2)
+        if manager.spec(name).is_local:
+            console.print(f"[muted]{name} is a local tool — nothing to lock; skipping.[/muted]")
+    console.print(Text.assemble(("Locking tools into ", "info"), (str(manager.lock_path), "tool")))
+    try:
+        update = manager.update_lock(tools or None, upgrade=upgrade)
+    except CyberfwError as exc:
+        console.print(f"[err]{exc}[/err]")
+        raise typer.Exit(1) from exc
+    finally:
+        manager.close()
+    if update.changes:
+        console.print(_lock_table(update.changes))
+    if update.written:
+        console.print(
+            f"[ok]Wrote {update.path.name}[/ok] — commit it so every machine installs the same, verified tools."
+        )
+    else:
+        console.print(f"[muted]{update.path.name} unchanged.[/muted]")
+    if update.failed:
+        raise typer.Exit(1)
 
 
 class _RowSink(Protocol):

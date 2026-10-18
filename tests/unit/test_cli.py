@@ -10,6 +10,7 @@ import csv
 import io
 import json
 import os
+import re
 import stat
 from collections.abc import Callable, Iterator
 from datetime import datetime, timedelta, timezone
@@ -2811,3 +2812,76 @@ class TestCleanInterface:
         assert 'if not "%~1"=="" goto run_here' in bat  # commands with arguments stay in place
         sh = (root / "start.sh").read_text(encoding="utf-8")
         assert "cyberfw.cli prepare" in sh and "exec uv run" in sh
+
+
+class TestLockCommand:
+    def test_lock_creates_the_file_and_lists_the_tool(self, fake_github: object) -> None:
+        result = runner.invoke(app, ["lock", "pinme"])
+
+        assert result.exit_code == 0
+        assert (Path.cwd() / "tools.lock").is_file()
+        assert "pinme" in result.stdout and "added" in result.stdout and "v1.2.3" in result.stdout
+
+    def test_a_second_run_reports_unchanged_and_keeps_the_file(self, fake_github: object) -> None:
+        runner.invoke(app, ["lock", "pinme"])
+        before = (Path.cwd() / "tools.lock").read_bytes()
+
+        result = runner.invoke(app, ["lock", "pinme"])
+
+        assert result.exit_code == 0
+        assert "unchanged" in result.stdout
+        assert (Path.cwd() / "tools.lock").read_bytes() == before
+
+    def test_an_unknown_tool_is_a_usage_error(self, fake_github: object) -> None:
+        result = runner.invoke(app, ["lock", "nope"])
+
+        assert result.exit_code == 2
+        assert "Unknown tool" in result.stdout
+
+    def test_the_lock_lives_next_to_the_registry_in_use(
+        self, fake_github: object, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An editable install run from another directory uses the checkout's registry —
+        its lock belongs next to that registry, not in the current directory."""
+        checkout = tmp_path / "checkout"
+        checkout.mkdir()
+        (checkout / "registry.yaml").write_text(
+            (tmp_path / "registry.yaml").read_text(encoding="utf-8"), encoding="utf-8"
+        )
+        monkeypatch.setattr("cyberfw.cli._registry_path", lambda: checkout / "registry.yaml")
+
+        result = runner.invoke(app, ["lock", "pinme", "--token", "t0ken"])
+
+        assert result.exit_code == 0
+        assert (checkout / "tools.lock").is_file()
+        assert not (tmp_path / "tools.lock").exists()
+
+
+class TestInitWithLock:
+    def test_init_without_a_lock_creates_it_and_says_to_commit_it(self, fake_github: object) -> None:
+        result = runner.invoke(app, ["init", "pinme"])
+
+        assert result.exit_code == 0
+        assert (Path.cwd() / "tools.lock").is_file()
+        assert "commit" in result.stdout
+
+    def test_init_with_a_lock_does_not_repeat_the_note(self, fake_github: object) -> None:
+        runner.invoke(app, ["lock", "pinme"])
+
+        result = runner.invoke(app, ["init", "pinme"])
+
+        assert result.exit_code == 0
+        assert "commit" not in result.stdout
+
+    def test_a_download_that_does_not_match_the_lock_is_a_failed_row(self, fake_github: object) -> None:
+        runner.invoke(app, ["lock", "pinme"])
+        lock = Path.cwd() / "tools.lock"
+        lock.write_text(
+            re.sub(r"sha256: [0-9a-f]{64}", "sha256: " + "0" * 64, lock.read_text(encoding="utf-8")),
+            encoding="utf-8",
+        )
+
+        result = runner.invoke(app, ["init", "pinme"])
+
+        assert result.exit_code == 1
+        assert "failed" in result.stdout
