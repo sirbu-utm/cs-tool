@@ -29,7 +29,7 @@ from cyberfw.manager.platform_map import Mapping, asset_patterns
 from cyberfw.manager.registry import ToolSpec
 from cyberfw.manager.verify import sha256_hex, verify_checksum
 
-__all__ = ["InstallResult", "ToolInstaller", "DEFAULT_MAX_ARCHIVE_SIZE"]
+__all__ = ["InstallResult", "ToolInstaller", "DEFAULT_MAX_ARCHIVE_SIZE", "select_asset"]
 
 LOG = get_logger("manager.installer")
 
@@ -45,6 +45,35 @@ _CORRUPT_ARCHIVE_ERRORS: tuple[type[BaseException], ...] = (
     zlib.error,
     EOFError,
 )
+
+
+def _os_patterns(spec: ToolSpec, mapping: Mapping) -> list[str]:
+    """The registry patterns that name ``mapping``'s OS (``macos`` counts as darwin)."""
+    os_tokens = {mapping.os_name}
+    if mapping.os_name == "darwin":
+        os_tokens.add("macos")
+    return [pattern for pattern in spec.asset_patterns if any(token in pattern.lower() for token in os_tokens)]
+
+
+def select_asset(release: GitHubRelease, spec: ToolSpec, mapping: Mapping) -> ReleaseAsset | None:
+    """The asset of ``release`` that ``spec`` installs on ``mapping``'s platform, or ``None``.
+
+    The platform's own spellings come first (without the bare ``*windows*``
+    catch-all), then the registry patterns naming this OS, and only then the
+    catch-all. Registry patterns for *other* OSes are never eligible: a Linux
+    build must never be picked as a fallback on macOS just because it is listed
+    first. Shared by the installer and ``tools.lock`` so they cannot disagree.
+    """
+    platform_patterns = asset_patterns(mapping)
+    exact = [pattern for pattern in platform_patterns if pattern != "*windows*"]
+    asset = release.find_asset(*exact)
+    if asset is None:
+        os_patterns = _os_patterns(spec, mapping)
+        if os_patterns:
+            asset = release.find_asset(*os_patterns)
+    if asset is None:
+        asset = release.find_asset(*platform_patterns)
+    return asset
 
 
 class InstallResult:
@@ -85,38 +114,15 @@ class ToolInstaller:
     def install(self, spec: ToolSpec, release: GitHubRelease | None = None) -> InstallResult:
         if release is None:
             release = self.resolve_release(spec)
-        platform_patterns = asset_patterns(self.mapping)
-        exact_platform_patterns = [pattern for pattern in platform_patterns if pattern != "*windows*"]
-        asset = release.find_asset(*exact_platform_patterns)
-        # Registry patterns cover every OS; only the ones naming *this* OS are
-        # eligible — a Linux/Windows build must never be picked as a fallback
-        # on macOS just because it is listed first.
-        os_tokens = {self.mapping.os_name}
-        if self.mapping.os_name == "darwin":
-            os_tokens.add("macos")
-        os_patterns = [
-            pattern
-            for pattern in spec.asset_patterns
-            if any(token in pattern.lower() for token in os_tokens)
-        ]
-        if asset is None and os_patterns:
-            asset = release.find_asset(*os_patterns)
+        asset = select_asset(release, spec, self.mapping)
         if asset is None:
-            asset = release.find_asset(*platform_patterns)
-        patterns = [*platform_patterns, *os_patterns]
-        if asset is None:
+            patterns = [*asset_patterns(self.mapping), *_os_patterns(spec, self.mapping)]
             raise DownloadError(
                 f"No released asset for {spec.repo} matches OS={self.mapping.os_name}, "
                 f"arch={self.mapping.arch}. Release tag: {release.tag}. "
                 f"Tried patterns: {patterns or '<none>'}."
             )
-        LOG.debug(
-            "%s: selected asset %s for %s (patterns %s)",
-            spec.name,
-            asset.name,
-            self.mapping.label,
-            patterns,
-        )
+        LOG.debug("%s: selected asset %s for %s", spec.name, asset.name, self.mapping.label)
         tool_dir = self.tools_dir / spec.name
         archive_path = self.tools_dir / asset.name
         try:

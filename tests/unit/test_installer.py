@@ -12,7 +12,7 @@ import pytest
 
 from cyberfw.exceptions import ChecksumError, DownloadError, ToolNotFoundError
 from cyberfw.manager.github_client import GitHubRelease, ReleaseAsset
-from cyberfw.manager.installer import ToolInstaller
+from cyberfw.manager.installer import ToolInstaller, select_asset
 from cyberfw.manager.platform_map import Mapping
 from cyberfw.manager.registry import ToolSpec
 from cyberfw.manager.verify import sha256_hex, verify_checksum
@@ -143,38 +143,64 @@ class TestDebugDiagnostics:
         assert "1.0.0" in messages  # the resolved version / install result
 
 
-class TestInstall:
-    def test_platform_asset_precedes_registry_fallback(self, tmp_path: Path) -> None:
-        archive = _zip_bytes({"ffuf/ffuf": b"#!/bin/sh\necho ok\n"})
-        linux = ReleaseAsset("ffuf_2.3.0_linux_amd64.tar.gz", "http://linux", len(archive))
-        windows = ReleaseAsset("ffuf_2.3.0_windows_amd64.zip", "http://windows", len(archive))
+class TestSelectAsset:
+    """Which release asset a platform gets — shared by the installer and tools.lock."""
+
+    def test_platform_asset_precedes_registry_fallback(self) -> None:
+        linux = ReleaseAsset("ffuf_2.3.0_linux_amd64.tar.gz", "https://x/linux", 1)
+        windows = ReleaseAsset("ffuf_2.3.0_windows_amd64.zip", "https://x/windows", 1)
         release = GitHubRelease(tag="v2.3.0", assets=[linux, windows], checksums_url=None)
-        client = _FakeClient(release, archive)
-        spec = _spec(name="ffuf", binary="ffuf", asset_patterns=["*linux*amd64*"], archive="zip")
-        installer = _installer_for_mapping(tmp_path, client, Mapping("windows", "amd64"))
+        spec = _spec(name="ffuf", binary="ffuf", asset_patterns=["*linux*amd64*"])
 
-        installer.install(spec)
+        assert select_asset(release, spec, Mapping("windows", "amd64")) is windows
 
-        assert client.downloaded[0].name == windows.name
-
-    def test_registry_patterns_are_filtered_to_platform(self, tmp_path: Path) -> None:
-        archive = _zip_bytes({"gitleaks/gitleaks": b"#!/bin/sh\necho ok\n"})
-        darwin = ReleaseAsset("gitleaks_8.30.1_darwin_x64.tar.gz", "http://darwin", len(archive))
-        windows = ReleaseAsset("gitleaks_8.30.1_windows_x64.zip", "http://windows", len(archive))
+    def test_registry_patterns_are_filtered_to_platform(self) -> None:
+        darwin = ReleaseAsset("gitleaks_8.30.1_darwin_x64.tar.gz", "https://x/darwin", 1)
+        windows = ReleaseAsset("gitleaks_8.30.1_windows_x64.zip", "https://x/windows", 1)
         release = GitHubRelease(tag="v8.30.1", assets=[darwin, windows], checksums_url=None)
-        client = _FakeClient(release, archive)
         spec = _spec(
-            name="gitleaks",
-            binary="gitleaks",
-            asset_patterns=["*linux*x64*", "*darwin*x64*", "*windows*x64*"],
-            archive="zip",
+            name="gitleaks", binary="gitleaks", asset_patterns=["*linux*x64*", "*darwin*x64*", "*windows*x64*"]
         )
-        installer = _installer_for_mapping(tmp_path, client, Mapping("windows", "amd64"))
 
-        installer.install(spec)
+        assert select_asset(release, spec, Mapping("windows", "amd64")) is windows
 
-        assert client.downloaded[0].name == windows.name
+    def test_no_asset_for_this_os_is_none_never_a_foreign_binary(self) -> None:
+        """Registry patterns for *other* OSes must never be used as a last resort."""
+        linux = ReleaseAsset("x86_64-linux-rustscan.zip", "https://x/linux", 1)
+        windows = ReleaseAsset("x86_64-windows-rustscan.zip", "https://x/windows", 1)
+        release = GitHubRelease(tag="v2.4.1", assets=[linux, windows], checksums_url=None)
+        spec = _spec(
+            name="rustscan",
+            binary="rustscan",
+            asset_patterns=["*x86_64*linux*rustscan*.zip", "*x86_64*windows*rustscan*.zip"],
+        )
 
+        assert select_asset(release, spec, Mapping("darwin", "amd64")) is None
+
+    def test_macos_spelling_counts_as_darwin(self) -> None:
+        """ProjectDiscovery publishes `_macOS_` where the registry says `darwin`."""
+        mac = ReleaseAsset("subfinder_2.17.0_macOS_arm64.zip", "https://x/mac", 1)
+        release = GitHubRelease(tag="v2.17.0", assets=[mac], checksums_url=None)
+
+        assert select_asset(release, _spec(), Mapping("darwin", "arm64")) is mac
+
+    def test_gowitness_gets_the_arm64_binary_on_arm64(self) -> None:
+        """Real registry.yaml entry: aarch64 must get -linux-arm64, not -linux-arm or -linux-amd64."""
+        from cyberfw.manager.registry import load_registry
+
+        spec = load_registry(Path(__file__).resolve().parents[2] / "registry.yaml").require("gowitness")
+        assets = [
+            ReleaseAsset(name, "https://x", 1)
+            for name in ("gowitness-3.2.0-linux-amd64", "gowitness-3.2.0-linux-arm", "gowitness-3.2.0-linux-arm64")
+        ]
+        release = GitHubRelease(tag="v3.2.0", assets=assets, checksums_url=None)
+
+        picked = select_asset(release, spec, Mapping("linux", "arm64"))
+
+        assert picked is not None and picked.name == "gowitness-3.2.0-linux-arm64"
+
+
+class TestInstall:
     def test_no_asset_for_this_os_raises_instead_of_downloading_foreign_binary(self, tmp_path: Path) -> None:
         """Registry patterns for *other* OSes must never be used as a last resort."""
         archive = _zip_bytes({"rustscan": b"#!/bin/sh\necho ok\n"})
@@ -263,32 +289,6 @@ class TestInstall:
 
         assert result.version == "2.5.2"
         assert result.binary.read_bytes() == payload
-
-    def test_gowitness_installs_the_arm64_binary_on_arm64(self, tmp_path: Path) -> None:
-        """On an aarch64 host (e.g. Oracle Cloud's free Ampere VM) gowitness must pick its
-        arm64 build, not -linux-arm or -linux-amd64. Uses the real registry.yaml entry."""
-        from cyberfw.manager.registry import load_registry
-
-        registry = load_registry(Path(__file__).resolve().parents[2] / "registry.yaml")
-        spec = registry.require("gowitness")
-        assert any("arm64" in pattern for pattern in spec.asset_patterns), "registry lists arm64 for gowitness"
-
-        payload = b"#!/bin/sh\narm64 raw"
-        assets = [
-            ReleaseAsset(name, "http://x", len(payload))
-            for name in (
-                "gowitness-3.2.0-linux-amd64",
-                "gowitness-3.2.0-linux-arm",
-                "gowitness-3.2.0-linux-arm64",
-            )
-        ]
-        release = GitHubRelease(tag="v3.2.0", assets=assets, checksums_url=None)
-        client = _FakeClient(release, payload)
-        installer = _installer_for_mapping(tmp_path, client, Mapping("linux", "arm64"))
-
-        installer.install(spec)
-
-        assert client.downloaded[-1].name == "gowitness-3.2.0-linux-arm64"
 
     def test_checksum_mismatch_raises(self, tmp_path: Path) -> None:
         archive = _zip_bytes({"f/f": b"data"})
