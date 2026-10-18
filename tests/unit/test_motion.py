@@ -16,6 +16,8 @@ from cyberfw.pipeline.engine import Node, NodeResult, PipelineResult, StageEvent
 from cyberfw.pipeline.schemas import SubfinderResult
 from cyberfw.ui import PIP, RULE_CHAR, GradientRule, banner
 
+from ._cli import cli
+
 
 def _tty(height: int = 60, width: int = 100) -> tuple[Console, io.StringIO]:
     """A console that believes it is a real terminal (conftest exports TERM=dumb)."""
@@ -316,7 +318,7 @@ class TestAnimatedTopology:
 
 class TestCountingSummary:
     def test_numbers_count_up_to_the_result(self) -> None:
-        from cyberfw.cli import _run_summary
+        _run_summary = cli._run_summary
 
         records = [SubfinderResult(tool="subfinder", target=f"h{i}.example.com", kind="host") for i in range(40)]
         result = PipelineResult(nodes=[NodeResult(node=Node("subfinder", "subs"), count=40)], records=records)
@@ -331,7 +333,7 @@ class TestCountingSummary:
 
 class TestInstallProgress:
     def test_the_table_grows_over_a_progress_line(self) -> None:
-        from cyberfw.cli import _InstallProgress
+        _InstallProgress = cli._InstallProgress
 
         progress = _InstallProgress(4, animate=True, clock=_Clock())
         progress.update("[info]checking[/info] nuclei ...")

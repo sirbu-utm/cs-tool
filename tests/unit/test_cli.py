@@ -22,9 +22,12 @@ from rich.console import Console
 from typer.testing import CliRunner
 
 from cyberfw import completion
-from cyberfw.cli import _prompt_choice, _resolve_vt_key, _tool_menu, app
 from cyberfw.logging import THEME
 from cyberfw.ui import TOOL_GUIDES, banner, tool_guide
+
+from ._cli import cli, patch_cli
+
+_prompt_choice, _resolve_vt_key, _tool_menu, app = cli._prompt_choice, cli._resolve_vt_key, cli._tool_menu, cli.app
 
 runner = CliRunner()
 
@@ -159,7 +162,7 @@ class TestHelpAndUnknown:
             nonlocal opened
             opened = True
 
-        monkeypatch.setattr("cyberfw.cli.interactive_menu", fake_menu)
+        patch_cli(monkeypatch, "interactive_menu", fake_menu)
         result = runner.invoke(app, [])
 
         assert result.exit_code == 0
@@ -291,7 +294,7 @@ class TestBanner:
     ) -> None:
         """One state, one colour: change the map and both views follow."""
         import cyberfw.ui as ui
-        from cyberfw.cli import _inventory_table
+        _inventory_table = cli._inventory_table
         from cyberfw.config import Settings
         from cyberfw.manager import ToolManager, load_registry
 
@@ -403,24 +406,24 @@ class TestPromptChoice:
 
     def test_invalid_input_reprompts_with_hint(self, monkeypatch: pytest.MonkeyPatch) -> None:
         answers = iter(["/settings", "notanumber", "3"])
-        monkeypatch.setattr("cyberfw.cli.Prompt.ask", lambda *_a, **_k: next(answers))
+        monkeypatch.setattr(cli.Prompt, "ask", lambda *_a, **_k: next(answers))
 
         result = _prompt_choice(["a", "b", "c"])
 
         assert result == "3"
 
     def test_valid_choice_returned_immediately(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setattr("cyberfw.cli.Prompt.ask", lambda *_a, **_k: "0")
+        monkeypatch.setattr(cli.Prompt, "ask", lambda *_a, **_k: "0")
 
         assert _prompt_choice(["a", "b"]) == "0"
 
     def test_settings_hotkeys_are_accepted(self, monkeypatch: pytest.MonkeyPatch) -> None:
         for key in ("p", "l", "f", "P", "L", "F"):
-            monkeypatch.setattr("cyberfw.cli.Prompt.ask", lambda *_a, _k=key, **_kw: _k)
+            monkeypatch.setattr(cli.Prompt, "ask", lambda *_a, _k=key, **_kw: _k)
             assert _prompt_choice(["a", "b"]) == key.lower()
 
     def test_help_key_is_accepted(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setattr("cyberfw.cli.Prompt.ask", lambda *_a, **_k: "?")
+        monkeypatch.setattr(cli.Prompt, "ask", lambda *_a, **_k: "?")
 
         assert _prompt_choice(["a", "b"]) == "?"
 
@@ -443,7 +446,7 @@ class TestPromptChoice:
         # exactly as on the key beside it. (A rejected name would be asked
         # again; the "0" behind it ends that loop.)
         answers = iter([typed, "0"])
-        monkeypatch.setattr("cyberfw.cli.Prompt.ask", lambda *_a, **_k: next(answers))
+        monkeypatch.setattr(cli.Prompt, "ask", lambda *_a, **_k: next(answers))
 
         assert _prompt_choice(["subfinder", "nuclei"]) == key
 
@@ -454,7 +457,7 @@ class TestPromptChoice:
             offered.extend(completion.offered())
             return "0"
 
-        monkeypatch.setattr("cyberfw.cli.Prompt.ask", ask)
+        monkeypatch.setattr(cli.Prompt, "ask", ask)
         _prompt_choice(["subfinder", "nuclei"])
 
         assert [option.name for option in offered] == [
@@ -486,28 +489,28 @@ class TestSettingsToggle:
         return Settings(root_dir=tmp_path, **overrides)
 
     def test_p_toggles_parse_off(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        from cyberfw.cli import _toggle_setting
+        _toggle_setting = cli._toggle_setting
 
         monkeypatch.delenv("CYBERFW_PARSE", raising=False)
         _toggle_setting("p", self._settings(tmp_path, parse=True))
         assert os.environ["CYBERFW_PARSE"] == "false"
 
     def test_f_toggles_log_to_file(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        from cyberfw.cli import _toggle_setting
+        _toggle_setting = cli._toggle_setting
 
         monkeypatch.delenv("CYBERFW_LOG_TO_FILE", raising=False)
         _toggle_setting("f", self._settings(tmp_path, log_to_file=True))
         assert os.environ["CYBERFW_LOG_TO_FILE"] == "false"
 
     def test_l_cycles_log_level(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        from cyberfw.cli import _toggle_setting
+        _toggle_setting = cli._toggle_setting
 
         monkeypatch.delenv("CYBERFW_LOG_LEVEL", raising=False)
         _toggle_setting("l", self._settings(tmp_path, log_level="INFO"))
         assert os.environ["CYBERFW_LOG_LEVEL"] == "WARNING"
 
     def test_a_toggles_animations(self, tmp_path: Path) -> None:
-        from cyberfw.cli import _toggle_setting
+        _toggle_setting = cli._toggle_setting
 
         _toggle_setting("a", self._settings(tmp_path, animations=True))
         assert os.environ["CYBERFW_ANIMATIONS"] == "false"
@@ -648,7 +651,7 @@ class TestPipelineCommand:
     def test_pipeline_ffuf_warns_only_when_no_wordlist_and_no_default(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        monkeypatch.setattr("cyberfw.cli.default_wordlist", lambda: None)
+        patch_cli(monkeypatch, "default_wordlist", lambda: None)
 
         result = runner.invoke(
             app, ["pipeline", "recon-to-vuln", "-t", "example.com", "--ffuf", "--no-report"]
@@ -730,16 +733,14 @@ class TestInitCommand:
             called.append(force)
             return 0
 
-        monkeypatch.setattr("cyberfw.cli._provision_chromium", spy)
+        patch_cli(monkeypatch, "_provision_chromium", spy)
         runner.invoke(app, ["init", "gowitness"])
         assert called == [False]
 
     def test_no_chromium_flag_skips_provisioning(self, monkeypatch: pytest.MonkeyPatch) -> None:
         self._register_gowitness_and_stub_install(monkeypatch)
         called: list[bool] = []
-        monkeypatch.setattr(
-            "cyberfw.cli._provision_chromium",
-            lambda *a, **k: called.append(True) or 0,
+        patch_cli(monkeypatch, "_provision_chromium", lambda *a, **k: called.append(True) or 0,
         )
         runner.invoke(app, ["init", "gowitness", "--no-chromium"])
         assert called == []
@@ -749,9 +750,7 @@ class TestInitCommand:
     ) -> None:
         self._register_gowitness_and_stub_install(monkeypatch)
         called: list[bool] = []
-        monkeypatch.setattr(
-            "cyberfw.cli._provision_chromium",
-            lambda *a, **k: called.append(True) or 0,
+        patch_cli(monkeypatch, "_provision_chromium", lambda *a, **k: called.append(True) or 0,
         )
         runner.invoke(app, ["init", "subfinder"])
         assert called == []
@@ -778,7 +777,7 @@ class TestProvisionChromium:
         return manager, settings
 
     def test_present_chrome_skips_download(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-        from cyberfw.cli import _provision_chromium
+        _provision_chromium = cli._provision_chromium
 
         monkeypatch.setattr("cyberfw.tools.gowitness._find_chrome", lambda *_: "/usr/bin/chrome")
         manager, settings = self._manager(monkeypatch, tmp_path)
@@ -790,7 +789,7 @@ class TestProvisionChromium:
         assert called == []  # a present Chrome means no download
 
     def test_downloads_when_absent(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-        from cyberfw.cli import _provision_chromium
+        _provision_chromium = cli._provision_chromium
         from cyberfw.manager.chromium import ChromiumInstallResult
 
         monkeypatch.setattr("cyberfw.tools.gowitness._find_chrome", lambda *_: None)
@@ -810,7 +809,7 @@ class TestProvisionChromium:
     def test_unsupported_platform_is_skipped_not_failed(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
-        from cyberfw.cli import _provision_chromium
+        _provision_chromium = cli._provision_chromium
         from cyberfw.exceptions import ChromiumUnsupportedError
 
         monkeypatch.setattr("cyberfw.tools.gowitness._find_chrome", lambda *_: None)
@@ -827,7 +826,7 @@ class TestProvisionChromium:
     def test_download_failure_counts_as_failure(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
-        from cyberfw.cli import _provision_chromium
+        _provision_chromium = cli._provision_chromium
         from cyberfw.exceptions import DownloadError
 
         monkeypatch.setattr("cyberfw.tools.gowitness._find_chrome", lambda *_: None)
@@ -924,39 +923,39 @@ class TestLauncherScalesWithRegistry:
     NINE = [f"tool{i}" for i in range(1, 10)]
 
     def test_ninth_tool_is_selectable_by_number(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        from cyberfw.cli import _dispatch_choice
+        _dispatch_choice = cli._dispatch_choice
 
         ran: list[str] = []
-        monkeypatch.setattr("cyberfw.cli._interactive_run", ran.append)
-        monkeypatch.setattr("cyberfw.cli._interactive_pipeline", lambda: ran.append("<pipeline>"))
+        patch_cli(monkeypatch, "_interactive_run", ran.append)
+        patch_cli(monkeypatch, "_interactive_pipeline", lambda: ran.append("<pipeline>"))
 
         assert _dispatch_choice("9", self.NINE) is True
         assert ran == ["tool9"]
 
     def test_pipeline_has_its_own_hotkey(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        from cyberfw.cli import _dispatch_choice
+        _dispatch_choice = cli._dispatch_choice
 
         ran: list[str] = []
-        monkeypatch.setattr("cyberfw.cli._interactive_run", ran.append)
-        monkeypatch.setattr("cyberfw.cli._interactive_pipeline", lambda: ran.append("<pipeline>"))
+        patch_cli(monkeypatch, "_interactive_run", ran.append)
+        patch_cli(monkeypatch, "_interactive_pipeline", lambda: ran.append("<pipeline>"))
 
         assert _dispatch_choice("r", self.NINE) is True
         assert ran == ["<pipeline>"]
 
     @pytest.mark.parametrize("key", ["0", "q"])
     def test_exit_keys(self, key: str) -> None:
-        from cyberfw.cli import _dispatch_choice
+        _dispatch_choice = cli._dispatch_choice
 
         assert _dispatch_choice(key, self.NINE) is False
 
     def test_prompt_accepts_pipeline_hotkey(self, monkeypatch: pytest.MonkeyPatch) -> None:
         answers = iter(["r", "0"])
-        monkeypatch.setattr("cyberfw.cli.Prompt.ask", lambda *_a, **_k: next(answers))
+        monkeypatch.setattr(cli.Prompt, "ask", lambda *_a, **_k: next(answers))
 
         assert _prompt_choice(["a", "b"]) == "r"
 
     def test_sidebar_counts_the_registered_tools(self, tmp_path: Path) -> None:
-        from cyberfw.cli import _launcher_view
+        _launcher_view = cli._launcher_view
         from cyberfw.config import Settings
         from cyberfw.manager import ToolManager, load_registry
 
@@ -989,12 +988,12 @@ class TestLauncherPromptsComeFromTheAdapter:
             prompts.append(prompt)
             return next(replies)
 
-        monkeypatch.setattr("cyberfw.cli.Prompt.ask", fake_ask)
-        monkeypatch.setattr("cyberfw.cli.run_cmd", lambda tool, **kw: calls.append((tool, kw)))
+        monkeypatch.setattr(cli.Prompt, "ask", fake_ask)
+        patch_cli(monkeypatch, "run_cmd", lambda tool, **kw: calls.append((tool, kw)))
         return prompts, calls
 
     def test_gitleaks_asks_for_a_repository_path(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        from cyberfw.cli import _interactive_run
+        _interactive_run = cli._interactive_run
 
         prompts, calls = self._capture(monkeypatch, ["C:/repo"])
         _interactive_run("gitleaks")
@@ -1003,7 +1002,7 @@ class TestLauncherPromptsComeFromTheAdapter:
         assert calls == [("gitleaks", {"target": "C:/repo", "wordlist": None})]
 
     def test_ffuf_also_asks_for_its_wordlist(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        from cyberfw.cli import _interactive_run
+        _interactive_run = cli._interactive_run
 
         prompts, calls = self._capture(monkeypatch, ["https://example.com", "words.txt"])
         _interactive_run("ffuf")
@@ -1012,7 +1011,7 @@ class TestLauncherPromptsComeFromTheAdapter:
         assert calls == [("ffuf", {"target": "https://example.com", "wordlist": "words.txt"})]
 
     def test_a_tool_without_extra_input_gets_one_question(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        from cyberfw.cli import _interactive_run
+        _interactive_run = cli._interactive_run
 
         prompts, _calls = self._capture(monkeypatch, ["example.com"])
         _interactive_run("subfinder")
@@ -1021,7 +1020,7 @@ class TestLauncherPromptsComeFromTheAdapter:
 
     def test_a_new_adapter_brings_its_own_prompt(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """No per-tool branch in the CLI: registering an adapter is all a new tool needs."""
-        from cyberfw.cli import _interactive_run
+        _interactive_run = cli._interactive_run
         from cyberfw.tools import ADAPTERS
         from cyberfw.tools.base import BaseTool
 
@@ -1083,7 +1082,7 @@ class TestYamlPipelines:
         assert "input_from" in result.stdout
 
     def test_launcher_offers_yaml_pipelines(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        from cyberfw.cli import _interactive_pipeline
+        _interactive_pipeline = cli._interactive_pipeline
 
         self._write_pipeline(tmp_path, "web-check", "nodes:\n  - tool: httpx\n    stage: live\n")
         seen: dict[str, object] = {}
@@ -1094,9 +1093,9 @@ class TestYamlPipelines:
                 return "web-check"
             return "example.com"
 
-        monkeypatch.setattr("cyberfw.cli.Prompt.ask", fake_ask)
-        monkeypatch.setattr("cyberfw.cli.Confirm.ask", lambda *_a, **_k: pytest.fail("no recon options for a YAML pipeline"))
-        monkeypatch.setattr("cyberfw.cli.pipeline_cmd", lambda name, **kw: seen.update(name=name, **kw))
+        monkeypatch.setattr(cli.Prompt, "ask", fake_ask)
+        monkeypatch.setattr(cli.Confirm, "ask", lambda *_a, **_k: pytest.fail("no recon options for a YAML pipeline"))
+        patch_cli(monkeypatch, "pipeline_cmd", lambda name, **kw: seen.update(name=name, **kw))
         _interactive_pipeline()
 
         assert seen["choices"] == ["recon-to-vuln", "web-check"]
@@ -1106,7 +1105,7 @@ class TestYamlPipelines:
     @staticmethod
     def _offered_pipelines(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, str]]:
         """Run the launcher's pipeline questions; return what Tab offered at "Pipeline"."""
-        from cyberfw.cli import _interactive_pipeline
+        _interactive_pipeline = cli._interactive_pipeline
 
         offered: list[tuple[str, str]] = []
 
@@ -1116,9 +1115,9 @@ class TestYamlPipelines:
                 return "recon-to-vuln"
             return "example.com"
 
-        monkeypatch.setattr("cyberfw.cli.Prompt.ask", fake_ask)
-        monkeypatch.setattr("cyberfw.cli.Confirm.ask", lambda *_a, **_k: False)
-        monkeypatch.setattr("cyberfw.cli.pipeline_cmd", lambda *_a, **_k: None)
+        monkeypatch.setattr(cli.Prompt, "ask", fake_ask)
+        monkeypatch.setattr(cli.Confirm, "ask", lambda *_a, **_k: False)
+        patch_cli(monkeypatch, "pipeline_cmd", lambda *_a, **_k: None)
         _interactive_pipeline()
         return offered
 
@@ -1156,7 +1155,7 @@ class TestTabCompletion:
     def test_tab_picks_another_pipeline_without_typing_its_name(
         self, keyboard: Callable[..., object], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        from cyberfw.cli import _interactive_pipeline
+        _interactive_pipeline = cli._interactive_pipeline
 
         # Two pipelines; the default is the first, ports-to-vuln.
         TestYamlPipelines._write_pipeline(tmp_path, "ports-to-vuln", "nodes:\n  - tool: httpx\n    stage: live\n")
@@ -1165,7 +1164,7 @@ class TestTabCompletion:
         plain = iter(["example.com", "n", "n"])
         monkeypatch.setattr("builtins.input", lambda *_a: next(plain))
         seen: dict[str, object] = {}
-        monkeypatch.setattr("cyberfw.cli.pipeline_cmd", lambda name, **kw: seen.update(name=name, **kw))
+        patch_cli(monkeypatch, "pipeline_cmd", lambda name, **kw: seen.update(name=name, **kw))
 
         keyboard(_interactive_pipeline, "r", "\t", "\r")
 
@@ -1199,9 +1198,9 @@ class TestRegistryLookup:
     def test_candidates_prefer_cwd_then_checkout_root_then_packaged_copy(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        from cyberfw.cli import _registry_candidates
+        _registry_candidates = cli._registry_candidates
 
-        monkeypatch.setattr("cyberfw.cli.packaged_data", lambda *parts: tmp_path / "site" / "registry.yaml")
+        patch_cli(monkeypatch, "packaged_data", lambda *parts: tmp_path / "site" / "registry.yaml")
         candidates = _registry_candidates()
 
         assert candidates[0] == Path.cwd() / "registry.yaml"
@@ -1209,20 +1208,20 @@ class TestRegistryLookup:
         assert candidates[-1] == tmp_path / "site" / "registry.yaml"
 
     def test_first_existing_candidate_wins(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        from cyberfw.cli import _registry_path
+        _registry_path = cli._registry_path
 
         packaged = tmp_path / "site" / "registry.yaml"
         packaged.parent.mkdir()
         packaged.write_text("{}\n", encoding="utf-8")
-        monkeypatch.setattr("cyberfw.cli._registry_candidates", lambda: [tmp_path / "missing.yaml", packaged])
+        patch_cli(monkeypatch, "_registry_candidates", lambda: [tmp_path / "missing.yaml", packaged])
 
         assert _registry_path() == packaged
 
     def test_no_registry_anywhere_is_a_registry_error(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        from cyberfw.cli import _registry_path
+        _registry_path = cli._registry_path
         from cyberfw.exceptions import RegistryError
 
-        monkeypatch.setattr("cyberfw.cli._registry_candidates", lambda: [tmp_path / "missing.yaml"])
+        patch_cli(monkeypatch, "_registry_candidates", lambda: [tmp_path / "missing.yaml"])
 
         with pytest.raises(RegistryError, match="registry.yaml"):
             _registry_path()
@@ -1396,7 +1395,7 @@ class TestHelpCard:
 
     @staticmethod
     def _card(names: list[str] | None = None) -> str:
-        from cyberfw.cli import _help_card
+        _help_card = cli._help_card
 
         output = Console(theme=THEME, record=True, width=100)
         output.print(_help_card(names or ["subfinder", "nuclei"]))
@@ -1444,7 +1443,7 @@ class TestInventoryPresentation:
     def test_a_runnable_binary_without_an_install_record_is_ready_not_blocked(self, tmp_path: Path) -> None:
         """A checkout whose tools_bin was copied from elsewhere has binaries but no
         records; calling those "blocked" would send the user hunting an antivirus."""
-        from cyberfw.cli import _tool_state
+        _tool_state = cli._tool_state
         from cyberfw.config import Settings
         from cyberfw.manager import ToolManager, load_registry
 
@@ -1462,7 +1461,7 @@ class TestInventoryPresentation:
         """_binary_on_disk walks tools_bin with rglob/is_file; a directory that lists
         but cannot be entered raises PermissionError there on Python 3.10-3.13, which
         _tool_state caught only as CyberfwError. It must read as not installed."""
-        from cyberfw.cli import _tool_state
+        _tool_state = cli._tool_state
         from cyberfw.config import Settings
         from cyberfw.manager import ToolManager, load_registry
 
@@ -1484,7 +1483,7 @@ class TestInventoryPresentation:
             manager.close()
 
     def test_launcher_lists_installed_versions(self, tmp_path: Path) -> None:
-        from cyberfw.cli import _launcher_view
+        _launcher_view = cli._launcher_view
         from cyberfw.config import Settings
         from cyberfw.manager import ToolManager, load_registry
         from cyberfw.manager.platform_map import Mapping
@@ -1507,7 +1506,6 @@ class TestInventoryPresentation:
 
     def test_startup_resolves_each_tool_once(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """The banner and the first launcher frame share one inventory pass."""
-        import cyberfw.cli as cli
 
         calls: list[str] = []
         real_state = cli._tool_state
@@ -1516,9 +1514,9 @@ class TestInventoryPresentation:
             calls.append(name)
             return real_state(manager, name, tools_dir)
 
-        monkeypatch.setattr(cli, "_tool_state", counting_state)
-        monkeypatch.setattr(cli, "_ensure_tools", lambda: None)
-        monkeypatch.setattr(cli, "_prompt_choice", lambda names: "0")
+        patch_cli(monkeypatch, "_tool_state", counting_state)
+        patch_cli(monkeypatch, "_ensure_tools", lambda: None)
+        patch_cli(monkeypatch, "_prompt_choice", lambda names: "0")
         cli.interactive_menu()
 
         assert sorted(calls) == sorted(_FAKE_OUTPUT), "one lookup per tool, not two"
@@ -1661,15 +1659,14 @@ class TestSavePrompt:
             asked.append(prompt)
             return reply
 
-        monkeypatch.setattr("cyberfw.cli._is_interactive", lambda: True)
-        monkeypatch.setattr("cyberfw.cli.Confirm.ask", fake_confirm)
+        patch_cli(monkeypatch, "_is_interactive", lambda: True)
+        monkeypatch.setattr(cli.Confirm, "ask", fake_confirm)
         return asked
 
     @staticmethod
     def _never_asks(monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setattr("cyberfw.cli._is_interactive", lambda: True)
-        monkeypatch.setattr(
-            "cyberfw.cli.Confirm.ask", lambda *_a, **_k: pytest.fail("an explicit flag must not be re-asked")
+        patch_cli(monkeypatch, "_is_interactive", lambda: True)
+        monkeypatch.setattr(cli.Confirm, "ask", lambda *_a, **_k: pytest.fail("an explicit flag must not be re-asked")
         )
 
     # -- pipeline ------------------------------------------------------------
@@ -1867,7 +1864,7 @@ class TestPreFlightExternalDependencies:
         with (tmp_path / "registry.yaml").open("a", encoding="utf-8") as handle:
             handle.write("  check_deps: [\"nmap\"]\n")
         self._pipeline_file(tmp_path, "ports", "nodes:\n  - tool: rustscan\n    stage: scan\n")
-        monkeypatch.setattr("cyberfw.cli.shutil.which", lambda _dep: None)
+        monkeypatch.setattr(cli.shutil, "which", lambda _dep: None)
 
         result = runner.invoke(app, ["pipeline", "ports", "-t", "example.com", "--no-report"])
 
@@ -1880,7 +1877,7 @@ class TestPreFlightExternalDependencies:
         stage starts, where the live region would bury it anyway."""
         self._needs_nmap(tmp_path)
         self._pipeline_file(tmp_path, "ports", "nodes:\n  - tool: rustscan\n    stage: scan\n")
-        monkeypatch.setattr("cyberfw.cli.shutil.which", lambda _dep: None)
+        monkeypatch.setattr(cli.shutil, "which", lambda _dep: None)
         monkeypatch.setattr("cyberfw.pipeline.engine.shutil.which", lambda _dep: None)
 
         result = runner.invoke(app, ["pipeline", "ports", "-t", "example.com", "--no-report"])
@@ -1902,7 +1899,7 @@ class TestPreFlightExternalDependencies:
         with (tmp_path / "registry.yaml").open("a", encoding="utf-8") as handle:
             handle.write("  check_deps: [\"nmap\"]\n")
         self._pipeline_file(tmp_path, "ports", "nodes:\n  - tool: rustscan\n    stage: scan\n")
-        monkeypatch.setattr("cyberfw.cli.shutil.which", lambda _dep: "/usr/bin/nmap")
+        monkeypatch.setattr(cli.shutil, "which", lambda _dep: "/usr/bin/nmap")
 
         result = runner.invoke(app, ["pipeline", "ports", "-t", "example.com", "--no-report"])
 
@@ -1920,40 +1917,40 @@ class TestResolveVtKey:
         return SimpleNamespace(vt_api_key=key, vt_prompted=prompted, root_dir=tmp_path)
 
     def test_no_vt_returns_none_without_asking(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setattr("cyberfw.cli.vt.resolve_or_prompt", lambda *a, **k: pytest.fail("prompted under --no-vt"))
+        monkeypatch.setattr(cli.vt, "resolve_or_prompt", lambda *a, **k: pytest.fail("prompted under --no-vt"))
         assert _resolve_vt_key(self._settings(tmp_path), False) is None
 
     def test_configured_key_is_used_silently(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setattr("cyberfw.cli.vt.resolve_api_key", lambda _explicit: "configured")
-        monkeypatch.setattr("cyberfw.cli.vt.resolve_or_prompt", lambda *a, **k: pytest.fail("should not prompt"))
+        monkeypatch.setattr(cli.vt, "resolve_api_key", lambda _explicit: "configured")
+        monkeypatch.setattr(cli.vt, "resolve_or_prompt", lambda *a, **k: pytest.fail("should not prompt"))
         assert _resolve_vt_key(self._settings(tmp_path), None) == "configured"
 
     def test_default_run_asks_once_then_remembers(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         remembered: list[Path] = []
-        monkeypatch.setattr("cyberfw.cli.vt.resolve_api_key", lambda _explicit: None)
-        monkeypatch.setattr("cyberfw.cli._is_interactive", lambda: True)
-        monkeypatch.setattr("cyberfw.cli.vt.resolve_or_prompt", lambda *a, **k: "entered-key")
-        monkeypatch.setattr("cyberfw.cli.vt.remember_prompt", lambda p: remembered.append(p))
+        monkeypatch.setattr(cli.vt, "resolve_api_key", lambda _explicit: None)
+        patch_cli(monkeypatch, "_is_interactive", lambda: True)
+        monkeypatch.setattr(cli.vt, "resolve_or_prompt", lambda *a, **k: "entered-key")
+        monkeypatch.setattr(cli.vt, "remember_prompt", lambda p: remembered.append(p))
         assert _resolve_vt_key(self._settings(tmp_path), None) == "entered-key"
         assert remembered == [tmp_path / ".env"]
 
     def test_default_run_does_not_ask_again_after_prompted(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setattr("cyberfw.cli.vt.resolve_api_key", lambda _explicit: None)
-        monkeypatch.setattr("cyberfw.cli._is_interactive", lambda: True)
-        monkeypatch.setattr("cyberfw.cli.vt.resolve_or_prompt", lambda *a, **k: pytest.fail("asked twice"))
+        monkeypatch.setattr(cli.vt, "resolve_api_key", lambda _explicit: None)
+        patch_cli(monkeypatch, "_is_interactive", lambda: True)
+        monkeypatch.setattr(cli.vt, "resolve_or_prompt", lambda *a, **k: pytest.fail("asked twice"))
         assert _resolve_vt_key(self._settings(tmp_path, prompted=True), None) is None
 
     def test_non_interactive_never_prompts(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setattr("cyberfw.cli.vt.resolve_api_key", lambda _explicit: None)
-        monkeypatch.setattr("cyberfw.cli._is_interactive", lambda: False)
-        monkeypatch.setattr("cyberfw.cli.vt.resolve_or_prompt", lambda *a, **k: pytest.fail("prompted on a pipe"))
+        monkeypatch.setattr(cli.vt, "resolve_api_key", lambda _explicit: None)
+        patch_cli(monkeypatch, "_is_interactive", lambda: False)
+        monkeypatch.setattr(cli.vt, "resolve_or_prompt", lambda *a, **k: pytest.fail("prompted on a pipe"))
         assert _resolve_vt_key(self._settings(tmp_path), None) is None
 
     def test_explicit_vt_forces_the_prompt_even_after_skipping(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setattr("cyberfw.cli.vt.resolve_api_key", lambda _explicit: None)
-        monkeypatch.setattr("cyberfw.cli._is_interactive", lambda: True)
-        monkeypatch.setattr("cyberfw.cli.vt.resolve_or_prompt", lambda *a, **k: "late-key")
-        monkeypatch.setattr("cyberfw.cli.vt.remember_prompt", lambda p: None)
+        monkeypatch.setattr(cli.vt, "resolve_api_key", lambda _explicit: None)
+        patch_cli(monkeypatch, "_is_interactive", lambda: True)
+        monkeypatch.setattr(cli.vt, "resolve_or_prompt", lambda *a, **k: "late-key")
+        monkeypatch.setattr(cli.vt, "remember_prompt", lambda p: None)
         assert _resolve_vt_key(self._settings(tmp_path, prompted=True), True) == "late-key"
 
 
@@ -1998,7 +1995,7 @@ class TestPostureChecks:
             seen.append(domain)
             return mail.assess(domain, mx=[], null_mx=False, spf=[], spf_policy="", dmarc=[], dmarc_domain="")
 
-        monkeypatch.setattr("cyberfw.cli.mailcheck.check", fake_check)
+        monkeypatch.setattr(cli.mailcheck, "check", fake_check)
         result = runner.invoke(
             app, ["pipeline", "recon-to-vuln", "-t", "https://www.example.com/", "--session", "mail"]
         )
@@ -2016,7 +2013,7 @@ class TestPostureChecks:
         async def must_not_run(domain: str) -> object:
             raise AssertionError("--no-mail must not look anything up")
 
-        monkeypatch.setattr("cyberfw.cli.mailcheck.check", must_not_run)
+        monkeypatch.setattr(cli.mailcheck, "check", must_not_run)
         result = runner.invoke(app, ["pipeline", "recon-to-vuln", "-t", "example.com", "--no-report", "--no-mail"])
 
         assert result.exit_code == 0, result.stdout
@@ -2047,7 +2044,7 @@ class TestPostureChecks:
             )
             return [finding], []
 
-        monkeypatch.setattr("cyberfw.cli.takeovercheck.scan", fake_scan)
+        monkeypatch.setattr(cli.takeovercheck, "scan", fake_scan)
         result = runner.invoke(
             app, ["pipeline", "recon-to-vuln", "-t", "example.com", "--session", "to", "--no-mail"]
         )
@@ -2063,7 +2060,7 @@ class TestPostureChecks:
         async def must_not_run(*_a: object, **_k: object) -> object:
             raise AssertionError("--no-takeover must not scan")
 
-        monkeypatch.setattr("cyberfw.cli.takeovercheck.scan", must_not_run)
+        monkeypatch.setattr(cli.takeovercheck, "scan", must_not_run)
         result = runner.invoke(
             app, ["pipeline", "recon-to-vuln", "-t", "example.com", "--no-report", "--no-mail", "--no-takeover"]
         )
@@ -2136,18 +2133,18 @@ class TestAlertExitCode:
     """The exit code ranks a failed run above an alert above a clean run."""
 
     def test_a_failed_run_outranks_an_alert(self) -> None:
-        from cyberfw.cli import _pipeline_exit_code
+        _pipeline_exit_code = cli._pipeline_exit_code
 
         # Even with new findings to alert on, a broken scan is reported as broken.
         assert _pipeline_exit_code(succeeded=False, alert_hits=5) == 1
 
     def test_new_findings_exit_3(self) -> None:
-        from cyberfw.cli import _pipeline_exit_code
+        _pipeline_exit_code = cli._pipeline_exit_code
 
         assert _pipeline_exit_code(succeeded=True, alert_hits=1) == 3
 
     def test_a_clean_run_exits_0(self) -> None:
-        from cyberfw.cli import _pipeline_exit_code
+        _pipeline_exit_code = cli._pipeline_exit_code
 
         assert _pipeline_exit_code(succeeded=True, alert_hits=0) == 0
 
@@ -2289,7 +2286,7 @@ class TestGowitnessDefault:
             return self._installed
 
     def test_an_explicit_flag_is_honoured(self, tmp_path: Path) -> None:
-        from cyberfw.cli import _resolve_gowitness
+        _resolve_gowitness = cli._resolve_gowitness
 
         mgr = self._Mgr(["gowitness"], True)
         assert _resolve_gowitness(True, mgr, tmp_path) is True
@@ -2298,7 +2295,7 @@ class TestGowitnessDefault:
     def test_default_includes_it_only_when_registered_installed_and_chrome_present(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        from cyberfw.cli import _resolve_gowitness
+        _resolve_gowitness = cli._resolve_gowitness
 
         monkeypatch.setattr("cyberfw.tools.gowitness._find_chrome", lambda _d: "/usr/bin/chrome")
         assert _resolve_gowitness(None, self._Mgr(["gowitness"], True), tmp_path) is True
@@ -2331,26 +2328,26 @@ class TestSummaryDetail:
         ]
 
     def test_severity_tally_counts_only_vulns(self) -> None:
-        from cyberfw.cli import _severity_tally
+        _severity_tally = cli._severity_tally
 
         tally = _severity_tally(self._records())
         assert tally["critical"] == 1 and tally["high"] == 1 and tally["info"] == 1
         assert tally["medium"] == 0 and tally["low"] == 0
 
     def test_asset_counts_are_by_kind(self) -> None:
-        from cyberfw.cli import _asset_counts
+        _asset_counts = cli._asset_counts
 
         assert _asset_counts(self._records()) == {"hosts": 2, "ports": 1}
 
     def test_fix_first_lists_the_worst_findings_first(self) -> None:
-        from cyberfw.cli import _fix_first
+        _fix_first = cli._fix_first
 
         worst = _fix_first(self._records())
         # critical before high; the info-level finding is not "fix first"
         assert [getattr(r, "name", "") for r in worst] == ["SQL injection", "XSS"]
 
     def test_fix_first_skips_a_muted_finding(self) -> None:
-        from cyberfw.cli import _fix_first
+        _fix_first = cli._fix_first
         from cyberfw.pipeline.schemas import NucleiResult
 
         records = [
@@ -2360,7 +2357,7 @@ class TestSummaryDetail:
         assert _fix_first(records) == []
 
     def test_summary_shows_the_breakdown(self) -> None:
-        from cyberfw.cli import _run_summary
+        _run_summary = cli._run_summary
         from cyberfw.pipeline.engine import Node, NodeResult, PipelineResult
 
         result = PipelineResult(
@@ -2478,7 +2475,7 @@ class TestScanControlsCli:
     """`--severity/--tags/--rate-limit/--exclude` override the settings for one run."""
 
     def test_overrides_picks_only_the_flags_that_were_set(self) -> None:
-        from cyberfw.cli import _scan_control_overrides
+        _scan_control_overrides = cli._scan_control_overrides
 
         assert _scan_control_overrides(severity="", tags="", rate_limit=None, exclude=[]) == {}
         assert _scan_control_overrides(severity="high", tags="", rate_limit=None, exclude=[]) == {"severity": "high"}
@@ -2510,8 +2507,8 @@ class TestScheduleCommand:
 
     @staticmethod
     def _posix(monkeypatch: pytest.MonkeyPatch, *, yes: bool = True) -> None:
-        monkeypatch.setattr("cyberfw.cli._is_posix", lambda: yes)
-        monkeypatch.setattr("cyberfw.cli._schedule_program", lambda: ["cyberfw"])
+        patch_cli(monkeypatch, "_is_posix", lambda: yes)
+        patch_cli(monkeypatch, "_schedule_program", lambda: ["cyberfw"])
 
     def test_prints_a_cron_line_by_default_on_posix(self, monkeypatch: pytest.MonkeyPatch) -> None:
         self._posix(monkeypatch)
@@ -2526,8 +2523,8 @@ class TestScheduleCommand:
         assert installed == []  # printed only — nothing touched
 
     def test_prints_a_schtasks_command_on_windows(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setattr("cyberfw.cli._is_posix", lambda: False)
-        monkeypatch.setattr("cyberfw.cli._schedule_program", lambda: ["cyberfw"])
+        patch_cli(monkeypatch, "_is_posix", lambda: False)
+        patch_cli(monkeypatch, "_schedule_program", lambda: ["cyberfw"])
 
         res = runner.invoke(app, ["schedule", "recon-to-vuln", "-t", "example.com"])
 
@@ -2587,7 +2584,7 @@ class TestScheduleCommand:
         assert "*/5 * * * *" in res.stdout
 
     def test_a_raw_cron_on_windows_is_a_usage_error(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setattr("cyberfw.cli._is_posix", lambda: False)
+        patch_cli(monkeypatch, "_is_posix", lambda: False)
 
         res = runner.invoke(app, ["schedule", "recon-to-vuln", "-t", "example.com", "--cron", "*/5 * * * *"])
 
@@ -2604,9 +2601,9 @@ class TestScheduleCommand:
     def test_the_fallback_program_starts_the_cli(self, monkeypatch: pytest.MonkeyPatch) -> None:
         # Without `cyberfw` on PATH the entry runs this interpreter with
         # `-m cyberfw`; if that cannot start the CLI, every such scheduled scan fails.
-        from cyberfw.cli import _schedule_program
+        _schedule_program = cli._schedule_program
 
-        monkeypatch.setattr("cyberfw.cli.shutil.which", lambda _name: None)
+        monkeypatch.setattr(cli.shutil, "which", lambda _name: None)
         run = subprocess.run(
             [*_schedule_program(), "--help"],
             capture_output=True,
@@ -2683,7 +2680,6 @@ class TestCleanInterface:
     def _screen(monkeypatch: pytest.MonkeyPatch, *, interactive: bool = True,
                 inputs: list[object] | None = None) -> list[str]:
         """Record what the console is asked to do; ``inputs`` feed ``console.input``."""
-        import cyberfw.cli as cli
 
         calls: list[str] = []
         queue = list(inputs or [])
@@ -2695,7 +2691,7 @@ class TestCleanInterface:
                 raise item
             return str(item)
 
-        monkeypatch.setattr(cli, "_is_interactive", lambda: interactive)
+        patch_cli(monkeypatch, "_is_interactive", lambda: interactive)
         monkeypatch.setattr(cli.console, "clear", lambda *a, **k: calls.append("clear"))
         monkeypatch.setattr(cli.console, "set_window_title", lambda title: calls.append(f"title:{title}"))
         monkeypatch.setattr(cli.console, "input", fake_input)
@@ -2703,20 +2699,20 @@ class TestCleanInterface:
 
     def test_prepare_installs_missing_tools_and_exits(self, monkeypatch: pytest.MonkeyPatch) -> None:
         ran: list[bool] = []
-        monkeypatch.setattr("cyberfw.cli._ensure_tools", lambda: ran.append(True))
+        patch_cli(monkeypatch, "_ensure_tools", lambda: ran.append(True))
         result = runner.invoke(app, ["prepare"])
         assert result.exit_code == 0 and ran == [True]
         assert "prepare" not in runner.invoke(app, ["--help"]).stdout  # a launcher detail, not a command to advertise
 
     def test_the_interface_starts_on_a_clean_titled_screen(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        from cyberfw.cli import _fresh_screen
+        _fresh_screen = cli._fresh_screen
 
         calls = self._screen(monkeypatch)
         _fresh_screen()
         assert calls == ["title:CS-TOOL", "clear"]
 
     def test_a_pipe_or_a_log_keeps_its_plain_transcript(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        from cyberfw.cli import _back_to_launcher, _fresh_screen
+        _back_to_launcher, _fresh_screen = cli._back_to_launcher, cli._fresh_screen
 
         calls = self._screen(monkeypatch, interactive=False)
         _fresh_screen()
@@ -2726,7 +2722,7 @@ class TestCleanInterface:
     def test_back_to_the_launcher_waits_after_an_action_but_not_after_a_toggle(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        from cyberfw.cli import _back_to_launcher
+        _back_to_launcher = cli._back_to_launcher
 
         calls = self._screen(monkeypatch)
         assert _back_to_launcher(review=True) is True
@@ -2736,7 +2732,7 @@ class TestCleanInterface:
         assert calls == ["clear"]  # a settings toggle redraws at once
 
     def test_leaving_at_the_pause_says_goodbye(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        from cyberfw.cli import _back_to_launcher
+        _back_to_launcher = cli._back_to_launcher
 
         self._screen(monkeypatch, inputs=[KeyboardInterrupt()])
         assert _back_to_launcher(review=True) is False
@@ -2744,19 +2740,16 @@ class TestCleanInterface:
     @staticmethod
     def _terminal_console(monkeypatch: pytest.MonkeyPatch) -> io.StringIO:
         """Point the module console at a StringIO that records a terminal's control codes."""
-        import cyberfw.cli as cli
 
         screen = io.StringIO()
         # _environ={} so the suite's TERM=dumb does not make Rich suppress control codes.
-        monkeypatch.setattr(
-            cli, "console", Console(file=screen, force_terminal=True, force_interactive=True, _environ={})
+        patch_cli(monkeypatch, "console", Console(file=screen, force_terminal=True, force_interactive=True, _environ={})
         )
         return screen
 
     def test_clearing_the_screen_also_wipes_the_scrollback(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Returning to the menu must leave nothing to scroll back to: the visible
         screen (CSI 2J) and the scrollback (CSI 3J) both go."""
-        import cyberfw.cli as cli
 
         screen = self._terminal_console(monkeypatch)
         cli._clear_screen()
@@ -2764,7 +2757,6 @@ class TestCleanInterface:
         assert "\x1b[2J" in out and "\x1b[3J" in out
 
     def test_returning_to_the_launcher_wipes_the_scrollback(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        import cyberfw.cli as cli
 
         screen = self._terminal_console(monkeypatch)
         assert cli._back_to_launcher(review=False) is True
@@ -2772,36 +2764,33 @@ class TestCleanInterface:
 
     def test_a_pipe_never_wipes_the_scrollback(self, monkeypatch: pytest.MonkeyPatch) -> None:
         # Redirected output keeps its full transcript — no screen or scrollback control codes.
-        import cyberfw.cli as cli
 
         screen = io.StringIO()
-        monkeypatch.setattr(cli, "console", Console(file=screen, force_interactive=False))
+        patch_cli(monkeypatch, "console", Console(file=screen, force_interactive=False))
         assert cli._back_to_launcher(review=True) is True
         assert screen.getvalue() == ""
 
     def test_the_menu_pauses_then_redraws_cleanly_between_actions(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        import cyberfw.cli as cli
 
         calls = self._screen(monkeypatch)
         choices = iter(["1", "0"])
-        monkeypatch.setattr(cli, "_ensure_tools", lambda: None)
-        monkeypatch.setattr(cli, "_prompt_choice", lambda names: next(choices))
-        monkeypatch.setattr(cli, "_dispatch_choice", lambda choice, names: choice != "0")  # "1" = an action ran
+        patch_cli(monkeypatch, "_ensure_tools", lambda: None)
+        patch_cli(monkeypatch, "_prompt_choice", lambda names: next(choices))
+        patch_cli(monkeypatch, "_dispatch_choice", lambda choice, names: choice != "0")  # "1" = an action ran
         cli.interactive_menu()
 
         assert calls[:2] == ["title:CS-TOOL", "clear"]  # clean start after install/check
         assert calls[2:] == ["input", "clear"]  # after the action: Enter, then a clean launcher
 
     def test_the_help_key_shows_the_cheatsheet_then_returns(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        import cyberfw.cli as cli
 
         calls = self._screen(monkeypatch)
         choices = iter(["?", "0"])
         shown: list[list[str]] = []
-        monkeypatch.setattr(cli, "_ensure_tools", lambda: None)
-        monkeypatch.setattr(cli, "_prompt_choice", lambda names: next(choices))
-        monkeypatch.setattr(cli, "_show_help", lambda names: shown.append(names))
-        monkeypatch.setattr(cli, "_dispatch_choice", lambda choice, names: choice != "0")
+        patch_cli(monkeypatch, "_ensure_tools", lambda: None)
+        patch_cli(monkeypatch, "_prompt_choice", lambda names: next(choices))
+        patch_cli(monkeypatch, "_show_help", lambda names: shown.append(names))
+        patch_cli(monkeypatch, "_dispatch_choice", lambda choice, names: choice != "0")
         cli.interactive_menu()
 
         assert len(shown) == 1  # the cheatsheet was shown once
@@ -2810,13 +2799,12 @@ class TestCleanInterface:
 
     def test_ctrl_c_at_the_menu_is_a_clean_exit(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Exit 0, not "Aborted!" — so a Windows Terminal window opened for the interface closes."""
-        import cyberfw.cli as cli
 
         def interrupted(names: list[str]) -> str:
             raise KeyboardInterrupt
 
-        monkeypatch.setattr(cli, "_ensure_tools", lambda: None)
-        monkeypatch.setattr(cli, "_prompt_choice", interrupted)
+        patch_cli(monkeypatch, "_ensure_tools", lambda: None)
+        patch_cli(monkeypatch, "_prompt_choice", interrupted)
         result = runner.invoke(app, [])
         assert result.exit_code == 0 and "Goodbye." in result.stdout
 
@@ -2867,7 +2855,7 @@ class TestLockCommand:
         (checkout / "registry.yaml").write_text(
             (tmp_path / "registry.yaml").read_text(encoding="utf-8"), encoding="utf-8"
         )
-        monkeypatch.setattr("cyberfw.cli._registry_path", lambda: checkout / "registry.yaml")
+        patch_cli(monkeypatch, "_registry_path", lambda: checkout / "registry.yaml")
 
         result = runner.invoke(app, ["lock", "pinme", "--token", "t0ken"])
 
@@ -2998,7 +2986,7 @@ class TestInitLockMessages:
         assert "latest release" not in _one_line(result.stdout)
 
     def test_the_progress_line_names_the_locked_tag(self, fake_github: object) -> None:
-        from cyberfw.cli import _bootstrap, _locked_tags
+        _bootstrap, _locked_tags = cli._bootstrap, cli._locked_tags
 
         runner.invoke(app, ["lock", "pinme"])
         _, manager = _bootstrap()
@@ -3008,7 +2996,7 @@ class TestInitLockMessages:
             manager.close()
 
     def test_an_unreadable_lock_gives_no_tags_rather_than_a_crash(self, fake_github: object) -> None:
-        from cyberfw.cli import _bootstrap, _locked_tags
+        _bootstrap, _locked_tags = cli._bootstrap, cli._locked_tags
 
         (Path.cwd() / "tools.lock").write_text("- not a lock\n", encoding="utf-8")
         _, manager = _bootstrap()
@@ -3027,7 +3015,6 @@ class TestInitLockMessages:
         assert "commit" in result.stdout
 
     def test_the_launcher_names_what_it_added_to_the_lock(self, fake_github: object) -> None:
-        from cyberfw import cli
 
         (Path.cwd() / "registry.yaml").write_text(
             "pinme:\n  repo: org/pinme\n  asset_patterns: ['pinme_*']\n  binary: pinme\n", encoding="utf-8"
@@ -3047,8 +3034,8 @@ class TestInitLockMessages:
         site = tmp_path / "site" / "cyberfw" / "data"
         site.mkdir(parents=True)
         (site / "registry.yaml").write_text((tmp_path / "registry.yaml").read_text(encoding="utf-8"), encoding="utf-8")
-        monkeypatch.setattr("cyberfw.cli._registry_path", lambda: site / "registry.yaml")
-        monkeypatch.setattr("cyberfw.cli.packaged_data", lambda *parts: site.joinpath(*parts))
+        patch_cli(monkeypatch, "_registry_path", lambda: site / "registry.yaml")
+        patch_cli(monkeypatch, "packaged_data", lambda *parts: site.joinpath(*parts))
 
         result = runner.invoke(app, ["init", "pinme"])
 

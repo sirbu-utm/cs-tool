@@ -17,7 +17,7 @@ from rich.segment import Segment
 from rich.text import Text
 
 import cyberfw.logging
-from cyberfw import __version__, cli
+from cyberfw import __version__
 from cyberfw.config import Settings
 from cyberfw.hud import BRAND, KEY, ByWidth, HudFrame, Pane, PathText, hud_table, keycap
 from cyberfw.live_view import PipelineLiveView
@@ -25,6 +25,8 @@ from cyberfw.logging import THEME
 from cyberfw.pipeline.engine import Node, NodeResult, PipelineResult, StageEvent
 from cyberfw.pipeline.schemas import NucleiResult, RustscanResult, SubfinderResult, ToolRecord
 from cyberfw.ui import Masthead, banner, tool_guide
+
+from ._cli import cli, patch_cli
 
 #: Outside code page 437, but checked against Consolas and Lucida Console (▬ ■)
 #: or already drawn by the app before this redesign (● ○ ▲ — → …).
@@ -483,7 +485,7 @@ class TestPrompts:
 
         buffer = io.StringIO()
         themed = Console(file=buffer, theme=THEME, force_terminal=True, color_system="truecolor", no_color=False)
-        monkeypatch.setattr(cli, "console", themed)
+        patch_cli(monkeypatch, "console", themed)
         prompt = cli.Prompt("x")
         assert prompt.console is themed, "looked up when asked, not at import"
         prompt.console.print(prompt.make_prompt(None), end="")
@@ -495,7 +497,7 @@ class TestStartScreen:
     def _play(monkeypatch: pytest.MonkeyPatch, height: int, tmp_path: Path) -> str:
         buffer = io.StringIO()
         console = Console(file=buffer, theme=THEME, width=110, height=height, force_terminal=False)
-        monkeypatch.setattr(cli, "console", console)
+        patch_cli(monkeypatch, "console", console)
         cli._start_screen(_ROWS, "linux/amd64", _settings(tmp_path))
         return buffer.getvalue()
 
