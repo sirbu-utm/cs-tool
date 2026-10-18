@@ -12,6 +12,7 @@ import json
 import os
 import re
 import stat
+import subprocess
 from collections.abc import Callable, Iterator
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -2599,6 +2600,24 @@ class TestScheduleCommand:
         res = runner.invoke(app, ["schedule", "recon-to-vuln", "-t", "example.com", "--every", "monthly"])
 
         assert res.exit_code == 2
+
+    def test_the_fallback_program_starts_the_cli(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # Without `cyberfw` on PATH the entry runs this interpreter with
+        # `-m cyberfw`; if that cannot start the CLI, every such scheduled scan fails.
+        from cyberfw.cli import _schedule_program
+
+        monkeypatch.setattr("cyberfw.cli.shutil.which", lambda _name: None)
+        run = subprocess.run(
+            [*_schedule_program(), "--help"],
+            capture_output=True,
+            encoding="utf-8",
+            errors="replace",
+            env={**os.environ, "PYTHONUTF8": "1"},
+            timeout=120,
+        )
+
+        assert run.returncode == 0, run.stderr
+        assert "schedule" in run.stdout and "pipeline" in run.stdout
 
 
 class TestTriage:
