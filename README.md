@@ -1018,7 +1018,8 @@ uv run pytest -m integration -q
 
 ```text
 cyberfw/
-  cli.py                 Typer CLI и интерактивное меню
+  cli/                   Typer CLI: команды по модулям (tools, scan, reports, triage,
+                         schedule), общие помощники (common), отрисовка (views), лаунчер
   ui.py                  Rich UI, логотипы и гайды инструментов
   manager/               GitHub API, реестр, установка и проверка бинарников
   pipeline/              executor, context store и pipeline engine
