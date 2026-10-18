@@ -20,6 +20,7 @@ import uuid
 import zipfile
 import zlib
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from cyberfw.exceptions import ChecksumError, DownloadError
 from cyberfw.logging import get_logger
@@ -28,6 +29,9 @@ from cyberfw.manager.github_client import GitHubClient, GitHubRelease, ReleaseAs
 from cyberfw.manager.platform_map import Mapping, asset_patterns
 from cyberfw.manager.registry import ToolSpec
 from cyberfw.manager.verify import sha256_hex, verify_checksum
+
+if TYPE_CHECKING:  # lock.py imports select_asset from here
+    from cyberfw.manager.lock import LockedAsset
 
 __all__ = ["InstallResult", "ToolInstaller", "DEFAULT_MAX_ARCHIVE_SIZE", "select_asset"]
 
@@ -138,6 +142,32 @@ class ToolInstaller:
         self._make_executable(binary)
         LOG.debug("%s: installed %s -> %s", spec.name, release.version, binary)
         return InstallResult(spec=spec, binary=binary.resolve(), version=release.version)
+
+    def install_locked(self, spec: ToolSpec, version: str, asset: LockedAsset) -> InstallResult:
+        """Install one platform's entry of a locked release, verified against the lock.
+
+        The archive's SHA-256 must equal the lock's *before* anything of the
+        previous install is touched, so a replaced or corrupted download leaves
+        the working tool in place. The downloaded archive is always removed.
+        """
+        tool_dir = self.tools_dir / spec.name
+        archive_path = self.tools_dir / asset.name
+        try:
+            self.client.download(asset.url, archive_path)
+            actual = sha256_hex(archive_path)
+            if actual != asset.sha256:
+                raise ChecksumError(
+                    f"SHA-256 mismatch for {asset.name}: tools.lock has {asset.sha256}, got {actual}"
+                )
+            self._remove_existing_binary(spec)
+            self._remove_stale_downloads(spec, keep=archive_path)
+            self._reset_tool_dir(tool_dir)
+            binary = self._extract(spec, archive_path, tool_dir)
+        finally:
+            archive_path.unlink(missing_ok=True)
+        self._make_executable(binary)
+        LOG.debug("%s: installed %s from %s -> %s", spec.name, version, asset.name, binary)
+        return InstallResult(spec=spec, binary=binary.resolve(), version=version)
 
     # -- pipeline ------------------------------------------------------------
     def _download_checked(self, asset: ReleaseAsset, dst: Path, release: GitHubRelease, spec: ToolSpec) -> None:

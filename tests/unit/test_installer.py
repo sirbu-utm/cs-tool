@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import io
 import struct
 import tarfile
@@ -13,6 +14,7 @@ import pytest
 from cyberfw.exceptions import ChecksumError, DownloadError, ToolNotFoundError
 from cyberfw.manager.github_client import GitHubRelease, ReleaseAsset
 from cyberfw.manager.installer import ToolInstaller, select_asset
+from cyberfw.manager.lock import LockedAsset
 from cyberfw.manager.platform_map import Mapping
 from cyberfw.manager.registry import ToolSpec
 from cyberfw.manager.verify import checksum_for, sha256_hex, verify_checksum
@@ -70,6 +72,7 @@ class _FakeClient:
         self.archive_bytes = archive_bytes
         self.checksums = checksums
         self.downloaded: list[Path] = []
+        self.urls: list[str] = []
 
     def latest(self, owner: str, repo: str) -> GitHubRelease:
         return self.current
@@ -81,9 +84,54 @@ class _FakeClient:
         destination.parent.mkdir(parents=True, exist_ok=True)
         destination.write_bytes(self.archive_bytes)
         self.downloaded.append(destination)
+        self.urls.append(url)
 
     def fetch_text(self, url: str) -> str:
         return self.checksums or ""
+
+
+def _locked(name: str, payload: bytes, sha256: str | None = None) -> LockedAsset:
+    """``name``'s lock entry; its hash is ``payload``'s unless one is given."""
+    return LockedAsset(
+        name=name,
+        url=f"https://example.test/{name}",
+        sha256=sha256 if sha256 is not None else hashlib.sha256(payload).hexdigest(),
+        source="digest",
+    )
+
+
+class TestInstallLocked:
+    def test_a_matching_archive_installs(self, tmp_path: Path) -> None:
+        archive = _zip_bytes({"subfinder": b"#!/bin/sh\necho ok\n"})
+        installer = _installer(tmp_path, _FakeClient(None, archive), _spec())
+
+        result = installer.install_locked(_spec(), "1.0.0", _locked("subfinder_1.0.0_linux_amd64.zip", archive))
+
+        assert result.version == "1.0.0"
+        assert result.binary.read_bytes() == b"#!/bin/sh\necho ok\n"
+
+    def test_the_locked_url_is_what_gets_downloaded(self, tmp_path: Path) -> None:
+        archive = _zip_bytes({"subfinder": b"#!/bin/sh\necho ok\n"})
+        client = _FakeClient(None, archive)
+        installer = _installer(tmp_path, client, _spec())
+
+        installer.install_locked(_spec(), "1.0.0", _locked("subfinder_1.0.0_linux_amd64.zip", archive))
+
+        assert client.urls == ["https://example.test/subfinder_1.0.0_linux_amd64.zip"]
+
+    def test_a_mismatch_keeps_the_previous_install_and_leaves_no_archive(self, tmp_path: Path) -> None:
+        archive = _zip_bytes({"subfinder": b"#!/bin/sh\necho new\n"})
+        installer = _installer(tmp_path, _FakeClient(None, archive), _spec())
+        previous = installer.tools_dir / "subfinder" / "subfinder"
+        previous.parent.mkdir(parents=True)
+        previous.write_bytes(b"#!/bin/sh\necho old\n")
+        name = "subfinder_1.0.0_linux_amd64.zip"
+
+        with pytest.raises(ChecksumError, match="tools.lock has"):
+            installer.install_locked(_spec(), "1.0.0", _locked(name, archive, sha256="0" * 64))
+
+        assert previous.read_bytes() == b"#!/bin/sh\necho old\n"
+        assert not (installer.tools_dir / name).exists()
 
 
 class TestArchiveBombs:
