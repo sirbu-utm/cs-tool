@@ -24,6 +24,9 @@ LOG = get_logger("manager.registry")
 
 #: 1.x integrity keys that ``tools.lock`` replaced: still accepted, but ignored.
 _LEGACY_KEYS = ("sha256", "needs_checksum")
+#: (registry file, tool) pairs already warned about — the launcher reloads the
+#: registry for every frame, and one warning per tool per process is enough.
+_LEGACY_WARNED: set[tuple[str, str]] = set()
 
 
 class ToolSpec(BaseModel):
@@ -125,12 +128,15 @@ def load_registry(path: Path | str) -> ToolRegistry:
             raise RegistryError(f"registry entry {name!r} must be a mapping")
         legacy = [key for key in _LEGACY_KEYS if key in block]
         if legacy:
-            LOG.warning(
-                "registry entry %s: %s no longer used — integrity now comes from tools.lock "
-                "(run `cyberfw lock`)",
-                name,
-                " and ".join(f"`{key}`" for key in legacy),
-            )
+            warned = (str(registry_path.resolve()), str(name))
+            if warned not in _LEGACY_WARNED:
+                _LEGACY_WARNED.add(warned)
+                LOG.warning(
+                    "registry entry %s: %s no longer used — integrity now comes from tools.lock "
+                    "(run `cyberfw lock`)",
+                    name,
+                    " and ".join(f"`{key}`" for key in legacy),
+                )
             block = {key: value for key, value in block.items() if key not in _LEGACY_KEYS}
         try:
             tools[name] = ToolSpec(**block, name=str(name))

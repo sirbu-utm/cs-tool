@@ -2885,3 +2885,154 @@ class TestInitWithLock:
 
         assert result.exit_code == 1
         assert "failed" in result.stdout
+
+
+def _one_line(text: str) -> str:
+    """Rich folds long lines at the console width; compare against the unfolded text."""
+    return text.replace("\n", "")
+
+
+class TestLockCommandOutcomes:
+    def test_upgrade_moves_a_tool_to_the_newer_release(
+        self, fake_github: object, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from cyberfw.manager.github_client import GitHubRelease, ReleaseAsset
+
+        runner.invoke(app, ["lock", "pinme"])
+        original = fake_github.release  # type: ignore[attr-defined]
+
+        def newer(self: object, owner: str, repo: str, tag: str) -> GitHubRelease:
+            old = original(self, owner, repo, tag)
+            renamed = [
+                ReleaseAsset(a.name.replace("1.2.3", "1.2.4"), a.url.replace("1.2.3", "1.2.4"), a.size, a.digest)
+                for a in old.assets
+            ]
+            return GitHubRelease(tag="v1.2.4", assets=renamed, checksums_url=None)
+
+        monkeypatch.setattr(fake_github, "release", newer)
+
+        plain = runner.invoke(app, ["lock", "pinme"])
+        upgraded = runner.invoke(app, ["lock", "pinme", "--upgrade"])
+
+        assert "unchanged" in plain.stdout
+        assert upgraded.exit_code == 0
+        assert "upgraded" in upgraded.stdout and "v1.2.4" in upgraded.stdout
+
+    def test_a_tool_that_cannot_be_resolved_is_a_failed_row_and_exit_1(
+        self, fake_github: object, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from cyberfw.exceptions import DownloadError
+
+        def unreachable(self: object, owner: str, repo: str, tag: str) -> object:
+            raise DownloadError(f"GitHub API unreachable for {owner}/{repo}")
+
+        monkeypatch.setattr(fake_github, "release", unreachable)
+
+        result = runner.invoke(app, ["lock", "pinme"])
+
+        assert result.exit_code == 1
+        assert "failed" in result.stdout
+
+    @pytest.mark.parametrize(
+        ("command", "says"), [(["lock", "pinme"], "tools.lock"), (["init", "pinme"], "failed")], ids=["lock", "init"]
+    )
+    def test_a_malformed_lock_is_exit_1_without_a_traceback(
+        self, fake_github: object, command: list[str], says: str
+    ) -> None:
+        (Path.cwd() / "tools.lock").write_bytes("version: 1\ntools: {}\n".encode("utf-16"))
+
+        result = runner.invoke(app, command)
+
+        assert result.exit_code == 1
+        assert result.exception is None or isinstance(result.exception, SystemExit)
+        assert says in _one_line(result.stdout)
+
+    def test_a_lock_that_cannot_be_written_still_shows_the_changes(
+        self, fake_github: object, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def refuse(src: object, dst: object) -> None:
+            raise PermissionError(13, "Permission denied")
+
+        monkeypatch.setattr("cyberfw.manager.lock.os.replace", refuse)
+
+        result = runner.invoke(app, ["lock", "pinme"])
+
+        assert result.exit_code == 1
+        assert "added" in result.stdout
+        assert "workspace" in _one_line(result.stdout)
+
+    def test_with_nothing_to_lock_it_says_so(self) -> None:
+        (Path.cwd() / "registry.yaml").write_text("{}\n", encoding="utf-8")
+
+        result = runner.invoke(app, ["lock"])
+
+        assert result.exit_code == 0
+        assert "Nothing to lock" in result.stdout
+        assert "unchanged" not in result.stdout
+
+
+class TestInitLockMessages:
+    def test_init_help_describes_the_lock(self) -> None:
+        result = runner.invoke(app, ["init", "--help"])
+
+        assert "tools.lock" in _one_line(result.stdout)
+        assert "latest release" not in _one_line(result.stdout)
+
+    def test_the_progress_line_names_the_locked_tag(self, fake_github: object) -> None:
+        from cyberfw.cli import _bootstrap, _locked_tags
+
+        runner.invoke(app, ["lock", "pinme"])
+        _, manager = _bootstrap()
+        try:
+            assert _locked_tags(manager) == {"pinme": "v1.2.3"}
+        finally:
+            manager.close()
+
+    def test_an_unreadable_lock_gives_no_tags_rather_than_a_crash(self, fake_github: object) -> None:
+        from cyberfw.cli import _bootstrap, _locked_tags
+
+        (Path.cwd() / "tools.lock").write_text("- not a lock\n", encoding="utf-8")
+        _, manager = _bootstrap()
+        try:
+            assert _locked_tags(manager) == {}
+        finally:
+            manager.close()
+
+    def test_init_names_what_it_added_to_an_existing_lock(self, fake_github: object) -> None:
+        (Path.cwd() / "tools.lock").write_text("version: 1\ntools: {}\n", encoding="utf-8")
+
+        result = runner.invoke(app, ["init", "pinme"])
+
+        assert result.exit_code == 0
+        assert "Added pinme to tools.lock" in _one_line(result.stdout)
+        assert "commit" in result.stdout
+
+    def test_the_launcher_names_what_it_added_to_the_lock(self, fake_github: object) -> None:
+        from cyberfw import cli
+
+        (Path.cwd() / "registry.yaml").write_text(
+            "pinme:\n  repo: org/pinme\n  asset_patterns: ['pinme_*']\n  binary: pinme\n", encoding="utf-8"
+        )
+
+        with cli.console.capture() as captured:
+            cli._ensure_tools()
+
+        text = _one_line(captured.get())
+        assert "Created tools.lock with pinme" in text
+        assert "commit" in text
+
+    def test_a_packaged_lock_is_not_called_something_to_commit(
+        self, fake_github: object, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """A wheel install keeps its lock in site-packages: there is no repository to commit to."""
+        site = tmp_path / "site" / "cyberfw" / "data"
+        site.mkdir(parents=True)
+        (site / "registry.yaml").write_text((tmp_path / "registry.yaml").read_text(encoding="utf-8"), encoding="utf-8")
+        monkeypatch.setattr("cyberfw.cli._registry_path", lambda: site / "registry.yaml")
+        monkeypatch.setattr("cyberfw.cli.packaged_data", lambda *parts: site.joinpath(*parts))
+
+        result = runner.invoke(app, ["init", "pinme"])
+
+        assert result.exit_code == 0
+        assert "Created tools.lock with pinme" in _one_line(result.stdout)
+        assert "commit" not in result.stdout

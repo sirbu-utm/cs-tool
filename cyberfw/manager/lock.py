@@ -89,6 +89,15 @@ class LockedAsset(BaseModel):
     sha256: str
     source: HashSource
 
+    @field_validator("name")
+    @classmethod
+    def _plain_file_name(cls, value: str) -> str:
+        # The installer downloads to tools_bin/<name>; a hand-edited lock must
+        # not be able to point that anywhere else.
+        if not value or value in {".", ".."} or any(ch in value for ch in "/\\:"):
+            raise ValueError(f"must be a plain file name, got {value!r}")
+        return value
+
     @field_validator("url")
     @classmethod
     def _https(cls, value: str) -> str:
@@ -215,6 +224,11 @@ def write_lock(path: Path, lock: ToolLock) -> None:
             f"cannot write {path}: {exc} — run cyberfw from a workspace "
             "(a directory with registry.yaml) to change pins"
         ) from exc
+    except BaseException:
+        # Ctrl+C mid-write: the old lock is intact; leave no half-written copy.
+        with contextlib.suppress(OSError):
+            tmp.unlink(missing_ok=True)
+        raise
 
 
 class ReleaseSource(Protocol):
@@ -336,10 +350,12 @@ class LockUpdate:
     changes: list[LockChange]
     written: bool
     path: Path
+    #: Why the updated lock could not be written (the changes are still listed).
+    error: str = ""
 
     @property
     def failed(self) -> bool:
-        return any(change.change == "failed" for change in self.changes)
+        return bool(self.error) or any(change.change == "failed" for change in self.changes)
 
 
 def replaced_files(locked: LockedTool, fresh: LockedTool) -> list[str]:

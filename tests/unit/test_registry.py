@@ -162,3 +162,14 @@ class TestLegacyIntegrityKeys:
         assert spec.repo == "o/x"
         assert not hasattr(spec, "sha256") and not hasattr(spec, "needs_checksum")
         assert any("tools.lock" in r.getMessage() for r in caplog.records)
+
+    def test_the_warning_is_given_once_per_tool(self, tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+        """The launcher reloads the registry for every frame: one warning, not one per frame."""
+        path = tmp_path / "registry.yaml"
+        path.write_text(yaml.dump({"x": {"repo": "o/x", "asset_patterns": [], "needs_checksum": True}}), encoding="utf-8")
+
+        with caplog.at_level("WARNING", logger="cyberfw.manager"):
+            load_registry(path)
+            load_registry(path)
+
+        assert sum("tools.lock" in r.getMessage() for r in caplog.records) == 1

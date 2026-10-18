@@ -477,6 +477,31 @@ class TestUpdateLock:
         lock = read_lock(tmp_path / "tools.lock")
         assert lock is not None and set(lock.tools) == {"subfinder"}
 
+    def test_a_lock_that_cannot_be_written_still_reports_the_changes(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        manager, _ = _manager_with(tmp_path)
+
+        def refuse(src: object, dst: object) -> None:
+            raise PermissionError(13, "Permission denied")
+
+        monkeypatch.setattr("cyberfw.manager.lock.os.replace", refuse)
+
+        update = manager.update_lock()
+
+        assert [c.change for c in update.changes] == ["added"]
+        assert not update.written and update.failed
+        assert "workspace" in update.error
+
+    def test_tools_added_to_the_lock_by_installing_are_remembered(self, tmp_path: Path) -> None:
+        """init and the launcher tell the user what they pinned; installing again adds nothing."""
+        manager, _ = _manager_with(tmp_path)
+
+        manager.install("subfinder")
+        manager.install("subfinder")
+
+        assert manager.added_to_lock == ["subfinder"]
+
     def test_an_unknown_name_is_a_registry_error(self, tmp_path: Path) -> None:
         manager, _ = _manager_with(tmp_path)
 

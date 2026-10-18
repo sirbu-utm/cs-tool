@@ -46,6 +46,7 @@ from cyberfw.config import Settings, load_settings
 from cyberfw.exceptions import (
     ChromiumUnsupportedError,
     CyberfwError,
+    LockError,
     RegistryError,
     ToolNotFoundError,
 )
@@ -1278,6 +1279,7 @@ def prepare_cmd() -> None:
 def _ensure_tools() -> None:
     """Install every missing tool automatically before showing the launcher."""
     settings, manager = _bootstrap()
+    lock_existed = manager.lock_path.exists()
     try:
         missing = [
             name
@@ -1297,6 +1299,7 @@ def _ensure_tools() -> None:
                 console.print(f"[err]  failed {name}:[/err] {exc}")
             else:
                 console.print(f"[ok]  ready {name} v{result.version}[/ok]")
+        _report_lock_additions(manager, existed=lock_existed)
     finally:
         manager.close()
 
@@ -1409,10 +1412,12 @@ def init_cmd(
     ] = True,
     verbose: VerboseOption = False,
 ) -> None:
-    """Download and install precompiled tool binaries into ``tools_bin/``.
+    """Download, verify and install precompiled tool binaries into ``tools_bin/``.
 
-    A tool whose installed version already matches (the pinned ``version:`` in
-    registry.yaml, or the latest release) is left alone unless ``--force``.
+    Installs exactly the releases ``tools.lock`` pins and checks every archive's
+    SHA-256 against it; a tool missing from the lock is added to it first. A tool
+    already installed from its locked archive is left alone unless ``--force``.
+    Newer releases come only through ``cyberfw lock --upgrade``.
 
     When gowitness is installed and no Chrome/Chromium is on the machine, a
     portable Chromium (Chrome for Testing) is downloaded too, so the screenshot
@@ -1434,6 +1439,7 @@ def init_cmd(
         )
     targets = [n for n in requested if not manager.spec(n).is_local]
     lock_existed = manager.lock_path.exists()
+    locked_tags = _locked_tags(manager)
     console.print(
         Text.assemble(
             (f"Installing {len(targets)} tool(s) into ", "info"), (str(settings.tools_dir), "tool")
@@ -1448,7 +1454,7 @@ def init_cmd(
         with Live(progress, console=console, refresh_per_second=_live_fps(settings), transient=False) as live:
             for name in targets:
                 spec = manager.spec(name)
-                wanted = spec.version if spec.version != "latest" else "latest release"
+                wanted = locked_tags.get(name, "not locked yet")
                 progress.update(f"[info]checking[/info] {name} ({spec.repo}, {wanted}) ...")
                 try:
                     result = manager.install(name, force=force)
@@ -1473,15 +1479,40 @@ def init_cmd(
     finally:
         manager.close()
 
-    if not lock_existed and manager.lock_path.exists():
-        console.print(
-            f"[info]Created {manager.lock_path.name}[/info] — commit it so every machine "
-            "installs the same, verified tools."
-        )
+    _report_lock_additions(manager, existed=lock_existed)
     if failed:
         console.print(f"[warn]{ok} ready, {failed} failed.[/warn]")
         raise typer.Exit(1)
     console.print(f"[ok]Done: {ok} tool(s) ready.[/ok]")
+
+
+def _locked_tags(manager: ToolManager) -> dict[str, str]:
+    """The tag each tool is locked to, for progress lines. Empty when the lock
+    cannot be read — installing then reports that error per tool."""
+    try:
+        return {name: tool.tag for name, tool in manager.load_lock().tools.items()}
+    except LockError:
+        return {}
+
+
+def _is_packaged(path: Path) -> bool:
+    """True for a file next to the wheel's packaged registry: an installed copy
+    in site-packages, with no repository to commit it to."""
+    packaged = packaged_data("registry.yaml")
+    return packaged is not None and path.resolve().parent == packaged.resolve().parent
+
+
+def _report_lock_additions(manager: ToolManager, *, existed: bool) -> None:
+    """Say which tools this run pinned into ``tools.lock`` — and, in a workspace,
+    that the file wants committing so every machine installs the same tools."""
+    added = manager.added_to_lock
+    if not added:
+        return
+    names = ", ".join(added)
+    name = manager.lock_path.name
+    what = f"Added {names} to {name}" if existed else f"Created {name} with {names}"
+    hint = "" if _is_packaged(manager.lock_path) else " — commit it so every machine installs the same, verified tools."
+    console.print(f"[info]{escape(what)}[/info]{hint}")
 
 
 #: How each ``cyberfw lock`` outcome is coloured.
@@ -1556,10 +1587,13 @@ def lock_cmd(
         manager.close()
     if update.changes:
         console.print(_lock_table(update.changes))
-    if update.written:
-        console.print(
-            f"[ok]Wrote {update.path.name}[/ok] — commit it so every machine installs the same, verified tools."
-        )
+    if update.error:
+        console.print(f"[err]{escape(update.error)}[/err]")
+    elif update.written:
+        hint = "" if _is_packaged(update.path) else " — commit it so every machine installs the same, verified tools."
+        console.print(f"[ok]Wrote {update.path.name}[/ok]{hint}")
+    elif not update.changes and not update.path.exists():
+        console.print("[muted]Nothing to lock: registry.yaml lists no downloadable tools.[/muted]")
     else:
         console.print(f"[muted]{update.path.name} unchanged.[/muted]")
     if update.failed:

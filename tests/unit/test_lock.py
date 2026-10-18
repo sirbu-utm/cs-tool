@@ -136,6 +136,41 @@ class TestLockFile:
         with pytest.raises(LockError, match="tools.lock"):
             read_lock(path)
 
+    @pytest.mark.parametrize(
+        "name",
+        ["../victim.txt", "..", "dist/t.zip", "dist\\t.zip", "/etc/passwd", "C:\\t.zip", ""],
+        ids=["parent-path", "parent", "slash", "backslash", "absolute", "drive", "empty"],
+    )
+    def test_an_asset_name_must_be_a_plain_file_name(self, tmp_path: Path, name: str) -> None:
+        """The installer downloads to tools_bin/<name>: a hand-edited name must not escape it."""
+        path = tmp_path / "tools.lock"
+        path.write_text(_VALID.replace("name: t.zip", f"name: '{name}'"), encoding="utf-8")
+
+        with pytest.raises(LockError, match="tools.lock"):
+            read_lock(path)
+
+    def test_an_interrupted_write_leaves_no_tmp_and_keeps_the_old_file(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        path = tmp_path / "tools.lock"
+        path.write_text(_VALID, encoding="utf-8")
+
+        def interrupted(src: object, dst: object) -> None:
+            raise KeyboardInterrupt
+
+        monkeypatch.setattr("cyberfw.manager.lock.os.replace", interrupted)
+
+        with pytest.raises(KeyboardInterrupt):
+            write_lock(path, _lock())
+
+        assert path.read_text(encoding="utf-8") == _VALID
+        assert not (tmp_path / "tools.lock.tmp").exists()
+
+    def test_lock_error_is_exported(self) -> None:
+        import cyberfw.exceptions
+
+        assert "LockError" in cyberfw.exceptions.__all__
+
     @pytest.mark.parametrize("encoding", ["utf-16", "cp1252"])
     def test_a_lock_saved_in_another_encoding_is_a_lock_error_naming_the_file(
         self, tmp_path: Path, encoding: str

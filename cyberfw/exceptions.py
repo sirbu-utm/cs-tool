@@ -21,6 +21,7 @@ __all__ = [
     "UnsupportedPlatformError",
     "DownloadError",
     "ChecksumError",
+    "LockError",
     "ArchiveSafetyError",
     "ExecutionError",
     "ParseError",

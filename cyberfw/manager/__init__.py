@@ -69,6 +69,9 @@ class ToolManager:
         #: The ``tools.lock`` installs come from: next to the registry in use (the
         #: CLI passes that); ``<root_dir>/tools.lock`` when not given.
         self.lock_path = lock_path if lock_path is not None else settings.root_dir / LOCK_NAME
+        #: Tools this manager added to the lock while installing, in order — so
+        #: ``init`` and the launcher can say what they pinned.
+        self.added_to_lock: list[str] = []
         self._client: GitHubClient | None = None
 
     @property
@@ -109,6 +112,7 @@ class ToolManager:
         if entry is None:
             entry = self._resolve(spec)
             write_lock(self.lock_path, ToolLock(tools={**lock.tools, name: entry}))
+            self.added_to_lock.append(name)
         reason = stale_reason(spec, entry)
         if reason is not None:
             raise LockError(f"{LOCK_NAME} is out of date for {name}: {reason} — run `cyberfw lock`")
@@ -172,10 +176,15 @@ class ToolManager:
             tools[name] = fresh
             changes.append(LockChange(name, before, fresh.tag, change, fresh.sources))
         updated = ToolLock(tools=tools)
-        written = updated != lock
+        written, error = updated != lock, ""
         if written:
-            write_lock(self.lock_path, updated)
-        return LockUpdate(changes=changes, written=written, path=self.lock_path)
+            try:
+                write_lock(self.lock_path, updated)
+            except LockError as exc:
+                # Keep the computed changes: the caller still shows what would
+                # have been pinned, then why it could not be saved.
+                written, error = False, str(exc)
+        return LockUpdate(changes=changes, written=written, path=self.lock_path, error=error)
 
     def binary_path(self, name: str) -> Path:
         """Return the binary path for ``name`` or raise ``ToolNotFoundError``.
