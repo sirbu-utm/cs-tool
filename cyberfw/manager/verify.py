@@ -2,9 +2,8 @@
 
 ``cyberfw init`` and ``run`` call :func:`ensure_binary` to confirm a tool is
 installed and executable before the pipeline spawns it, and :func:`init_tools`
-to bring all registered tools up to date. ``needs_checksum`` tools additionally
-cross-check the downloaded archive against ``checksums.txt`` published by the
-release (when upstream provides one).
+to bring all registered tools up to date; and :func:`checksum_for` reads the
+SHA-256 a release's ``checksums.txt`` lists for an asset when a tool is locked.
 """
 
 from __future__ import annotations
@@ -16,9 +15,9 @@ import shutil
 import stat
 from pathlib import Path
 
-from cyberfw.exceptions import ChecksumError, ToolNotFoundError
+from cyberfw.exceptions import ToolNotFoundError
 
-__all__ = ["sha256_hex", "checksum_for", "verify_checksum", "ensure_binary", "find_in_path", "is_executable"]
+__all__ = ["sha256_hex", "checksum_for", "ensure_binary", "find_in_path", "is_executable"]
 
 _HASH_CHUNK = 1 << 20
 
@@ -126,24 +125,3 @@ def checksum_for(checksums_text: str | bytes, asset_name: str) -> str | None:
         digest = digest.lower()
         return digest if _SHA256_HEX.fullmatch(digest) else None
     return None
-
-
-def verify_checksum(checksums_text: str | bytes, asset_name: str, archive_path: Path) -> bool:
-    """Check ``archive_path`` against the SHA-256 upstream lists for ``asset_name``.
-
-    ``checksums_text`` is the body of ``checksums.txt``: ``<sha256>  <name>``
-    lines, where the name may carry a leading ``*`` (binary mode) or a
-    directory. The name must equal ``asset_name`` exactly — a suffix match
-    would take ``mytool_linux_amd64.zip``'s line for ``tool_linux_amd64.zip``.
-    Returns True when an entry was found and matched, False when the file has
-    no entry for this asset (the caller decides how loudly to report an
-    unverified download); a present-but-mismatched entry raises
-    :class:`ChecksumError` so a corrupted download is never unpacked.
-    """
-    entry = checksum_for(checksums_text, asset_name)
-    if entry is None:
-        return False  # upstream publishes no SHA-256 for this archive
-    actual = sha256_hex(archive_path)
-    if actual != entry:
-        raise ChecksumError(f"SHA-256 mismatch for {asset_name}: expected {entry}, got {actual}")
-    return True

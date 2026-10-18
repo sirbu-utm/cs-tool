@@ -91,6 +91,7 @@ def _workspace(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
 @pytest.fixture
 def fake_github(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> object:
     """Serve one release of ``pinme`` without the network by swapping ToolManager.client."""
+    import hashlib
     import io
     import zipfile
 
@@ -106,13 +107,19 @@ def fake_github(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> object:
         downloads = 0
 
         def release(self, owner: str, repo: str, tag: str) -> GitHubRelease:
+            # https URLs and GitHub's digests, as the real API reports them, so
+            # locking needs no download of its own.
+            digest = hashlib.sha256(archive).hexdigest()
+            names = (
+                "pinme_1.2.3_windows_amd64.zip",
+                "pinme_1.2.3_linux_amd64.zip",
+                "pinme_1.2.3_darwin_amd64.zip",
+                "pinme_1.2.3_darwin_arm64.zip",
+                "pinme_1.2.3_linux_arm64.zip",
+            )
             return GitHubRelease(
                 tag="v1.2.3",
-                assets=[ReleaseAsset("pinme_1.2.3_windows_amd64.zip", "http://x", len(archive)),
-                        ReleaseAsset("pinme_1.2.3_linux_amd64.zip", "http://x", len(archive)),
-                        ReleaseAsset("pinme_1.2.3_darwin_amd64.zip", "http://x", len(archive)),
-                        ReleaseAsset("pinme_1.2.3_darwin_arm64.zip", "http://x", len(archive)),
-                        ReleaseAsset("pinme_1.2.3_linux_arm64.zip", "http://x", len(archive))],
+                assets=[ReleaseAsset(name, f"https://example.test/{name}", len(archive), digest) for name in names],
                 checksums_url=None,
             )
 

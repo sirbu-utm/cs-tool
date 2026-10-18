@@ -1,4 +1,5 @@
-"""Safe download / extract / permission handling for tool binaries.
+"""Safe download / verify / extract / permission handling for tool binaries — each
+archive checked against its ``tools.lock`` hash.
 
 Guards against `Zip Slip` (any member path escaping ``tools_bin/``), enforces an
 upper bound on archive size, and makes extracted binaries executable on Unix.
@@ -28,7 +29,7 @@ from cyberfw.manager.archive import assert_extract_size, normalize, safe_extract
 from cyberfw.manager.github_client import GitHubClient, GitHubRelease, ReleaseAsset
 from cyberfw.manager.platform_map import Mapping, asset_patterns
 from cyberfw.manager.registry import ToolSpec
-from cyberfw.manager.verify import sha256_hex, verify_checksum
+from cyberfw.manager.verify import sha256_hex
 
 if TYPE_CHECKING:  # lock.py imports select_asset from here
     from cyberfw.manager.lock import LockedAsset
@@ -111,38 +112,6 @@ class ToolInstaller:
         self.max_archive_size = max_archive_size
 
     # -- public --------------------------------------------------------------
-    def resolve_release(self, spec: ToolSpec) -> GitHubRelease:
-        """The release ``spec`` asks for: its pinned ``version`` tag, or the latest."""
-        return self.client.release(spec.repo_owner, spec.repo_name, spec.version)
-
-    def install(self, spec: ToolSpec, release: GitHubRelease | None = None) -> InstallResult:
-        if release is None:
-            release = self.resolve_release(spec)
-        asset = select_asset(release, spec, self.mapping)
-        if asset is None:
-            patterns = [*asset_patterns(self.mapping), *_os_patterns(spec, self.mapping)]
-            raise DownloadError(
-                f"No released asset for {spec.repo} matches OS={self.mapping.os_name}, "
-                f"arch={self.mapping.arch}. Release tag: {release.tag}. "
-                f"Tried patterns: {patterns or '<none>'}."
-            )
-        LOG.debug("%s: selected asset %s for %s", spec.name, asset.name, self.mapping.label)
-        tool_dir = self.tools_dir / spec.name
-        archive_path = self.tools_dir / asset.name
-        try:
-            self._download_checked(asset, archive_path, release, spec)
-            # Only touch the previous install once the new archive is safely on
-            # disk, so a failed download leaves a working tool in place.
-            self._remove_existing_binary(spec)
-            self._remove_stale_downloads(spec, keep=archive_path)
-            self._reset_tool_dir(tool_dir)
-            binary = self._extract(spec, archive_path, tool_dir)
-        finally:
-            archive_path.unlink(missing_ok=True)
-        self._make_executable(binary)
-        LOG.debug("%s: installed %s -> %s", spec.name, release.version, binary)
-        return InstallResult(spec=spec, binary=binary.resolve(), version=release.version)
-
     def install_locked(self, spec: ToolSpec, version: str, asset: LockedAsset) -> InstallResult:
         """Install one platform's entry of a locked release, verified against the lock.
 
@@ -170,31 +139,6 @@ class ToolInstaller:
         return InstallResult(spec=spec, binary=binary.resolve(), version=version)
 
     # -- pipeline ------------------------------------------------------------
-    def _download_checked(self, asset: ReleaseAsset, dst: Path, release: GitHubRelease, spec: ToolSpec) -> None:
-        self.client.download(asset.url, dst, expected_size=asset.size)
-        pinned = spec.sha256.get(asset.name)
-        if pinned is not None:
-            actual = sha256_hex(dst)
-            if actual != pinned:
-                raise ChecksumError(
-                    f"SHA-256 mismatch for {asset.name}: registry.yaml pins {pinned}, got {actual}"
-                )
-            return
-        if not spec.needs_checksum:
-            return
-        verified = False
-        if release.checksums_url:
-            body = self.client.fetch_text(release.checksums_url)
-            verified = verify_checksum(body, asset.name, dst)
-        if not verified:
-            # Say so rather than let silence pass for a check that never ran.
-            LOG.warning(
-                "%s: download of %s was not verified — the release publishes no checksum for it; "
-                "pin `version:` and add its digest under `sha256:` in registry.yaml to enforce one",
-                spec.name,
-                asset.name,
-            )
-
     def _extract(self, spec: ToolSpec, archive_path: Path, tool_dir: Path) -> Path:
         kind = _archive_kind(spec.archive, archive_path.name)
         try:

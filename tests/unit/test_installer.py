@@ -1,4 +1,4 @@
-"""Tests for safe archive install (Zip Slip guard, checksums, binary placement)."""
+"""Tests for safe archive install (Zip Slip guard, lock verification, binary placement)."""
 
 from __future__ import annotations
 
@@ -13,11 +13,11 @@ import pytest
 
 from cyberfw.exceptions import ChecksumError, DownloadError, ToolNotFoundError
 from cyberfw.manager.github_client import GitHubRelease, ReleaseAsset
-from cyberfw.manager.installer import ToolInstaller, select_asset
+from cyberfw.manager.installer import InstallResult, ToolInstaller, select_asset
 from cyberfw.manager.lock import LockedAsset
 from cyberfw.manager.platform_map import Mapping
 from cyberfw.manager.registry import ToolSpec
-from cyberfw.manager.verify import checksum_for, sha256_hex, verify_checksum
+from cyberfw.manager.verify import checksum_for
 
 
 def _zip_bytes(members: dict[str, bytes]) -> bytes:
@@ -42,52 +42,36 @@ def _lying_zip_bytes(name: str, real_size: int, declared_size: int) -> bytes:
     return bytes(data)
 
 
-def _spec(name: str = "subfinder", **overrides) -> ToolSpec:
-    defaults = {
+def _spec(name: str = "subfinder", **overrides: object) -> ToolSpec:
+    fields: dict[str, object] = {
         "repo": "org/subfinder",
         "asset_patterns": ["*linux*amd64*"],
         "archive": "zip",
         "binary": "subfinder",
-        "needs_checksum": False,
     }
-    defaults.update(overrides)
-    return ToolSpec(name=name, **defaults)
-
-
-def _installer(tmp_path: Path, client, spec: ToolSpec) -> ToolInstaller:
-    tools_dir = tmp_path / "tools_bin"
-    tools_dir.mkdir(parents=True, exist_ok=True)
-    return ToolInstaller(client, tools_dir, Mapping("linux", "amd64"))
-
-
-def _installer_for_mapping(tmp_path: Path, client, mapping: Mapping) -> ToolInstaller:
-    tools_dir = tmp_path / "tools_bin"
-    tools_dir.mkdir(parents=True, exist_ok=True)
-    return ToolInstaller(client, tools_dir, mapping)
+    fields.update(overrides)
+    return ToolSpec(name=name, **fields)  # type: ignore[arg-type]
 
 
 class _FakeClient:
-    def __init__(self, release, archive_bytes: bytes, checksums: str | None = None) -> None:
-        self.current = release
+    """Serves ``archive_bytes`` for any URL and remembers what was fetched."""
+
+    def __init__(self, archive_bytes: bytes) -> None:
         self.archive_bytes = archive_bytes
-        self.checksums = checksums
-        self.downloaded: list[Path] = []
         self.urls: list[str] = []
-
-    def latest(self, owner: str, repo: str) -> GitHubRelease:
-        return self.current
-
-    def release(self, owner: str, repo: str, tag: str) -> GitHubRelease:
-        return self.current
+        self.downloaded: list[Path] = []
 
     def download(self, url: str, destination: Path, *, expected_size: int | None = None) -> None:
         destination.parent.mkdir(parents=True, exist_ok=True)
         destination.write_bytes(self.archive_bytes)
-        self.downloaded.append(destination)
         self.urls.append(url)
+        self.downloaded.append(destination)
 
-    def fetch_text(self, url: str) -> str:
-        return self.checksums or ""
+
+def _installer(tmp_path: Path, client: _FakeClient, mapping: Mapping | None = None, **kwargs: int) -> ToolInstaller:
+    tools_dir = tmp_path / "tools_bin"
+    tools_dir.mkdir(parents=True, exist_ok=True)
+    return ToolInstaller(client, tools_dir, mapping or Mapping("linux", "amd64"), **kwargs)  # type: ignore[arg-type]
 
 
 def _locked(name: str, payload: bytes, sha256: str | None = None) -> LockedAsset:
@@ -100,38 +84,14 @@ def _locked(name: str, payload: bytes, sha256: str | None = None) -> LockedAsset
     )
 
 
-class TestInstallLocked:
-    def test_a_matching_archive_installs(self, tmp_path: Path) -> None:
-        archive = _zip_bytes({"subfinder": b"#!/bin/sh\necho ok\n"})
-        installer = _installer(tmp_path, _FakeClient(None, archive), _spec())
+def _install(
+    installer: ToolInstaller, spec: ToolSpec, archive: bytes, name: str, version: str = "1.0.0"
+) -> InstallResult:
+    """Install ``archive`` as the locked asset ``name`` (its hash taken from the bytes served)."""
+    return installer.install_locked(spec, version, _locked(name, archive))
 
-        result = installer.install_locked(_spec(), "1.0.0", _locked("subfinder_1.0.0_linux_amd64.zip", archive))
 
-        assert result.version == "1.0.0"
-        assert result.binary.read_bytes() == b"#!/bin/sh\necho ok\n"
-
-    def test_the_locked_url_is_what_gets_downloaded(self, tmp_path: Path) -> None:
-        archive = _zip_bytes({"subfinder": b"#!/bin/sh\necho ok\n"})
-        client = _FakeClient(None, archive)
-        installer = _installer(tmp_path, client, _spec())
-
-        installer.install_locked(_spec(), "1.0.0", _locked("subfinder_1.0.0_linux_amd64.zip", archive))
-
-        assert client.urls == ["https://example.test/subfinder_1.0.0_linux_amd64.zip"]
-
-    def test_a_mismatch_keeps_the_previous_install_and_leaves_no_archive(self, tmp_path: Path) -> None:
-        archive = _zip_bytes({"subfinder": b"#!/bin/sh\necho new\n"})
-        installer = _installer(tmp_path, _FakeClient(None, archive), _spec())
-        previous = installer.tools_dir / "subfinder" / "subfinder"
-        previous.parent.mkdir(parents=True)
-        previous.write_bytes(b"#!/bin/sh\necho old\n")
-        name = "subfinder_1.0.0_linux_amd64.zip"
-
-        with pytest.raises(ChecksumError, match="tools.lock has"):
-            installer.install_locked(_spec(), "1.0.0", _locked(name, archive, sha256="0" * 64))
-
-        assert previous.read_bytes() == b"#!/bin/sh\necho old\n"
-        assert not (installer.tools_dir / name).exists()
+_SUBFINDER_ZIP = "subfinder_1.0.0_linux_amd64.zip"
 
 
 class TestArchiveBombs:
@@ -141,12 +101,10 @@ class TestArchiveBombs:
         not a bare ``zipfile.BadZipFile`` traceback."""
         declared, real = 16, 4 * 1024 * 1024
         archive = _lying_zip_bytes("subfinder", real_size=real, declared_size=declared)
-        asset = ReleaseAsset("subfinder_1.0.0_linux_amd64.zip", "http://x", len(archive))
-        release = GitHubRelease(tag="v1.0.0", assets=[asset], checksums_url=None)
-        installer = _installer(tmp_path, _FakeClient(release, archive), _spec())
+        installer = _installer(tmp_path, _FakeClient(archive))
 
         with pytest.raises(DownloadError, match="corrupt"):
-            installer.install(_spec())
+            _install(installer, _spec(), archive, _SUBFINDER_ZIP)
 
         written = sum(
             p.stat().st_size for p in installer.tools_dir.rglob("*") if p.is_file() and p.suffix != ".zip"
@@ -161,34 +119,30 @@ class TestArchiveBombs:
             info.size = len(payload)
             tf.addfile(info, io.BytesIO(payload))
         archive = buffer.getvalue()[: len(buffer.getvalue()) // 2]
-        asset = ReleaseAsset("subfinder_1.0.0_linux_amd64.tar.gz", "http://x", len(archive))
-        release = GitHubRelease(tag="v1.0.0", assets=[asset], checksums_url=None)
-        installer = _installer(tmp_path, _FakeClient(release, archive), _spec(archive="tar"))
+        installer = _installer(tmp_path, _FakeClient(archive))
 
         with pytest.raises(DownloadError, match="corrupt"):
-            installer.install(_spec(archive="tar"))
+            _install(installer, _spec(archive="tar"), archive, "subfinder_1.0.0_linux_amd64.tar.gz")
 
 
 class TestDebugDiagnostics:
-    def test_install_logs_selected_asset_and_result(self, tmp_path: Path, caplog) -> None:  # type: ignore[no-untyped-def]
+    def test_install_logs_the_asset_and_version(self, tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
         import logging
 
         archive = _zip_bytes({"subfinder/subfinder": b"#!/bin/sh\necho ok\n"})
-        asset = ReleaseAsset("subfinder_1.0.0_linux_amd64.zip", "http://x", len(archive))
-        release = GitHubRelease(tag="v1.0.0", assets=[asset], checksums_url=None)
-        installer = _installer(tmp_path, _FakeClient(release, archive), _spec())
+        installer = _installer(tmp_path, _FakeClient(archive))
 
         logger = logging.getLogger("cyberfw.manager.installer")
         logger.addHandler(caplog.handler)
         logger.setLevel(logging.DEBUG)
         try:
-            installer.install(_spec())
+            _install(installer, _spec(), archive, _SUBFINDER_ZIP)
         finally:
             logger.removeHandler(caplog.handler)
 
         messages = " ".join(r.getMessage() for r in caplog.records)
-        assert "subfinder_1.0.0_linux_amd64.zip" in messages  # the chosen asset
-        assert "1.0.0" in messages  # the resolved version / install result
+        assert _SUBFINDER_ZIP in messages  # the installed asset
+        assert "1.0.0" in messages  # the installed version
 
 
 class TestSelectAsset:
@@ -249,63 +203,33 @@ class TestSelectAsset:
 
 
 class TestInstall:
-    def test_no_asset_for_this_os_raises_instead_of_downloading_foreign_binary(self, tmp_path: Path) -> None:
-        """Registry patterns for *other* OSes must never be used as a last resort."""
-        archive = _zip_bytes({"rustscan": b"#!/bin/sh\necho ok\n"})
-        linux = ReleaseAsset("x86_64-linux-rustscan.zip", "http://linux", len(archive))
-        windows = ReleaseAsset("x86_64-windows-rustscan.zip", "http://windows", len(archive))
-        release = GitHubRelease(tag="v2.4.1", assets=[linux, windows], checksums_url=None)
-        client = _FakeClient(release, archive)
-        spec = _spec(
-            name="rustscan",
-            binary="rustscan",
-            asset_patterns=["*x86_64*linux*rustscan*.zip", "*x86_64*windows*rustscan*.zip"],
-            archive="zip",
-        )
-        installer = _installer_for_mapping(tmp_path, client, Mapping("darwin", "amd64"))
-
-        with pytest.raises(DownloadError, match="OS=darwin"):
-            installer.install(spec)
-        assert client.downloaded == []
-
     def test_install_extracts_binary(self, tmp_path: Path) -> None:
         archive = _zip_bytes({"subfinder_2.6.6_linux_amd64/subfinder": b"#!/bin/sh\necho hi\n"})
-        asset = ReleaseAsset("subfinder_2.6.6_linux_amd64.zip", "http://x", len(archive))
-        release = GitHubRelease(tag="v2.6.6", assets=[asset], checksums_url=None)
-        client = _FakeClient(release, archive)
-        installer = _installer(tmp_path, client, _spec())
+        installer = _installer(tmp_path, _FakeClient(archive))
 
-        result = installer.install(_spec())
+        result = _install(installer, _spec(), archive, "subfinder_2.6.6_linux_amd64.zip", version="2.6.6")
+
         assert result.version == "2.6.6"
         assert result.binary.exists()
 
     def test_install_replaces_stale_binary_variant(self, tmp_path: Path) -> None:
         archive = _zip_bytes({"naabu.exe": b"#!/bin/sh\necho new\n"})
-        asset = ReleaseAsset("naabu_1.0.0_windows_amd64.zip", "http://x", len(archive))
-        release = GitHubRelease(tag="v1.0.0", assets=[asset], checksums_url=None)
-        client = _FakeClient(release, archive)
-        installer = _installer_for_mapping(tmp_path, client, Mapping("windows", "amd64"))
+        installer = _installer(tmp_path, _FakeClient(archive), Mapping("windows", "amd64"))
         (installer.tools_dir / "naabu").write_bytes(b"stale")
+        spec = _spec(name="naabu", binary="naabu", asset_patterns=["*windows*amd64*"])
 
-        result = installer.install(
-            _spec(
-                name="naabu",
-                binary="naabu",
-                asset_patterns=["*windows*amd64*"],
-            )
-        )
+        result = _install(installer, spec, archive, "naabu_1.0.0_windows_amd64.zip")
 
         # The flat-layout binary is gone; ``tools_bin/naabu`` is now the tool's directory.
         assert not (installer.tools_dir / "naabu").is_file()
         assert result.binary == (installer.tools_dir / "naabu" / "naabu.exe").resolve()
 
-    def test_locked_stale_binary_is_moved_aside_not_fatal(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_locked_stale_binary_is_moved_aside_not_fatal(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """Windows refuses to unlink a running/AV-scanned exe but allows renaming it; init must survive that."""
         archive = _zip_bytes({"naabu.exe": b"#!/bin/sh\necho new\n"})
-        asset = ReleaseAsset("naabu_1.0.0_windows_amd64.zip", "http://x", len(archive))
-        release = GitHubRelease(tag="v1.0.0", assets=[asset], checksums_url=None)
-        client = _FakeClient(release, archive)
-        installer = _installer_for_mapping(tmp_path, client, Mapping("windows", "amd64"))
+        installer = _installer(tmp_path, _FakeClient(archive), Mapping("windows", "amd64"))
         stale = installer.tools_dir / "naabu.exe"
         stale.write_bytes(b"stale")
 
@@ -317,8 +241,9 @@ class TestInstall:
             real_unlink(self, missing_ok=missing_ok)
 
         monkeypatch.setattr(Path, "unlink", locked_unlink)
+        spec = _spec(name="naabu", binary="naabu", asset_patterns=["*windows*amd64*"])
 
-        result = installer.install(_spec(name="naabu", binary="naabu", asset_patterns=["*windows*amd64*"]))
+        result = _install(installer, spec, archive, "naabu_1.0.0_windows_amd64.zip")
 
         assert result.binary == (installer.tools_dir / "naabu" / "naabu.exe").resolve()
         assert result.binary.read_bytes() == b"#!/bin/sh\necho new\n"
@@ -327,78 +252,36 @@ class TestInstall:
 
     def test_install_copies_raw_binary(self, tmp_path: Path) -> None:
         payload = b"#!/bin/sh\nraw executable"
-        asset = ReleaseAsset("gowitness-2.5.2-linux-amd64", "http://x", len(payload))
-        release = GitHubRelease(tag="v2.5.2", assets=[asset], checksums_url=None)
-        client = _FakeClient(release, payload)
+        installer = _installer(tmp_path, _FakeClient(payload))
         spec = _spec(name="gowitness", binary="gowitness", archive="raw")
-        installer = _installer(tmp_path, client, spec)
 
-        result = installer.install(spec)
+        result = _install(installer, spec, payload, "gowitness-2.5.2-linux-amd64", version="2.5.2")
 
         assert result.version == "2.5.2"
         assert result.binary.read_bytes() == payload
 
-    def test_checksum_mismatch_raises(self, tmp_path: Path) -> None:
-        archive = _zip_bytes({"f/f": b"data"})
-        asset = ReleaseAsset("f_1.0.0_linux_amd64.zip", "http://x", len(archive))
-        release = GitHubRelease(tag="v1.0.0", assets=[asset], checksums_url="http://x/sha")
-        wrong = "0000000000000000000000000000000000000000000000000000000000000000  f_1.0.0_linux_amd64.zip"
-        client = _FakeClient(release, archive, checksums=wrong)
-        installer = _installer(tmp_path, client, _spec(name="f", binary="f"))
-        spec = _spec(name="f", binary="f", needs_checksum=True)
-        with pytest.raises(ChecksumError):
-            installer.install(spec)
 
-    def test_checksum_pass(self, tmp_path: Path) -> None:
-        archive = _zip_bytes({"g/g": b"#!/bin/sh\ndata"})
-        asset = ReleaseAsset("g_1.0.0_linux_amd64.zip", "http://x", len(archive))
-        release = GitHubRelease(tag="v1.0.0", assets=[asset], checksums_url="http://x/sha")
-        good = f"{sha256_hex(Path(_write_tmp_archive(tmp_path, archive)))}  g_1.0.0_linux_amd64.zip"
-        client = _FakeClient(release, archive, checksums=good)
-        installer = _installer(tmp_path, client, _spec(name="g", binary="g"))
-        result = installer.install(_spec(name="g", binary="g", needs_checksum=True))
-        assert result.binary.exists()
+class TestInstallLocked:
+    def test_the_locked_url_is_what_gets_downloaded(self, tmp_path: Path) -> None:
+        archive = _zip_bytes({"subfinder": b"#!/bin/sh\necho ok\n"})
+        client = _FakeClient(archive)
 
+        _install(_installer(tmp_path, client), _spec(), archive, _SUBFINDER_ZIP)
 
-def _write_tmp_archive(tmp_path: Path, data: bytes) -> Path:
-    dest = tmp_path / "reference.zip"
-    dest.write_bytes(data)
-    return dest
+        assert client.urls == [f"https://example.test/{_SUBFINDER_ZIP}"]
 
+    def test_a_mismatch_keeps_the_previous_install_and_leaves_no_archive(self, tmp_path: Path) -> None:
+        archive = _zip_bytes({"subfinder": b"#!/bin/sh\necho new\n"})
+        installer = _installer(tmp_path, _FakeClient(archive))
+        previous = installer.tools_dir / "subfinder" / "subfinder"
+        previous.parent.mkdir(parents=True)
+        previous.write_bytes(b"#!/bin/sh\necho old\n")
 
-class TestVerifyChecksum:
-    """checksums.txt lines are `<sha256>  [*]<file name>`; the name must match exactly."""
+        with pytest.raises(ChecksumError, match="tools.lock has"):
+            installer.install_locked(_spec(), "1.0.0", _locked(_SUBFINDER_ZIP, archive, sha256="0" * 64))
 
-    @staticmethod
-    def _archive(tmp_path: Path) -> tuple[Path, str]:
-        archive = tmp_path / "tool_1.0.0_linux_amd64.zip"
-        archive.write_bytes(b"the real archive")
-        return archive, sha256_hex(archive)
-
-    def test_an_entry_for_a_longer_name_ending_the_same_is_not_ours(self, tmp_path: Path) -> None:
-        archive, digest = self._archive(tmp_path)
-        checksums = (
-            f"{'0' * 64}  mytool_1.0.0_linux_amd64.zip\n"  # listed first, merely ends with our name
-            f"{digest}  tool_1.0.0_linux_amd64.zip\n"
-        )
-
-        assert verify_checksum(checksums, archive.name, archive) is True
-
-    def test_binary_mode_marker_is_accepted(self, tmp_path: Path) -> None:
-        archive, digest = self._archive(tmp_path)
-
-        assert verify_checksum(f"{digest} *tool_1.0.0_linux_amd64.zip\n", archive.name, archive) is True
-
-    def test_no_entry_for_the_asset_is_unverified_not_an_error(self, tmp_path: Path) -> None:
-        archive, _digest = self._archive(tmp_path)
-
-        assert verify_checksum(f"{'0' * 64}  mytool_1.0.0_linux_amd64.zip\n", archive.name, archive) is False
-
-    def test_a_mismatch_for_our_exact_name_still_raises(self, tmp_path: Path) -> None:
-        archive, _digest = self._archive(tmp_path)
-
-        with pytest.raises(ChecksumError):
-            verify_checksum(f"{'0' * 64}  tool_1.0.0_linux_amd64.zip\n", archive.name, archive)
+        assert previous.read_bytes() == b"#!/bin/sh\necho old\n"
+        assert not (installer.tools_dir / _SUBFINDER_ZIP).exists()
 
 
 class TestChecksumFor:
@@ -436,50 +319,35 @@ def test_missing_binary_message_mentions_blocked_file(tmp_path: Path, monkeypatc
 
 
 class TestArchiveSizeLimit:
-    def test_limit_is_the_value_the_installer_was_given(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_limit_is_the_value_the_installer_was_given(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """``Settings.max_archive_size`` must reach the installer; it used to read a private
         ``CYBERFW_MAX_ARCHIVE`` env var instead, so the documented setting was silently ignored."""
         monkeypatch.delenv("CYBERFW_MAX_ARCHIVE", raising=False)
         archive = _zip_bytes({"subfinder": b"#!/bin/sh\n" + b"x" * 100})
-        asset = ReleaseAsset("subfinder_1.0.0_linux_amd64.zip", "http://x", len(archive))
-        release = GitHubRelease(tag="v1.0.0", assets=[asset], checksums_url=None)
-        installer = ToolInstaller(
-            _FakeClient(release, archive), tmp_path / "tools_bin", Mapping("linux", "amd64"), max_archive_size=16
-        )
+        installer = _installer(tmp_path, _FakeClient(archive), max_archive_size=16)
 
         with pytest.raises(DownloadError, match="limit 16"):
-            installer.install(_spec())
+            _install(installer, _spec(), archive, _SUBFINDER_ZIP)
 
     def test_archive_within_limit_installs(self, tmp_path: Path) -> None:
         payload = b"#!/bin/sh\necho ok\n"
         archive = _zip_bytes({"subfinder": payload})
-        asset = ReleaseAsset("subfinder_1.0.0_linux_amd64.zip", "http://x", len(archive))
-        release = GitHubRelease(tag="v1.0.0", assets=[asset], checksums_url=None)
-        installer = ToolInstaller(
-            _FakeClient(release, archive),
-            tmp_path / "tools_bin",
-            Mapping("linux", "amd64"),
-            max_archive_size=len(payload),
-        )
+        installer = _installer(tmp_path, _FakeClient(archive), max_archive_size=len(payload))
 
-        assert installer.install(_spec()).binary.read_bytes() == payload
+        assert _install(installer, _spec(), archive, _SUBFINDER_ZIP).binary.read_bytes() == payload
 
 
 class TestToolsDirLayout:
     """Every tool lives in ``tools_bin/<tool>/``; nothing but those directories (and the
     install-state files ToolManager keeps) may accumulate at the top level."""
 
-    @staticmethod
-    def _release(name: str, archive: bytes) -> GitHubRelease:
-        asset = ReleaseAsset(name, "http://x", len(archive))
-        return GitHubRelease(tag="v1.0.0", assets=[asset], checksums_url=None)
-
     def test_archive_members_land_in_a_per_tool_directory(self, tmp_path: Path) -> None:
         archive = _zip_bytes({"subfinder": b"#!/bin/sh\necho ok\n", "README.md": b"docs", "LICENSE": b"mit"})
-        client = _FakeClient(self._release("subfinder_1.0.0_linux_amd64.zip", archive), archive)
-        installer = _installer(tmp_path, client, _spec())
+        installer = _installer(tmp_path, _FakeClient(archive))
 
-        result = installer.install(_spec())
+        result = _install(installer, _spec(), archive, _SUBFINDER_ZIP)
 
         tool_dir = installer.tools_dir / "subfinder"
         assert result.binary == (tool_dir / "subfinder").resolve()
@@ -488,30 +356,27 @@ class TestToolsDirLayout:
 
     def test_downloaded_archive_is_removed_after_extraction(self, tmp_path: Path) -> None:
         archive = _zip_bytes({"subfinder": b"#!/bin/sh\necho ok\n"})
-        client = _FakeClient(self._release("subfinder_1.0.0_linux_amd64.zip", archive), archive)
-        installer = _installer(tmp_path, client, _spec())
+        client = _FakeClient(archive)
 
-        installer.install(_spec())
+        _install(_installer(tmp_path, client), _spec(), archive, _SUBFINDER_ZIP)
 
         assert not client.downloaded[0].exists()
 
     def test_corrupt_archive_is_not_left_behind_either(self, tmp_path: Path) -> None:
         archive = b"PK\x03\x04 definitely not a zip"
-        client = _FakeClient(self._release("subfinder_1.0.0_linux_amd64.zip", archive), archive)
-        installer = _installer(tmp_path, client, _spec())
+        client = _FakeClient(archive)
 
         with pytest.raises(DownloadError):
-            installer.install(_spec())
+            _install(_installer(tmp_path, client), _spec(), archive, _SUBFINDER_ZIP)
 
         assert not client.downloaded[0].exists()
 
     def test_raw_asset_leaves_no_copy_under_its_release_name(self, tmp_path: Path) -> None:
         payload = b"#!/bin/sh\nraw executable"
-        client = _FakeClient(self._release("gowitness-1.0.0-linux-amd64", payload), payload)
+        installer = _installer(tmp_path, _FakeClient(payload))
         spec = _spec(name="gowitness", binary="gowitness", archive="raw")
-        installer = _installer(tmp_path, client, spec)
 
-        result = installer.install(spec)
+        result = _install(installer, spec, payload, "gowitness-1.0.0-linux-amd64")
 
         assert result.binary.parent == (installer.tools_dir / "gowitness").resolve()
         assert result.binary.stem == "gowitness"
@@ -519,13 +384,12 @@ class TestToolsDirLayout:
 
     def test_reinstall_discards_files_of_the_previous_version(self, tmp_path: Path) -> None:
         archive = _zip_bytes({"subfinder": b"#!/bin/sh\necho new\n"})
-        client = _FakeClient(self._release("subfinder_1.0.0_linux_amd64.zip", archive), archive)
-        installer = _installer(tmp_path, client, _spec())
+        installer = _installer(tmp_path, _FakeClient(archive))
         old = installer.tools_dir / "subfinder" / "CHANGELOG-0.9.md"
         old.parent.mkdir(parents=True)
         old.write_text("old release notes", encoding="utf-8")
 
-        installer.install(_spec())
+        _install(installer, _spec(), archive, _SUBFINDER_ZIP)
 
         assert not old.exists()
 
@@ -533,12 +397,11 @@ class TestToolsDirLayout:
         """Older installs put the binary at ``tools_bin/subfinder`` — the very path that is
         now the tool's directory. Re-installing must replace the file with the directory."""
         archive = _zip_bytes({"subfinder": b"#!/bin/sh\necho new\n"})
-        client = _FakeClient(self._release("subfinder_1.0.0_linux_amd64.zip", archive), archive)
-        installer = _installer(tmp_path, client, _spec())
+        installer = _installer(tmp_path, _FakeClient(archive))
         legacy = installer.tools_dir / "subfinder"
         legacy.write_bytes(b"#!/bin/sh\necho old\n")
 
-        result = installer.install(_spec())
+        result = _install(installer, _spec(), archive, _SUBFINDER_ZIP)
 
         assert legacy.is_dir()
         assert result.binary == (legacy / "subfinder").resolve()
@@ -548,102 +411,13 @@ class TestToolsDirLayout:
         """Earlier versions left the archive next to the binary; a re-install cleans up
         exactly those (they match this tool's asset patterns) and nothing else."""
         archive = _zip_bytes({"subfinder": b"#!/bin/sh\necho ok\n"})
-        client = _FakeClient(self._release("subfinder_1.0.0_linux_amd64.zip", archive), archive)
-        installer = _installer(tmp_path, client, _spec())
+        installer = _installer(tmp_path, _FakeClient(archive))
         ours = installer.tools_dir / "subfinder_0.9.0_linux_amd64.zip"
         theirs = installer.tools_dir / "httpx_0.9.0_linux_amd64.zip"
         ours.write_bytes(b"old")
         theirs.write_bytes(b"not mine")
 
-        installer.install(_spec(asset_patterns=["subfinder_*_linux_amd64.zip"]))
+        _install(installer, _spec(asset_patterns=["subfinder_*_linux_amd64.zip"]), archive, _SUBFINDER_ZIP)
 
         assert not ours.exists()
         assert theirs.exists()
-
-
-class _TagAwareClient(_FakeClient):
-    """Fake that also answers ``release(owner, repo, tag)`` and remembers the tag asked for."""
-
-    def __init__(self, release, archive_bytes: bytes, checksums: str | None = None) -> None:
-        super().__init__(release, archive_bytes, checksums)
-        self.tags: list[str] = []
-
-    def release(self, owner: str, repo: str, tag: str) -> GitHubRelease:
-        self.tags.append(tag)
-        return self.current
-
-
-class TestPinnedVersion:
-    def test_pinned_spec_asks_for_that_tag(self, tmp_path: Path) -> None:
-        archive = _zip_bytes({"subfinder": b"#!/bin/sh\necho ok\n"})
-        asset = ReleaseAsset("subfinder_2.6.6_linux_amd64.zip", "http://x", len(archive))
-        release = GitHubRelease(tag="v2.6.6", assets=[asset], checksums_url=None)
-        client = _TagAwareClient(release, archive)
-        installer = _installer(tmp_path, client, _spec())
-
-        result = installer.install(_spec(version="v2.6.6"))
-
-        assert client.tags == ["v2.6.6"]
-        assert result.version == "2.6.6"
-
-    def test_unpinned_spec_asks_for_latest(self, tmp_path: Path) -> None:
-        archive = _zip_bytes({"subfinder": b"#!/bin/sh\necho ok\n"})
-        asset = ReleaseAsset("subfinder_2.6.6_linux_amd64.zip", "http://x", len(archive))
-        release = GitHubRelease(tag="v2.6.6", assets=[asset], checksums_url=None)
-        client = _TagAwareClient(release, archive)
-        installer = _installer(tmp_path, client, _spec())
-
-        installer.install(_spec())
-
-        assert client.tags == ["latest"]
-
-
-class TestRegistryChecksums:
-    @staticmethod
-    def _release(archive: bytes) -> GitHubRelease:
-        asset = ReleaseAsset("subfinder_1.0.0_linux_amd64.zip", "http://x", len(archive))
-        return GitHubRelease(tag="v1.0.0", assets=[asset], checksums_url=None)
-
-    def test_registry_digest_mismatch_rejects_the_download(self, tmp_path: Path) -> None:
-        """A sha256 pinned in registry.yaml is checked even when upstream publishes no checksums."""
-        archive = _zip_bytes({"subfinder": b"#!/bin/sh\necho ok\n"})
-        client = _TagAwareClient(self._release(archive), archive)
-        installer = _installer(tmp_path, client, _spec())
-        spec = _spec(sha256={"subfinder_1.0.0_linux_amd64.zip": "0" * 64})
-
-        with pytest.raises(ChecksumError):
-            installer.install(spec)
-
-    def test_registry_digest_match_installs(self, tmp_path: Path) -> None:
-        archive = _zip_bytes({"subfinder": b"#!/bin/sh\necho ok\n"})
-        client = _TagAwareClient(self._release(archive), archive)
-        installer = _installer(tmp_path, client, _spec())
-        digest = sha256_hex(_write_tmp_archive(tmp_path, archive))
-
-        result = installer.install(_spec(sha256={"subfinder_1.0.0_linux_amd64.zip": digest}))
-
-        assert result.binary.exists()
-
-    def test_unverifiable_download_is_reported(self, tmp_path: Path, caplog) -> None:
-        """needs_checksum with neither an upstream checksums file nor a registry digest:
-        install, but say so — silence would look like verification happened."""
-        archive = _zip_bytes({"subfinder": b"#!/bin/sh\necho ok\n"})
-        client = _TagAwareClient(self._release(archive), archive)
-        installer = _installer(tmp_path, client, _spec())
-
-        with caplog.at_level("WARNING", logger="cyberfw.manager"):
-            installer.install(_spec(needs_checksum=True))
-
-        assert any("not verified" in r.getMessage() for r in caplog.records)
-
-    def test_upstream_file_without_an_entry_is_reported(self, tmp_path: Path, caplog) -> None:
-        archive = _zip_bytes({"subfinder": b"#!/bin/sh\necho ok\n"})
-        asset = ReleaseAsset("subfinder_1.0.0_linux_amd64.zip", "http://x", len(archive))
-        release = GitHubRelease(tag="v1.0.0", assets=[asset], checksums_url="http://x/sha")
-        client = _TagAwareClient(release, archive, checksums="b" * 64 + "  something_else.zip")
-        installer = _installer(tmp_path, client, _spec())
-
-        with caplog.at_level("WARNING", logger="cyberfw.manager"):
-            installer.install(_spec(needs_checksum=True))
-
-        assert any("not verified" in r.getMessage() for r in caplog.records)

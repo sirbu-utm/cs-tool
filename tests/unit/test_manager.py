@@ -1,17 +1,27 @@
-"""Tests for the ToolManager facade (install bookkeeping, settings plumbing)."""
+"""Tests for the ToolManager facade: installs from tools.lock, install bookkeeping, settings plumbing."""
 
 from __future__ import annotations
 
+import hashlib
 import io
+import json
 import zipfile
 from pathlib import Path
 
 import pytest
 
 from cyberfw.config import Settings
-from cyberfw.exceptions import CyberfwError, DownloadError, ToolNotFoundError
+from cyberfw.exceptions import (
+    ChecksumError,
+    CyberfwError,
+    DownloadError,
+    LockError,
+    RegistryError,
+    ToolNotFoundError,
+)
 from cyberfw.manager import ToolManager
 from cyberfw.manager.github_client import GitHubRelease, ReleaseAsset
+from cyberfw.manager.lock import LockedAsset, LockedTool, ToolLock, read_lock, write_lock
 from cyberfw.manager.platform_map import Mapping
 from cyberfw.manager.registry import load_registry
 
@@ -24,18 +34,28 @@ def _zip_bytes(members: dict[str, bytes]) -> bytes:
     return buffer.getvalue()
 
 
+def _release(tag: str, archive: bytes) -> GitHubRelease:
+    """One linux/amd64 asset of ``archive``, carrying the digest GitHub would report."""
+    name = f"subfinder_{tag.lstrip('v')}_linux_amd64.zip"
+    asset = ReleaseAsset(name, f"https://example.test/{name}", len(archive), hashlib.sha256(archive).hexdigest())
+    return GitHubRelease(tag=tag, assets=[asset], checksums_url=None)
+
+
 class _FakeClient:
+    """GitHub stand-in: one current release; every download serves ``archive_bytes``."""
+
     def __init__(self, release: GitHubRelease, archive_bytes: bytes) -> None:
         self.current = release
         self.archive_bytes = archive_bytes
-
-    def latest(self, owner: str, repo: str) -> GitHubRelease:
-        return self.current
+        self.release_calls = 0
+        self.downloads = 0
 
     def release(self, owner: str, repo: str, tag: str) -> GitHubRelease:
+        self.release_calls += 1
         return self.current
 
     def download(self, url: str, destination: Path, *, expected_size: int | None = None) -> None:
+        self.downloads += 1
         destination.parent.mkdir(parents=True, exist_ok=True)
         destination.write_bytes(self.archive_bytes)
 
@@ -46,36 +66,55 @@ class _FakeClient:
         pass
 
 
-def _manager(tmp_path: Path, archive: bytes, **settings: object) -> ToolManager:
-    registry_path = tmp_path / "registry.yaml"
-    registry_path.write_text(
-        "subfinder:\n  repo: org/subfinder\n  asset_patterns: ['*linux*amd64*']\n  binary: subfinder\n"
-        "  needs_checksum: false\n",
-        encoding="utf-8",
-    )
-    asset = ReleaseAsset("subfinder_1.0.0_linux_amd64.zip", "http://x", len(archive))
-    release = GitHubRelease(tag="v1.0.0", assets=[asset], checksums_url=None)
+class _PartlyBroken(_FakeClient):
+    """Resolves every repo but ``broken``, which GitHub does not know."""
+
+    def release(self, owner: str, repo: str, tag: str) -> GitHubRelease:
+        if repo == "broken":
+            raise DownloadError(f"Repository not found: {owner}/{repo}")
+        return super().release(owner, repo, tag)
+
+
+_LATEST = "subfinder:\n  repo: org/subfinder\n  asset_patterns: ['*linux*amd64*']\n  binary: subfinder\n"
+_PINNED = _LATEST + "  version: v1.0.0\n"
+_BROKEN = "broken:\n  repo: org/broken\n  asset_patterns: ['*linux*amd64*']\n  binary: broken\n"
+
+
+def _manager_with(
+    tmp_path: Path, registry_yaml: str = _LATEST, archive: bytes | None = None, **settings: object
+) -> tuple[ToolManager, _FakeClient]:
+    archive = archive if archive is not None else _zip_bytes({"subfinder": b"#!/bin/sh\necho ok\n"})
+    (tmp_path / "registry.yaml").write_text(registry_yaml, encoding="utf-8")
+    client = _FakeClient(_release("v1.0.0", archive), archive)
     manager = ToolManager(
         Settings(root_dir=tmp_path, **settings),  # type: ignore[arg-type]
-        load_registry(registry_path),
+        load_registry(tmp_path / "registry.yaml"),
         Mapping("linux", "amd64"),
     )
     manager.settings.ensure_dirs()
-    manager._client = _FakeClient(release, archive)  # type: ignore[assignment]
-    return manager
+    manager._client = client  # type: ignore[assignment]
+    return manager, client
+
+
+def _use_registry(manager: ToolManager, tmp_path: Path, registry_yaml: str) -> None:
+    (tmp_path / "registry.yaml").write_text(registry_yaml, encoding="utf-8")
+    manager.registry = load_registry(tmp_path / "registry.yaml")
 
 
 class TestInstall:
-    def test_max_archive_size_setting_reaches_the_installer(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_max_archive_size_setting_reaches_the_installer(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         monkeypatch.delenv("CYBERFW_MAX_ARCHIVE", raising=False)
-        manager = _manager(tmp_path, _zip_bytes({"subfinder": b"#!/bin/sh\n" + b"x" * 100}), max_archive_size=16)
+        archive = _zip_bytes({"subfinder": b"#!/bin/sh\n" + b"x" * 100})
+        manager, _ = _manager_with(tmp_path, archive=archive, max_archive_size=16)
 
         with pytest.raises(DownloadError, match="limit 16"):
             manager.install("subfinder")
         assert manager.install_state("subfinder") is None
 
     def test_successful_install_records_state(self, tmp_path: Path) -> None:
-        manager = _manager(tmp_path, _zip_bytes({"subfinder": b"#!/bin/sh\necho ok\n"}))
+        manager, client = _manager_with(tmp_path)
 
         result = manager.install("subfinder")
 
@@ -83,6 +122,7 @@ class TestInstall:
         assert state is not None
         assert state["version"] == "1.0.0"
         assert state["binary"] == str(result.binary.resolve())
+        assert state["sha256"] == hashlib.sha256(client.archive_bytes).hexdigest()
         assert manager.is_installed("subfinder")
 
 
@@ -114,7 +154,9 @@ class TestLocalTool:
         with pytest.raises(ToolNotFoundError):
             manager.binary_path("nmap")
 
-    def test_an_explicit_path_is_used_over_the_path_lookup(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_an_explicit_path_is_used_over_the_path_lookup(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         exe = tmp_path / "nmap"
         exe.write_text("#!/bin/sh\n", encoding="utf-8")
         manager = self._manager(tmp_path, f"nmap:\n  source: local\n  binary: nmap\n  path: {exe}\n")
@@ -131,56 +173,17 @@ class TestLocalTool:
             manager.install("nmap")
 
     def test_install_all_skips_local_tools(self, tmp_path: Path) -> None:
-        archive = _zip_bytes({"subfinder": b"#!/bin/sh\necho ok\n"})
-        manager = _manager(tmp_path, archive)  # a github subfinder
-        with (tmp_path / "registry.yaml").open("a", encoding="utf-8") as handle:
-            handle.write("nmap:\n  source: local\n  binary: nmap\n")
-        manager.registry = load_registry(tmp_path / "registry.yaml")
+        manager, _ = _manager_with(tmp_path)  # a github subfinder
+        _use_registry(manager, tmp_path, _LATEST + "nmap:\n  source: local\n  binary: nmap\n")
 
         results = manager.install_all()  # must not try to download nmap
 
         assert [r.spec.name for r in results] == ["subfinder"]
 
 
-class _CountingClient(_FakeClient):
-    def __init__(self, release: GitHubRelease, archive_bytes: bytes) -> None:
-        super().__init__(release, archive_bytes)
-        self.release_calls = 0
-        self.downloads = 0
-
-    def release(self, owner: str, repo: str, tag: str) -> GitHubRelease:
-        self.release_calls += 1
-        return self.current
-
-    def download(self, url: str, destination: Path, *, expected_size: int | None = None) -> None:
-        self.downloads += 1
-        super().download(url, destination, expected_size=expected_size)
-
-
-def _manager_with(
-    tmp_path: Path, registry_yaml: str, archive: bytes, tag: str = "v1.0.0"
-) -> tuple[ToolManager, _CountingClient]:
-    (tmp_path / "registry.yaml").write_text(registry_yaml, encoding="utf-8")
-    asset = ReleaseAsset(f"subfinder_{tag.lstrip('v')}_linux_amd64.zip", "http://x", len(archive))
-    client = _CountingClient(GitHubRelease(tag=tag, assets=[asset], checksums_url=None), archive)
-    manager = ToolManager(
-        Settings(root_dir=tmp_path), load_registry(tmp_path / "registry.yaml"), Mapping("linux", "amd64")
-    )
-    manager.settings.ensure_dirs()
-    manager._client = client  # type: ignore[assignment]
-    return manager, client
-
-
-_LATEST = (
-    "subfinder:\n  repo: org/subfinder\n  asset_patterns: ['*linux*amd64*']\n"
-    "  binary: subfinder\n  needs_checksum: false\n"
-)
-_PINNED = _LATEST + "  version: v1.0.0\n"
-
-
 class TestSkipUpToDate:
     def test_second_install_of_the_same_version_downloads_nothing(self, tmp_path: Path) -> None:
-        manager, client = _manager_with(tmp_path, _LATEST, _zip_bytes({"subfinder": b"#!/bin/sh\necho ok\n"}))
+        manager, client = _manager_with(tmp_path)
         first = manager.install("subfinder")
         second = manager.install("subfinder")
 
@@ -190,15 +193,16 @@ class TestSkipUpToDate:
         assert second.binary == first.binary and second.version == "1.0.0"
 
     def test_force_reinstalls(self, tmp_path: Path) -> None:
-        manager, client = _manager_with(tmp_path, _LATEST, _zip_bytes({"subfinder": b"#!/bin/sh\necho ok\n"}))
+        manager, client = _manager_with(tmp_path)
         manager.install("subfinder")
         result = manager.install("subfinder", force=True)
 
         assert client.downloads == 2
         assert result.up_to_date is False
 
-    def test_pinned_version_already_installed_needs_no_network(self, tmp_path: Path) -> None:
-        manager, client = _manager_with(tmp_path, _PINNED, _zip_bytes({"subfinder": b"#!/bin/sh\necho ok\n"}))
+    @pytest.mark.parametrize("registry_yaml", [_LATEST, _PINNED], ids=["latest", "pinned"])
+    def test_a_locked_installed_tool_needs_no_network(self, tmp_path: Path, registry_yaml: str) -> None:
+        manager, client = _manager_with(tmp_path, registry_yaml)
         manager.install("subfinder")
         calls_after_first = client.release_calls
 
@@ -207,25 +211,8 @@ class TestSkipUpToDate:
         assert result.up_to_date is True
         assert client.release_calls == calls_after_first
 
-    def test_newer_release_is_installed_over_the_old_one(self, tmp_path: Path) -> None:
-        manager, client = _manager_with(tmp_path, _LATEST, _zip_bytes({"subfinder": b"#!/bin/sh\necho ok\n"}))
-        manager.install("subfinder")
-        newer = _zip_bytes({"subfinder": b"#!/bin/sh\necho v2\n"})
-        client.current = GitHubRelease(
-            tag="v2.0.0",
-            assets=[ReleaseAsset("subfinder_2.0.0_linux_amd64.zip", "http://x", len(newer))],
-            checksums_url=None,
-        )
-        client.archive_bytes = newer
-
-        result = manager.install("subfinder")
-
-        assert result.up_to_date is False
-        assert result.version == "2.0.0"
-        assert client.downloads == 2
-
     def test_missing_binary_is_reinstalled_despite_matching_state(self, tmp_path: Path) -> None:
-        manager, client = _manager_with(tmp_path, _PINNED, _zip_bytes({"subfinder": b"#!/bin/sh\necho ok\n"}))
+        manager, client = _manager_with(tmp_path, _PINNED)
         first = manager.install("subfinder")
         first.binary.unlink()
 
@@ -233,3 +220,183 @@ class TestSkipUpToDate:
 
         assert result.up_to_date is False
         assert client.downloads == 2
+
+    def test_a_pre_lock_install_is_reinstalled_once_and_verified(self, tmp_path: Path) -> None:
+        """1.x recorded no archive hash, so such an install was never checked against the
+        lock: it is downloaded and verified once, then counts as up to date."""
+        manager, client = _manager_with(tmp_path)
+        manager.install("subfinder")
+        state_path = tmp_path / "tools_bin" / ".subfinder.install.json"
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+        del state["sha256"]
+        state_path.write_text(json.dumps(state), encoding="utf-8")
+
+        second = manager.install("subfinder")
+        third = manager.install("subfinder")
+
+        assert second.up_to_date is False and third.up_to_date is True
+        assert client.downloads == 2
+
+
+class TestLockedInstall:
+    def test_the_lock_defaults_to_the_root_dir(self, tmp_path: Path) -> None:
+        manager, _ = _manager_with(tmp_path)
+
+        assert manager.lock_path == tmp_path / "tools.lock"
+
+    def test_a_tool_missing_from_the_lock_is_added_and_written(self, tmp_path: Path) -> None:
+        manager, client = _manager_with(tmp_path)
+
+        manager.install("subfinder")
+
+        lock = read_lock(tmp_path / "tools.lock")
+        assert lock is not None
+        entry = lock.tools["subfinder"]
+        assert entry.repo == "org/subfinder" and entry.tag == "v1.0.0"
+        assert entry.assets["linux/amd64"].sha256 == hashlib.sha256(client.archive_bytes).hexdigest()
+
+    def test_an_explicit_lock_path_is_used(self, tmp_path: Path) -> None:
+        manager, client = _manager_with(tmp_path)
+        pins = tmp_path / "pins"
+        pins.mkdir()
+        other = ToolManager(manager.settings, manager.registry, manager.mapping, lock_path=pins / "tools.lock")
+        other._client = client  # type: ignore[assignment]
+
+        other.install("subfinder")
+
+        assert (pins / "tools.lock").is_file()
+        assert not (tmp_path / "tools.lock").exists()
+
+    def test_install_never_rewrites_an_existing_entry(self, tmp_path: Path) -> None:
+        manager, client = _manager_with(tmp_path)
+        manager.install("subfinder")
+        before = (tmp_path / "tools.lock").read_bytes()
+        client.current = _release("v2.0.0", client.archive_bytes)  # upstream moved on
+        (tmp_path / "tools_bin" / ".subfinder.install.json").unlink()
+
+        result = manager.install("subfinder")
+
+        assert result.version == "1.0.0"
+        assert (tmp_path / "tools.lock").read_bytes() == before
+        assert client.release_calls == 1
+
+    def test_a_newer_release_waits_for_lock_upgrade(self, tmp_path: Path) -> None:
+        manager, client = _manager_with(tmp_path)
+        manager.install("subfinder")
+        newer = _zip_bytes({"subfinder": b"#!/bin/sh\necho v2\n"})
+        client.current, client.archive_bytes = _release("v2.0.0", newer), newer
+
+        assert manager.install("subfinder").up_to_date is True  # still the locked 1.0.0
+        update = manager.update_lock(["subfinder"], upgrade=True)
+        result = manager.install("subfinder")
+
+        assert [(c.before, c.after, c.change) for c in update.changes] == [("v1.0.0", "v2.0.0", "upgraded")]
+        assert result.version == "2.0.0" and result.up_to_date is False
+
+    def test_a_stale_entry_is_an_error_not_a_silent_reinstall(self, tmp_path: Path) -> None:
+        manager, _ = _manager_with(tmp_path)
+        manager.install("subfinder")
+        _use_registry(manager, tmp_path, _LATEST + "  version: v2.0.0\n")
+
+        with pytest.raises(LockError, match="run `cyberfw lock`"):
+            manager.install("subfinder")
+
+    def test_no_locked_asset_for_this_platform(self, tmp_path: Path) -> None:
+        manager, _ = _manager_with(tmp_path)
+        windows = LockedAsset(
+            name="subfinder_1.0.0_windows_amd64.zip",
+            url="https://example.test/subfinder_1.0.0_windows_amd64.zip",
+            sha256="a" * 64,
+            source="digest",
+        )
+        entry = LockedTool(repo="org/subfinder", tag="v1.0.0", assets={"windows/amd64": windows})
+        write_lock(tmp_path / "tools.lock", ToolLock(tools={"subfinder": entry}))
+
+        with pytest.raises(DownloadError, match="no locked asset for linux/amd64"):
+            manager.install("subfinder")
+
+    def test_a_hash_mismatch_fails_and_records_no_state(self, tmp_path: Path) -> None:
+        manager, client = _manager_with(tmp_path)
+        manager.update_lock()
+        client.archive_bytes = _zip_bytes({"subfinder": b"#!/bin/sh\necho tampered\n"})
+
+        with pytest.raises(ChecksumError, match="tools.lock has"):
+            manager.install("subfinder")
+        assert manager.install_state("subfinder") is None
+
+
+class TestUpdateLock:
+    def test_creates_the_lock_with_every_downloadable_tool(self, tmp_path: Path) -> None:
+        manager, _ = _manager_with(tmp_path)
+
+        update = manager.update_lock()
+
+        assert update.written and update.path == tmp_path / "tools.lock"
+        assert [(c.tool, c.before, c.after, c.change, c.sources) for c in update.changes] == [
+            ("subfinder", None, "v1.0.0", "added", "digest")
+        ]
+
+    def test_a_second_run_changes_nothing_and_asks_github_nothing(self, tmp_path: Path) -> None:
+        manager, client = _manager_with(tmp_path)
+        manager.update_lock()
+        before, calls = (tmp_path / "tools.lock").read_bytes(), client.release_calls
+
+        update = manager.update_lock()
+
+        assert not update.written
+        assert [c.change for c in update.changes] == ["unchanged"]
+        assert (tmp_path / "tools.lock").read_bytes() == before
+        assert client.release_calls == calls
+
+    def test_a_tool_gone_from_the_registry_is_dropped_only_without_names(self, tmp_path: Path) -> None:
+        manager, _ = _manager_with(tmp_path)
+        manager.update_lock()
+        _use_registry(manager, tmp_path, "nmap:\n  source: local\n  binary: nmap\n")
+
+        assert manager.update_lock(["nmap"]).changes == []  # named: no pruning; a local tool is skipped
+        update = manager.update_lock()
+
+        assert [(c.tool, c.change) for c in update.changes] == [("subfinder", "removed")]
+        lock = read_lock(tmp_path / "tools.lock")
+        assert lock is not None and lock.tools == {}
+
+    def test_plain_lock_re_resolves_a_stale_entry(self, tmp_path: Path) -> None:
+        manager, client = _manager_with(tmp_path)
+        manager.update_lock()
+        _use_registry(manager, tmp_path, _LATEST + "  version: v2.0.0\n")
+        client.current = _release("v2.0.0", client.archive_bytes)
+
+        update = manager.update_lock()
+
+        assert [(c.before, c.after, c.change) for c in update.changes] == [("v1.0.0", "v2.0.0", "re-resolved")]
+
+    def test_upgrade_refuses_a_changed_file_under_the_same_tag(self, tmp_path: Path) -> None:
+        """Same tag, different bytes: upstream replaced a published asset — what the lock exists to catch."""
+        manager, client = _manager_with(tmp_path)
+        manager.update_lock()
+        before = (tmp_path / "tools.lock").read_bytes()
+        client.current = _release("v1.0.0", _zip_bytes({"subfinder": b"#!/bin/sh\necho replaced\n"}))
+
+        update = manager.update_lock(upgrade=True)
+
+        [change] = update.changes
+        assert change.change == "failed" and "changed upstream" in change.error
+        assert update.failed and not update.written
+        assert (tmp_path / "tools.lock").read_bytes() == before
+
+    def test_a_tool_that_fails_to_resolve_is_reported_and_the_rest_written(self, tmp_path: Path) -> None:
+        manager, client = _manager_with(tmp_path, _LATEST + _BROKEN)
+        manager._client = _PartlyBroken(client.current, client.archive_bytes)  # type: ignore[assignment]
+
+        update = manager.update_lock()
+
+        assert {c.tool: c.change for c in update.changes} == {"broken": "failed", "subfinder": "added"}
+        assert update.failed and update.written
+        lock = read_lock(tmp_path / "tools.lock")
+        assert lock is not None and set(lock.tools) == {"subfinder"}
+
+    def test_an_unknown_name_is_a_registry_error(self, tmp_path: Path) -> None:
+        manager, _ = _manager_with(tmp_path)
+
+        with pytest.raises(RegistryError):
+            manager.update_lock(["nope"])

@@ -1,20 +1,35 @@
 """Dependency-management subsystem (ToolManager): install and verify tools.
 
 Public surface is the :class:`ToolManager`, which ties together the GitHub
-client, OS/Arch mapping and installer to fetch precompiled binaries from
-GitHub Releases with zero user friction.
+client, OS/Arch mapping, installer and ``tools.lock`` to fetch precompiled
+binaries from GitHub Releases — exactly the releases the lock pins, each archive
+verified against its locked SHA-256.
 """
 
 from __future__ import annotations
 
 import json
+import tempfile
 from pathlib import Path
 
 from cyberfw.config import Settings
-from cyberfw.exceptions import CyberfwError, ToolNotFoundError
+from cyberfw.exceptions import CyberfwError, DownloadError, LockError, ToolNotFoundError
 from cyberfw.manager.chromium import ChromiumInstallResult
 from cyberfw.manager.github_client import GitHubClient
 from cyberfw.manager.installer import InstallResult, ToolInstaller
+from cyberfw.manager.lock import (
+    LOCK_NAME,
+    ChangeKind,
+    LockChange,
+    LockedTool,
+    LockUpdate,
+    ToolLock,
+    read_lock,
+    rehashed_platforms,
+    resolve_tool,
+    stale_reason,
+    write_lock,
+)
 from cyberfw.manager.platform_map import Mapping, asset_patterns, get_target
 from cyberfw.manager.registry import ToolRegistry, ToolSpec, load_registry
 from cyberfw.manager.verify import ensure_binary, find_in_path
@@ -40,11 +55,19 @@ class ToolManager:
     """Facade over install/verify for the CLI and pipeline engine."""
 
     def __init__(
-        self, settings: Settings, registry: ToolRegistry, mapping: Mapping | None = None
+        self,
+        settings: Settings,
+        registry: ToolRegistry,
+        mapping: Mapping | None = None,
+        *,
+        lock_path: Path | None = None,
     ) -> None:
         self.settings = settings
         self.registry = registry
         self.mapping = mapping or get_target()
+        #: The ``tools.lock`` installs come from: next to the registry in use (the
+        #: CLI passes that); ``<root_dir>/tools.lock`` when not given.
+        self.lock_path = lock_path if lock_path is not None else settings.root_dir / LOCK_NAME
         self._client: GitHubClient | None = None
 
     @property
@@ -64,6 +87,88 @@ class ToolManager:
 
     def spec(self, name: str) -> ToolSpec:
         return self.registry.require(name)
+
+    # -- tools.lock -----------------------------------------------------------
+    def load_lock(self) -> ToolLock:
+        """The lock on disk, or an empty one when there is no file yet."""
+        return read_lock(self.lock_path) or ToolLock()
+
+    def _resolve(self, spec: ToolSpec) -> LockedTool:
+        with tempfile.TemporaryDirectory(prefix="cyberfw-lock-") as work:
+            return resolve_tool(self.client, spec, work_dir=Path(work))
+
+    def locked(self, name: str) -> LockedTool:
+        """``name``'s entry in ``tools.lock``, adding it (and writing the lock) when
+        the tool is not locked yet. An entry the registry no longer matches is a
+        :class:`LockError`: installing never rewrites a pin — ``cyberfw lock`` does."""
+        spec = self.spec(name)
+        lock = self.load_lock()
+        entry = lock.tools.get(name)
+        if entry is None:
+            entry = self._resolve(spec)
+            write_lock(self.lock_path, ToolLock(tools={**lock.tools, name: entry}))
+        reason = stale_reason(spec, entry)
+        if reason is not None:
+            raise LockError(f"{LOCK_NAME} is out of date for {name}: {reason} — run `cyberfw lock`")
+        return entry
+
+    def update_lock(self, names: list[str] | None = None, *, upgrade: bool = False) -> LockUpdate:
+        """Bring ``tools.lock`` in line with the registry; write it if anything changed.
+
+        Tools missing from the lock are added and stale entries (a changed
+        ``repo`` / ``version:``) re-resolved; without ``names``, entries for tools
+        gone from the registry (or now ``local``) are dropped. ``upgrade`` also
+        re-resolves the entries that still match, moving them to the newest
+        release the registry allows — but a release whose already-locked files
+        changed under the same tag is refused and its entry kept. ``names``
+        limits which tools are considered; an unknown one is a RegistryError.
+        """
+        lock = self.load_lock()
+        tools = dict(lock.tools)
+        downloadable = [name for name in self.registry.names() if not self.spec(name).is_local]
+        changes: list[LockChange] = []
+        if names is None:
+            for gone in sorted(set(tools) - set(downloadable)):
+                changes.append(LockChange(gone, tools.pop(gone).tag, None, "removed"))
+        for name in downloadable if names is None else names:
+            spec = self.spec(name)
+            if spec.is_local:
+                continue
+            entry = tools.get(name)
+            before = entry.tag if entry is not None else None
+            stale = entry is not None and stale_reason(spec, entry) is not None
+            if entry is not None and not stale and not upgrade:
+                changes.append(LockChange(name, before, before, "unchanged", entry.sources))
+                continue
+            try:
+                fresh = self._resolve(spec)
+            except CyberfwError as exc:
+                changes.append(LockChange(name, before, None, "failed", error=str(exc)))
+                continue
+            change: ChangeKind
+            if entry is None:
+                change = "added"
+            elif stale:
+                change = "re-resolved"
+            elif fresh.tag != entry.tag:
+                change = "upgraded"
+            elif replaced := rehashed_platforms(entry, fresh):
+                error = (
+                    f"{entry.tag} changed upstream after it was locked ({', '.join(replaced)}); "
+                    f"kept the locked files — to accept the new ones, remove {name} from "
+                    f"{LOCK_NAME} and run `cyberfw lock {name}`"
+                )
+                changes.append(LockChange(name, before, before, "failed", error=error))
+                continue
+            else:
+                change = "unchanged" if fresh == entry else "updated"
+            tools[name] = fresh
+            changes.append(LockChange(name, before, fresh.tag, change, fresh.sources))
+        updated = ToolLock(tools=tools)
+        written = updated != lock
+        if written:
+            write_lock(self.lock_path, updated)
+        return LockUpdate(changes=changes, written=written, path=self.lock_path)
 
     def binary_path(self, name: str) -> Path:
         """Return the binary path for ``name`` or raise ``ToolNotFoundError``.
@@ -122,43 +227,47 @@ class ToolManager:
         )
 
     def install(self, name: str, *, force: bool = False) -> InstallResult:
-        """Install one tool; returns where its binary lives.
+        """Install one tool exactly as ``tools.lock`` pins it.
 
-        Nothing is downloaded when the wanted version is already installed and
-        runnable: a pinned ``version`` is compared against the install record
-        without touching the network, ``latest`` after one (cached) API call.
-        ``force`` re-downloads regardless.
+        A tool missing from the lock is added to it first. Nothing is downloaded —
+        and no network is touched — when the locked version is already installed
+        from the locked archive (the install state records both). A pre-lock
+        install has no recorded hash, so it is re-downloaded once and verified.
+        ``force`` re-downloads (and re-verifies) regardless.
         """
         spec = self.registry.require(name)
         if spec.is_local:
             raise CyberfwError(
                 f"{name} is a local tool — install it with your package manager (apt/brew/winget), not via cyberfw"
             )
+        entry = self.locked(name)
+        asset = entry.assets.get(self.mapping.label)
+        if asset is None:
+            raise DownloadError(f"{name} {entry.tag} has no locked asset for {self.mapping.label}")
+        state = None if force else self.install_state(name)
+        if (
+            state is not None
+            and state.get("version") == entry.version
+            and state.get("sha256") == asset.sha256
+            and self.is_installed(name)
+        ):
+            return InstallResult(spec, self.binary_path(name), entry.version, up_to_date=True)
+
+        state_path = self.settings.tools_dir / f".{name}.install.json"
+        state_path.unlink(missing_ok=True)
         installer = ToolInstaller(
             self.client,
             self.settings.tools_dir,
             self.mapping,
             max_archive_size=self.settings.max_archive_size,
         )
-        state = self.install_state(name) if not force else None
-        installed = state.get("version") if state is not None and self.is_installed(name) else None
-        release = None
-        if installed is not None:
-            wanted = spec.pinned_version
-            if wanted is None:
-                release = installer.resolve_release(spec)
-                wanted = release.version
-            if installed == wanted:
-                return InstallResult(spec, self.binary_path(name), installed, up_to_date=True)
-
-        state_path = self.settings.tools_dir / f".{name}.install.json"
-        state_path.unlink(missing_ok=True)
-        result = installer.install(spec, release)
+        result = installer.install_locked(spec, entry.version, asset)
         state_path.write_text(
             json.dumps(
                 {
                     "binary": str(result.binary.resolve()),
                     "version": result.version,
+                    "sha256": asset.sha256,
                     "os": self.mapping.os_name,
                     "arch": self.mapping.arch,
                 }

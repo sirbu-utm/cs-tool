@@ -13,6 +13,7 @@ from __future__ import annotations
 import contextlib
 import os
 import re
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, Protocol
 
@@ -30,13 +31,17 @@ from cyberfw.manager.verify import checksum_for, sha256_hex
 __all__ = [
     "LOCK_FORMAT",
     "LOCK_NAME",
+    "ChangeKind",
     "HashSource",
+    "LockChange",
+    "LockUpdate",
     "LockedAsset",
     "LockedTool",
     "ReleaseSource",
     "ToolLock",
     "dump_lock",
     "read_lock",
+    "rehashed_platforms",
     "resolve_tool",
     "stale_reason",
     "write_lock",
@@ -102,6 +107,11 @@ class LockedTool(BaseModel):
     def version(self) -> str:
         """``1.2.3`` for tag ``v1.2.3`` — the form the install state records."""
         return self.tag.lstrip("vV")
+
+    @property
+    def sources(self) -> str:
+        """Where its hashes came from, e.g. ``"checksums, digest"``."""
+        return ", ".join(sorted({asset.source for asset in self.assets.values()}))
 
 
 class ToolLock(BaseModel):
@@ -258,3 +268,43 @@ def stale_reason(spec: ToolSpec, entry: LockedTool) -> str | None:
     if spec.pinned_version is not None and entry.version != spec.pinned_version:
         return f"registry pins {spec.version}, lock has {entry.tag}"
     return None
+
+
+#: How ``cyberfw lock`` changed one tool's entry.
+ChangeKind = Literal["added", "upgraded", "re-resolved", "updated", "removed", "unchanged", "failed"]
+
+
+@dataclass(frozen=True)
+class LockChange:
+    """One row of ``cyberfw lock``'s report."""
+
+    tool: str
+    before: str | None  # the locked tag before; None when it was not locked
+    after: str | None  # the locked tag now; None when removed or not resolved
+    change: ChangeKind
+    sources: str = ""
+    error: str = ""
+
+
+@dataclass(frozen=True)
+class LockUpdate:
+    """What updating the lock did."""
+
+    changes: list[LockChange]
+    written: bool
+    path: Path
+
+    @property
+    def failed(self) -> bool:
+        return any(change.change == "failed" for change in self.changes)
+
+
+def rehashed_platforms(locked: LockedTool, fresh: LockedTool) -> list[str]:
+    """Platforms locked in both whose asset name or hash differs — under one tag,
+    that means upstream replaced a file it had already published."""
+    return [
+        label
+        for label, asset in locked.assets.items()
+        if label in fresh.assets
+        and (fresh.assets[label].sha256 != asset.sha256 or fresh.assets[label].name != asset.name)
+    ]
