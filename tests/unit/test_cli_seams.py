@@ -27,3 +27,17 @@ def test_patch_cli_replaces_every_binding(monkeypatch: pytest.MonkeyPatch) -> No
 def test_patch_cli_refuses_a_name_no_module_binds(monkeypatch: pytest.MonkeyPatch) -> None:
     with pytest.raises(AssertionError, match="binds"):
         patch_cli(monkeypatch, "no_such_thing", None)
+
+
+def test_monkeypatching_the_helper_rebinds_every_module() -> None:
+    # `monkeypatch.setattr(cli, ...)` must reach the CLI modules rather than shadow
+    # the name on the helper, and undoing it must put the real function back everywhere.
+    real = cli._is_interactive
+    with pytest.MonkeyPatch.context() as monkeypatch:
+        monkeypatch.setattr(cli, "_is_interactive", lambda: "patched")
+        patched = [vars(module)["_is_interactive"] for module in cli_modules() if "_is_interactive" in vars(module)]
+        assert patched and all(function() == "patched" for function in patched)
+
+    restored = [vars(module)["_is_interactive"] for module in cli_modules() if "_is_interactive" in vars(module)]
+    assert restored and all(function is real for function in restored)
+    assert "_is_interactive" not in vars(cli)
