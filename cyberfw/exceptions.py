@@ -57,6 +57,10 @@ class ChecksumError(CyberfwError):
     """SHA-256 verification failed for a downloaded archive."""
 
 
+class LockError(CyberfwError):
+    """``tools.lock`` is malformed, out of date for the registry, or cannot be written."""
+
+
 class ChromiumUnsupportedError(CyberfwError):
     """Chrome for Testing publishes no portable build for the current OS/arch."""
 

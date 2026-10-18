@@ -14,7 +14,7 @@ from __future__ import annotations
 import platform
 from dataclasses import dataclass
 
-__all__ = ["Mapping", "get_target", "asset_patterns"]
+__all__ = ["Mapping", "SUPPORTED_PLATFORMS", "get_target", "asset_patterns"]
 
 
 @dataclass(frozen=True)
@@ -41,6 +41,17 @@ class Mapping:
     def arch_umbrella(self) -> str:
         """Return ``arm64`` if this is any 64-bit ARM, else the raw arch."""
         return "arm64" if self.arch == "arm64" else self.arch
+
+
+#: The platforms a ``tools.lock`` covers — the OS/arch pairs registry.yaml lists
+#: assets for — in the order the lock file lists them.
+SUPPORTED_PLATFORMS: tuple[Mapping, ...] = (
+    Mapping("linux", "amd64"),
+    Mapping("linux", "arm64"),
+    Mapping("darwin", "amd64"),
+    Mapping("darwin", "arm64"),
+    Mapping("windows", "amd64"),
+)
 
 
 def get_target() -> Mapping:
