@@ -11,13 +11,14 @@ from __future__ import annotations
 
 import hashlib
 import os
+import re
 import shutil
 import stat
 from pathlib import Path
 
 from cyberfw.exceptions import ChecksumError, ToolNotFoundError
 
-__all__ = ["sha256_hex", "verify_checksum", "ensure_binary", "find_in_path", "is_executable"]
+__all__ = ["sha256_hex", "checksum_for", "verify_checksum", "ensure_binary", "find_in_path", "is_executable"]
 
 _HASH_CHUNK = 1 << 20
 
@@ -102,6 +103,31 @@ def ensure_binary(tools_dir: Path, name: str, binary_hint: str | None = None) ->
     )
 
 
+_SHA256_HEX = re.compile(r"[0-9a-f]{64}")
+
+
+def checksum_for(checksums_text: str | bytes, asset_name: str) -> str | None:
+    """The SHA-256 a ``checksums.txt`` lists for exactly ``asset_name``, or ``None``.
+
+    Lines are ``<sha256>  [*][dir/]<name>``. The name must equal ``asset_name`` —
+    a suffix match would take ``mytool_linux_amd64.zip``'s line for
+    ``tool_linux_amd64.zip``. An entry that is not a SHA-256 (a SHA-512 file,
+    say) counts as no entry. Returned lowercase.
+    """
+    if isinstance(checksums_text, bytes):
+        checksums_text = checksums_text.decode("utf-8", errors="replace")
+    for line in checksums_text.splitlines():
+        parts = line.strip().split(maxsplit=1)
+        if len(parts) != 2:
+            continue
+        digest, name = parts
+        if name.lstrip("*").rsplit("/", 1)[-1] != asset_name:
+            continue
+        digest = digest.lower()
+        return digest if _SHA256_HEX.fullmatch(digest) else None
+    return None
+
+
 def verify_checksum(checksums_text: str | bytes, asset_name: str, archive_path: Path) -> bool:
     """Check ``archive_path`` against the SHA-256 upstream lists for ``asset_name``.
 
@@ -114,22 +140,10 @@ def verify_checksum(checksums_text: str | bytes, asset_name: str, archive_path: 
     unverified download); a present-but-mismatched entry raises
     :class:`ChecksumError` so a corrupted download is never unpacked.
     """
-    if isinstance(checksums_text, bytes):
-        checksums_text = checksums_text.decode("utf-8", errors="replace")
-    entry: str | None = None
-    for line in checksums_text.splitlines():
-        parts = line.strip().split(maxsplit=1)
-        if len(parts) != 2:
-            continue
-        digest, name = parts
-        if name.lstrip("*").rsplit("/", 1)[-1] == asset_name:
-            entry = digest
-            break
+    entry = checksum_for(checksums_text, asset_name)
     if entry is None:
-        return False  # upstream publishes no checksum for this archive
+        return False  # upstream publishes no SHA-256 for this archive
     actual = sha256_hex(archive_path)
-    if actual != entry.lower():
-        raise ChecksumError(
-            f"SHA-256 mismatch for {asset_name}: expected {entry.lower()}, got {actual}"
-        )
+    if actual != entry:
+        raise ChecksumError(f"SHA-256 mismatch for {asset_name}: expected {entry}, got {actual}")
     return True

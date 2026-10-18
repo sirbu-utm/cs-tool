@@ -2,12 +2,24 @@
 
 from __future__ import annotations
 
+import hashlib
 from pathlib import Path
 
 import pytest
 
 from cyberfw.exceptions import LockError
-from cyberfw.manager.lock import LockedAsset, LockedTool, ToolLock, dump_lock, read_lock, write_lock
+from cyberfw.manager.github_client import GitHubRelease, ReleaseAsset
+from cyberfw.manager.lock import (
+    LockedAsset,
+    LockedTool,
+    ToolLock,
+    dump_lock,
+    read_lock,
+    resolve_tool,
+    stale_reason,
+    write_lock,
+)
+from cyberfw.manager.registry import ToolSpec
 
 _HEX_A = "a" * 64
 
@@ -139,3 +151,184 @@ class TestLockFile:
 
         assert path.read_text(encoding="utf-8") == _VALID
         assert not (tmp_path / "tools.lock.tmp").exists()
+
+
+_PLATFORM_NAMES = {
+    "linux/amd64": "t_1.0.0_linux_amd64.zip",
+    "linux/arm64": "t_1.0.0_linux_arm64.zip",
+    "darwin/amd64": "t_1.0.0_darwin_amd64.zip",
+    "darwin/arm64": "t_1.0.0_darwin_arm64.zip",
+    "windows/amd64": "t_1.0.0_windows_amd64.zip",
+}
+
+
+def _sha(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
+def _payload(name: str) -> bytes:
+    return f"archive {name}".encode()
+
+
+def _release(
+    names: list[str] | None = None, *, digests: bool = True, checksums_url: str | None = None
+) -> GitHubRelease:
+    names = list(_PLATFORM_NAMES.values()) if names is None else names
+    return GitHubRelease(
+        tag="v1.0.0",
+        assets=[
+            ReleaseAsset(n, f"https://example.test/{n}", len(_payload(n)), _sha(_payload(n)) if digests else None)
+            for n in names
+        ],
+        checksums_url=checksums_url,
+    )
+
+
+def _listing(digest_of: object = None) -> str:
+    """A checksums.txt for every platform asset (the real hashes unless overridden)."""
+    return "".join(f"{digest_of or _sha(_payload(n))}  {n}\n" for n in _PLATFORM_NAMES.values())
+
+
+class _Releases:
+    """A GitHub stand-in: one release, an optional checksums body, asset bytes by URL."""
+
+    def __init__(self, release: GitHubRelease, checksums: str = "") -> None:
+        self.current = release
+        self.checksums = checksums
+        self.tags: list[str] = []
+        self.downloads: list[str] = []
+
+    def release(self, owner: str, repo: str, tag: str) -> GitHubRelease:
+        self.tags.append(tag)
+        return self.current
+
+    def fetch_text(self, url: str) -> str:
+        return self.checksums
+
+    def download(self, url: str, destination: Path, *, expected_size: int | None = None) -> None:
+        self.downloads.append(url)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes(_payload(url.rsplit("/", 1)[-1]))
+
+
+def _spec(**overrides: object) -> ToolSpec:
+    fields: dict[str, object] = {"repo": "org/t", "asset_patterns": [], "binary": "t"}
+    fields.update(overrides)
+    return ToolSpec(name="t", **fields)  # type: ignore[arg-type]
+
+
+_CHECKSUMS_URL = "https://example.test/checksums.txt"
+
+
+class TestResolveTool:
+    def test_api_digests_lock_every_platform_without_downloading(self, tmp_path: Path) -> None:
+        client = _Releases(_release())
+
+        entry = resolve_tool(client, _spec(), work_dir=tmp_path)
+
+        assert entry.repo == "org/t" and entry.tag == "v1.0.0"
+        assert {label: a.name for label, a in entry.assets.items()} == _PLATFORM_NAMES
+        assert {a.source for a in entry.assets.values()} == {"digest"}
+        linux = entry.assets["linux/amd64"]
+        assert linux.sha256 == _sha(_payload(linux.name))
+        assert linux.url == f"https://example.test/{linux.name}"
+        assert client.downloads == []
+
+    def test_the_checksums_file_is_used_without_a_digest(self, tmp_path: Path) -> None:
+        client = _Releases(_release(digests=False, checksums_url=_CHECKSUMS_URL), _listing())
+
+        entry = resolve_tool(client, _spec(), work_dir=tmp_path)
+
+        assert {a.source for a in entry.assets.values()} == {"checksums"}
+        assert client.downloads == []
+
+    def test_an_agreeing_digest_and_checksums_lock_fine(self, tmp_path: Path) -> None:
+        client = _Releases(_release(checksums_url=_CHECKSUMS_URL), _listing())
+
+        entry = resolve_tool(client, _spec(), work_dir=tmp_path)
+
+        assert {a.source for a in entry.assets.values()} == {"digest"}
+
+    def test_a_disagreeing_digest_and_checksums_refuse_to_lock(self, tmp_path: Path) -> None:
+        client = _Releases(_release(checksums_url=_CHECKSUMS_URL), _listing("0" * 64))
+
+        with pytest.raises(LockError, match="disagree"):
+            resolve_tool(client, _spec(), work_dir=tmp_path)
+
+    def test_with_neither_the_asset_is_downloaded_hashed_and_removed(self, tmp_path: Path) -> None:
+        client = _Releases(_release(digests=False))
+
+        entry = resolve_tool(client, _spec(), work_dir=tmp_path)
+
+        assert {a.source for a in entry.assets.values()} == {"download"}
+        windows = entry.assets["windows/amd64"]
+        assert windows.sha256 == _sha(_payload(windows.name))
+        assert len(client.downloads) == 5
+        assert list(tmp_path.iterdir()) == []
+
+    def test_a_sha512_checksums_file_counts_as_no_checksum(self, tmp_path: Path) -> None:
+        client = _Releases(_release(digests=False, checksums_url=_CHECKSUMS_URL), _listing("c" * 128))
+
+        entry = resolve_tool(client, _spec(), work_dir=tmp_path)
+
+        assert {a.source for a in entry.assets.values()} == {"download"}
+
+    def test_a_platform_without_an_asset_is_left_out(self, tmp_path: Path) -> None:
+        names = [_PLATFORM_NAMES["linux/amd64"], _PLATFORM_NAMES["windows/amd64"]]
+
+        entry = resolve_tool(_Releases(_release(names)), _spec(), work_dir=tmp_path)
+
+        assert set(entry.assets) == {"linux/amd64", "windows/amd64"}
+
+    def test_a_release_with_no_usable_asset_is_a_lock_error(self, tmp_path: Path) -> None:
+        with pytest.raises(LockError, match="no asset"):
+            resolve_tool(_Releases(_release(["t_1.0.0_plan9_mips.zip"])), _spec(), work_dir=tmp_path)
+
+    def test_one_asset_shared_by_two_platforms_is_hashed_once(self, tmp_path: Path) -> None:
+        universal = "t_1.0.0_darwin_all.zip"
+        client = _Releases(_release([universal], digests=False))
+
+        entry = resolve_tool(client, _spec(asset_patterns=["t_*_darwin_all.zip"]), work_dir=tmp_path)
+
+        assert set(entry.assets) == {"darwin/amd64", "darwin/arm64"}
+        assert client.downloads == [f"https://example.test/{universal}"]
+
+    def test_a_registry_pin_resolves_that_tag(self, tmp_path: Path) -> None:
+        client = _Releases(_release())
+
+        resolve_tool(client, _spec(version="v1.0.0"), work_dir=tmp_path)
+
+        assert client.tags == ["v1.0.0"]
+
+    def test_unpinned_resolves_latest(self, tmp_path: Path) -> None:
+        client = _Releases(_release())
+
+        resolve_tool(client, _spec(), work_dir=tmp_path)
+
+        assert client.tags == ["latest"]
+
+
+class TestStaleReason:
+    @staticmethod
+    def _entry(repo: str = "org/t", tag: str = "v1.0.0") -> LockedTool:
+        return LockedTool(repo=repo, tag=tag, assets={"linux/amd64": _asset("t.zip")})
+
+    def test_a_latest_tool_is_satisfied_by_any_tag(self) -> None:
+        assert stale_reason(_spec(), self._entry(tag="v9.9.9")) is None
+
+    def test_a_changed_repo_is_stale(self) -> None:
+        reason = stale_reason(_spec(repo="fork/t"), self._entry())
+
+        assert reason is not None and "repo changed" in reason
+
+    def test_the_repo_comparison_ignores_case(self) -> None:
+        assert stale_reason(_spec(repo="Org/T"), self._entry()) is None
+
+    def test_a_different_pin_is_stale(self) -> None:
+        reason = stale_reason(_spec(version="v2.0.0"), self._entry())
+
+        assert reason is not None and "pins v2.0.0" in reason
+
+    def test_the_pinned_tag_with_or_without_v_satisfies(self) -> None:
+        assert stale_reason(_spec(version="v1.0.0"), self._entry(tag="1.0.0")) is None
+        assert stale_reason(_spec(version="1.0.0"), self._entry(tag="v1.0.0")) is None

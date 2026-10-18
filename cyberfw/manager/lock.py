@@ -14,13 +14,18 @@ import contextlib
 import os
 import re
 from pathlib import Path
-from typing import Literal
+from typing import Literal, Protocol
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
 from cyberfw.exceptions import LockError
+from cyberfw.logging import get_logger
+from cyberfw.manager.github_client import GitHubRelease, ReleaseAsset
+from cyberfw.manager.installer import select_asset
 from cyberfw.manager.platform_map import SUPPORTED_PLATFORMS
+from cyberfw.manager.registry import ToolSpec
+from cyberfw.manager.verify import checksum_for, sha256_hex
 
 __all__ = [
     "LOCK_FORMAT",
@@ -28,11 +33,16 @@ __all__ = [
     "HashSource",
     "LockedAsset",
     "LockedTool",
+    "ReleaseSource",
     "ToolLock",
     "dump_lock",
     "read_lock",
+    "resolve_tool",
+    "stale_reason",
     "write_lock",
 ]
+
+LOG = get_logger("manager.lock")
 
 #: The lock's file name; it lives next to the ``registry.yaml`` it pins.
 LOCK_NAME = "tools.lock"
@@ -174,3 +184,77 @@ def write_lock(path: Path, lock: ToolLock) -> None:
             f"cannot write {path}: {exc} — run cyberfw from a workspace "
             "(a directory with registry.yaml) to change pins"
         ) from exc
+
+
+class ReleaseSource(Protocol):
+    """What resolving a lock entry needs from :class:`GitHubClient`."""
+
+    def release(self, owner: str, repo: str, tag: str) -> GitHubRelease: ...
+
+    def fetch_text(self, url: str) -> str: ...
+
+    def download(self, url: str, destination: Path, *, expected_size: int | None = None) -> None: ...
+
+
+def resolve_tool(client: ReleaseSource, spec: ToolSpec, *, work_dir: Path) -> LockedTool:
+    """Pin ``spec`` to one release and record the SHA-256 of its asset on every
+    supported platform.
+
+    The release is the registry's ``version:`` tag when pinned, else the latest.
+    :func:`select_asset` picks each platform's asset exactly as the installer
+    would; a platform the release has no asset for is left out. A hash comes
+    from the asset's API digest and/or the release's ``checksums.txt`` — both
+    present and different is a :class:`LockError` — or, with neither, from
+    downloading the asset into ``work_dir`` (removed again once hashed).
+    """
+    release = client.release(spec.repo_owner, spec.repo_name, spec.version)
+    checksums = client.fetch_text(release.checksums_url) if release.checksums_url else ""
+    hashed: dict[str, tuple[str, HashSource]] = {}
+    assets: dict[str, LockedAsset] = {}
+    for mapping in SUPPORTED_PLATFORMS:
+        asset = select_asset(release, spec, mapping)
+        if asset is None:
+            continue
+        if asset.name not in hashed:
+            hashed[asset.name] = _hash_of(client, asset, checksums, work_dir)
+        sha256, source = hashed[asset.name]
+        try:
+            assets[mapping.label] = LockedAsset(name=asset.name, url=asset.url, sha256=sha256, source=source)
+        except ValidationError as exc:
+            raise LockError(f"{spec.name}: cannot lock {asset.name}: {exc.errors()[0]['msg']}") from exc
+    if not assets:
+        raise LockError(
+            f"{spec.name}: release {release.tag} of {spec.repo} has no asset for any supported platform"
+        )
+    return LockedTool(repo=spec.repo, tag=release.tag, assets=assets)
+
+
+def _hash_of(
+    client: ReleaseSource, asset: ReleaseAsset, checksums: str, work_dir: Path
+) -> tuple[str, HashSource]:
+    listed = checksum_for(checksums, asset.name) if checksums else None
+    if asset.digest is not None and listed is not None and asset.digest != listed:
+        raise LockError(
+            f"digest and checksums.txt disagree for {asset.name} "
+            f"(GitHub {asset.digest}, checksums.txt {listed}) — refusing to lock it"
+        )
+    if asset.digest is not None:
+        return asset.digest, "digest"
+    if listed is not None:
+        return listed, "checksums"
+    LOG.info("%s: no published digest or checksum — downloading it to hash it", asset.name)
+    target = work_dir / asset.name
+    try:
+        client.download(asset.url, target, expected_size=asset.size or None)
+        return sha256_hex(target), "download"
+    finally:
+        target.unlink(missing_ok=True)
+
+
+def stale_reason(spec: ToolSpec, entry: LockedTool) -> str | None:
+    """Why ``entry`` no longer satisfies ``spec``'s registry entry, or ``None``."""
+    if entry.repo.lower() != spec.repo.lower():
+        return f"repo changed (lock: {entry.repo}, registry: {spec.repo})"
+    if spec.pinned_version is not None and entry.version != spec.pinned_version:
+        return f"registry pins {spec.version}, lock has {entry.tag}"
+    return None

@@ -15,7 +15,7 @@ from cyberfw.manager.github_client import GitHubRelease, ReleaseAsset
 from cyberfw.manager.installer import ToolInstaller, select_asset
 from cyberfw.manager.platform_map import Mapping
 from cyberfw.manager.registry import ToolSpec
-from cyberfw.manager.verify import sha256_hex, verify_checksum
+from cyberfw.manager.verify import checksum_for, sha256_hex, verify_checksum
 
 
 def _zip_bytes(members: dict[str, bytes]) -> bytes:
@@ -351,6 +351,27 @@ class TestVerifyChecksum:
 
         with pytest.raises(ChecksumError):
             verify_checksum(f"{'0' * 64}  tool_1.0.0_linux_amd64.zip\n", archive.name, archive)
+
+
+class TestChecksumFor:
+    """checksums.txt lines are `<sha256>  [*][dir/]<file name>`; the name must match exactly."""
+
+    def test_the_exact_name_wins_over_a_longer_name_ending_the_same(self) -> None:
+        listing = f"{'0' * 64}  mytool_1.0.0_linux_amd64.zip\n{'a' * 64}  tool_1.0.0_linux_amd64.zip\n"
+
+        assert checksum_for(listing, "tool_1.0.0_linux_amd64.zip") == "a" * 64
+
+    def test_binary_mode_marker_and_directory_are_accepted(self) -> None:
+        assert checksum_for(f"{'b' * 64} *dist/tool.zip\n", "tool.zip") == "b" * 64
+
+    def test_uppercase_hex_is_normalised(self) -> None:
+        assert checksum_for(f"{'C' * 64}  tool.zip\n", "tool.zip") == "c" * 64
+
+    def test_no_entry_is_none(self) -> None:
+        assert checksum_for(f"{'0' * 64}  other.zip\n", "tool.zip") is None
+
+    def test_a_non_sha256_entry_is_none(self) -> None:
+        assert checksum_for(f"{'d' * 128}  tool.zip\n", "tool.zip") is None
 
 
 def test_missing_binary_message_mentions_blocked_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
