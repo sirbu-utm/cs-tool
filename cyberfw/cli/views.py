@@ -229,6 +229,8 @@ def _print_step_summary(summary: StepSummary) -> None:
         console.print("Threat intel: " + " · ".join(parts))
     elif isinstance(summary, VtSummary):
         console.print(f"[muted]VirusTotal: {summary.looked_up} looked up, {summary.flagged} flagged.[/muted]")
+    elif isinstance(summary, rundiff.RunDiff):
+        _print_changes(summary, limit=8)
 
 
 def _plan_view(

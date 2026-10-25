@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from pathlib import Path
-from time import strftime
 from typing import Annotated, Any, TextIO
 
 import typer
@@ -14,6 +13,7 @@ from rich.text import Text, TextType
 
 from cyberfw import completion
 from cyberfw.config import Settings, load_settings
+from cyberfw.core.sessions import checked_session
 from cyberfw.core.workspace import open_manager, tool_state
 from cyberfw.logging import console, get_logger, setup_logging
 from cyberfw.manager import ToolManager
@@ -118,21 +118,13 @@ def _live_fps(settings: Settings) -> int:
     return 12 if settings.animations else 4
 
 
-def _session_tag(kind: str, name: str) -> str:
-    return f"{kind}-{name}-{strftime('%Y%m%d-%H%M%S')}"
-
-
 def _checked_session(session: str) -> str:
-    """Accept ``--session`` only as a plain directory name under ``reports/``.
-
-    It is joined onto the reports directory, and a session this run created is
-    removed when the user declines to save — so ``../x``, ``a/b`` or ``C:x``
-    must never get as far as a path. A usage error, exit 2.
-    """
-    if session in {".", ".."} or any(ch in session for ch in "/\\:"):
+    """``--session`` as a plain directory name under ``reports/``, else a usage error (exit 2)."""
+    try:
+        return checked_session(session)
+    except ValueError:
         console.print(f"[err]--session must be a plain directory name under reports/, got {session!r}.[/err]")
-        raise typer.Exit(2)
-    return session
+        raise typer.Exit(2) from None
 
 
 def _tool_version(manager: ToolManager, name: str) -> str:

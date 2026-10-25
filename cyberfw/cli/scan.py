@@ -13,7 +13,7 @@ import typer
 from rich.live import Live
 from rich.markup import escape
 
-from cyberfw import motion, triage, vt
+from cyberfw import motion, vt
 from cyberfw.cli.app import app
 from cyberfw.cli.common import (
     VerboseOption,
@@ -22,13 +22,11 @@ from cyberfw.cli.common import (
     _checked_session,
     _is_interactive,
     _live_fps,
-    _session_tag,
     _wants_to_save,
 )
 from cyberfw.cli.views import (
     _node_table,
     _plan_view,
-    _print_changes,
     _print_note,
     _print_step_start,
     _print_step_summary,
@@ -37,6 +35,8 @@ from cyberfw.cli.views import (
 )
 from cyberfw.config import Settings
 from cyberfw.core.events import Note, RunObserver, StepEvent
+from cyberfw.core.finish import finalize, run_info, write_reports
+from cyberfw.core.sessions import open_session
 from cyberfw.core.steps import post_scan
 from cyberfw.core.workspace import tool_state
 from cyberfw.exceptions import (
@@ -59,9 +59,6 @@ from cyberfw.pipeline.engine import (
 from cyberfw.pipeline.schemas import ToolRecord
 from cyberfw.pipelines import build
 from cyberfw.report import diff as rundiff
-from cyberfw.report.html_report import generate_html_report
-from cyberfw.report.json_report import generate_json_report, report_payload
-from cyberfw.report.run_info import RunInfo
 from cyberfw.resources import default_wordlist
 from cyberfw.tools import adapter_class
 from cyberfw.tools.base import ToolContext
@@ -75,33 +72,6 @@ def _read_hosts(path: Path) -> list[str]:
         if line and not line.startswith("#"):
             hosts.append(line)
     return hosts
-
-
-def _discard_session(session_dir: Path, *, created: bool) -> None:
-    """Remove a session directory this run created; never touch a pre-existing one."""
-    if not created:
-        console.print(f"[muted]report not saved; {session_dir} was left as it was[/muted]")
-        return
-    shutil.rmtree(session_dir, ignore_errors=True)
-    console.print("[muted]report not saved[/muted]")
-
-
-def _write_reports(
-    result: PipelineResult,
-    *,
-    session_id: str,
-    settings: Settings,
-    run: RunInfo,
-    changes: rundiff.RunDiff | None = None,
-) -> list[tuple[str, Path]]:
-    """Render both reports into the session directory; returns ``(label, path)`` pairs."""
-    json_path = generate_json_report(
-        result, session_id=session_id, reports_dir=settings.reports_dir, run=run, changes=changes
-    )
-    html_path = generate_html_report(
-        result, session_id=session_id, reports_dir=settings.reports_dir, run=run, changes=changes
-    )
-    return [("json", json_path), ("html", html_path)]
 
 
 def _scan_control_overrides(
@@ -130,54 +100,6 @@ def _pipeline_exit_code(*, succeeded: bool, alert_hits: int) -> int:
     if alert_hits > 0:
         return 3
     return 0
-
-
-def _apply_triage(result: PipelineResult, triage_file: Path) -> None:
-    """Silence findings the triage file has muted, and say how many."""
-    try:
-        rules = triage.load_rules(triage_file)
-    except triage.TriageError as exc:
-        console.print(f"[warn]Triage skipped — {escape(str(exc))}[/warn]")
-        return
-    if not rules:
-        return
-    summary = triage.apply(result.records, rules)
-    if summary.muted:
-        console.print(f"[muted]Triage: {escape(summary.line())}[/muted]")
-    if summary.expired:
-        console.print(f"[warn]Triage: {len(summary.expired)} rule(s) expired — {', '.join(summary.expired)}[/warn]")
-
-
-def _compare_with_earlier(
-    result: PipelineResult, run: RunInfo, reports_dir: Path, explicit: str | None
-) -> rundiff.RunDiff | None:
-    """Compare this run with an earlier one — the one named, else the newest
-    earlier run of the same pipeline and seed — and print what changed."""
-    try:
-        if explicit:
-            path: Path | None = rundiff.resolve_report(explicit, reports_dir)
-        else:
-            path = rundiff.find_baseline(
-                reports_dir, seed=run.seed, pipeline=run.pipeline, before=result.started_at
-            )
-        if path is None:
-            return None  # a first scan of this target: nothing to compare with
-        changes = rundiff.compare(rundiff.load_report(path), report_payload(result, run))
-    except (FileNotFoundError, ValueError) as exc:
-        console.print(f"[warn]Not compared with an earlier run: {escape(str(exc))}[/warn]")
-        return None
-    _print_changes(changes, limit=8)
-    return changes
-
-
-def _run_info(manager: ToolManager, *, name: str, seed: str | None, session_id: str, tools: set[str]) -> RunInfo:
-    return RunInfo(
-        pipeline=name,
-        seed=seed,
-        session_id=session_id,
-        platform=manager.mapping.label,
-        tool_versions={tool: (manager.install_state(tool) or {}).get("version") for tool in sorted(tools)},
-    )
 
 
 def _preflight(
@@ -374,12 +296,11 @@ def run_cmd(
         console.print(f"[err]{exc}[/err]")
         raise typer.Exit(1) from exc
 
-    session_id = session or _session_tag("run", tool)
     # Only --save streams into reports/<session>/ as records arrive (crash-safe).
     # Undecided runs write nothing until the user has answered, so an ad-hoc
     # `run` never litters the filesystem with a folder nobody asked for.
-    context = SessionContext(settings.reports_dir, session_id) if save else None
-    engine = PipelineEngine(settings, manager, context=context)
+    run_session = open_session(settings.reports_dir, kind="run", name=tool, session=session, stream=bool(save))
+    engine = PipelineEngine(settings, manager, context=run_session.context)
 
     hosts = _read_hosts(list_file) if list_file is not None else []
     ctx = ToolContext(
@@ -441,8 +362,8 @@ def run_cmd(
             console.print("[muted]No records found.[/muted]")
     finished_at = datetime.now(timezone.utc)
 
-    if context is not None:
-        context.close()
+    if run_session.context is not None:
+        run_session.context.close()
     # --save decided up front (and streamed the records as they came); an
     # undecided run asks now, and only when there is something to keep.
     if save or (save is None and records and _wants_to_save(save, default=False, what=tool)):
@@ -452,19 +373,19 @@ def run_cmd(
             started_at=started_at,
             finished_at=finished_at,
         )
-        if context is None:
+        if run_session.context is None:
             # Nothing was streamed, so archive the records now.
-            with SessionContext(settings.reports_dir, session_id) as store:
+            with SessionContext(settings.reports_dir, run_session.id) as store:
                 for record in records:
                     store.append(tool, record)
-        written = _write_reports(
+        written = write_reports(
             result,
-            session_id=session_id,
+            session_id=run_session.id,
             settings=settings,
-            run=_run_info(manager, name=tool, seed=target, session_id=session_id, tools={tool}),
+            run=run_info(manager, name=tool, seed=target, session_id=run_session.id, tools={tool}),
         )
-        console.print(f"[ok]saved:[/ok] {settings.reports_dir / session_id}")
-        for label, path in written:
+        console.print(f"[ok]saved:[/ok] {run_session.dir}")
+        for label, path in written.items():
             console.print(f"[ok]{label}:[/ok] {path}")
 
     if not node_result.ok:
@@ -691,14 +612,11 @@ def pipeline_cmd(
                 "[warn]--ffuf needs a wordlist and the bundled default was not found; "
                 "the fuzz stage will be skipped. Re-run with --wordlist <path>.[/warn]"
             )
-    session_id = session or _session_tag("pipeline", name)
-    # Remember whether the directory is ours: declining to save may remove it,
-    # and a --session pointing at an earlier run must never be deleted.
-    session_dir = settings.reports_dir / session_id
-    session_is_new = not session_dir.exists()
-    context = SessionContext(settings.reports_dir, session_id)
+    # The session knows whether its directory is ours: declining to save may
+    # remove it, and a --session pointing at an earlier run must never be deleted.
+    run_session = open_session(settings.reports_dir, kind="pipeline", name=name, session=session, stream=True)
     # The pre-flight above already reported any missing optional dependency.
-    engine = PipelineEngine(settings, manager, context=context, report_missing_deps=False)
+    engine = PipelineEngine(settings, manager, context=run_session.context, report_missing_deps=False)
 
     # Verbose view when parsing is disabled (config parse=false or --no-parse):
     # stream each stage's raw stdout/stderr live instead of the quiet spinner.
@@ -768,30 +686,29 @@ def pipeline_cmd(
     if result.excluded:
         console.print(f"[muted]scope: {len(result.excluded)} host(s) excluded[/muted]")
 
+    observer = _CliObserver(animate=settings.animations)
     post_scan(
         result, seed=target, settings=settings, mail=mail, takeover=takeover, intel=intel,
-        vt_key=vt_key, vt_limit=vt_limit, observer=_CliObserver(animate=settings.animations),
+        vt_key=vt_key, vt_limit=vt_limit, observer=observer,
     )
 
-    _apply_triage(result, settings.triage_file)
-    run_info = _run_info(manager, name=name, seed=target, session_id=session_id, tools={n.tool for n in nodes})
-    changes = None if no_baseline else _compare_with_earlier(result, run_info, settings.reports_dir, baseline)
+    def _decide() -> bool:
+        # Asked once the comparison is on screen; the raw stream's stage table comes first.
+        if verbose:
+            console.print(_node_table(result))
+        return _wants_to_save(report, default=True, what=name)
 
-    if verbose:
-        console.print(_node_table(result))
-
-    context.close()
-    written: list[tuple[str, Path]] = []
-    if _wants_to_save(report, default=True, what=name):
-        try:
-            written = _write_reports(
-                result, session_id=session_id, settings=settings, run=run_info, changes=changes
-            )
-        except CyberfwError as exc:
-            console.print(f"[err]report failed:[/err] {exc}")
-            return
-    else:
-        _discard_session(session_dir, created=session_is_new)
+    try:
+        finished = finalize(
+            result, manager=manager, settings=settings, name=name, seed=target,
+            tools={n.tool for n in nodes}, session=run_session, compare=not no_baseline,
+            baseline=baseline, save=_decide, observer=observer,
+        )
+    except CyberfwError as exc:
+        console.print(f"[err]report failed:[/err] {exc}")
+        return
+    changes = finished.changes
+    written = list(finished.reports.items())
 
     # A blank line: Live's last frame ends without one, so the panel would
     # otherwise start on the same line as the table's bottom edge.
@@ -799,7 +716,7 @@ def pipeline_cmd(
     motion.play(
         console,
         lambda progress: _run_summary(
-            result, name=name, session_id=session_id, reports=written, progress=progress
+            result, name=name, session_id=run_session.id, reports=written, progress=progress
         ),
         duration=0.7,
         animate=settings.animations,
