@@ -12,9 +12,18 @@ from rich.markup import escape
 from rich.table import Table
 from rich.text import Text
 
-from cyberfw import motion, vt
+from cyberfw import motion, threatintel, vt
 from cyberfw.cli.common import _tool_states, _tool_version
 from cyberfw.config import Settings
+from cyberfw.core.events import (
+    MailSummary,
+    Note,
+    StepEvent,
+    StepSummary,
+    TakeoverSummary,
+    TlsSummary,
+    VtSummary,
+)
 from cyberfw.core.workspace import tool_state
 from cyberfw.hud import (
     ALERT,
@@ -34,6 +43,7 @@ from cyberfw.pipeline.engine import (
     PipelineResult,
 )
 from cyberfw.pipeline.schemas import ToolRecord
+from cyberfw.posture import tls as tlscheck
 from cyberfw.report import diff as rundiff
 from cyberfw.ui import (
     NEUTRAL_STYLE,
@@ -169,6 +179,56 @@ def _print_changes(changes: rundiff.RunDiff, *, limit: int | None) -> None:
         console.print(f"  [muted]… and {len(changes.changes) - limit} more in the report[/muted]")
     for note in changes.not_compared:
         console.print(f"  [muted]not compared: {escape(note)}[/muted]")
+
+
+def _print_note(note: Note) -> None:
+    """A note from the core: a warning, or a muted aside."""
+    style = "warn" if note.level == "warn" else "muted"
+    console.print(f"[{style}]{escape(note.text)}[/{style}]")
+
+
+def _print_step_start(event: StepEvent) -> None:
+    """The lead-in a slow step prints before it starts, so a wait is never silent."""
+    if event.step == "intel":
+        console.print("[muted]Threat intel: checking CVEs against CISA KEV, EPSS and Exploit-DB…[/muted]")
+    elif event.step == "vt":
+        console.print(f"[muted]VirusTotal: looking up {event.total} target(s), throttled to 4/min…[/muted]")
+
+
+def _print_step_summary(summary: StepSummary) -> None:
+    """The line a finished step leaves on the console."""
+    if isinstance(summary, TlsSummary):
+        parts = [f"{summary.certificates} certificate(s)"]
+        if summary.expired:
+            parts.append(f"[err]{summary.expired} expired[/err]")
+        if summary.soon:
+            parts.append(f"[warn]{summary.soon} expire within {tlscheck.SOON_DAYS} days[/warn]")
+        if summary.untrusted:
+            parts.append(f"[warn]{summary.untrusted} untrusted or for another name[/warn]")
+        if len(parts) == 1:
+            parts.append(f"[ok]all valid for {tlscheck.SOON_DAYS}+ days[/ok]")
+        console.print("TLS: " + " · ".join(parts))
+    elif isinstance(summary, MailSummary):
+        style = {"protected": "ok", "partial": "warn"}.get(summary.verdict, "err")
+        reason = f" — {summary.worst}" if summary.worst else ""
+        console.print(f"Email ({summary.domain}): [{style}]{summary.verdict}[/{style}]{reason}")
+    elif isinstance(summary, TakeoverSummary):
+        if summary.possible:
+            hosts = escape(", ".join(summary.hosts))
+            console.print(f"Subdomain takeover: [err]{summary.possible} possible[/err] — {hosts}")
+        else:
+            console.print(f"Subdomain takeover: [ok]none[/ok] in {summary.checked} host(s)")
+    elif isinstance(summary, threatintel.IntelSummary):
+        parts = [f"{summary.cves} CVE(s) in {summary.findings} finding(s)"]
+        if summary.exploited:
+            parts.append(f"[err]{summary.exploited} exploited in the wild (CISA KEV)[/err]")
+        if summary.exploits:
+            parts.append(f"{summary.exploits} with a public exploit")
+        if summary.likely:
+            parts.append(f"{summary.likely} with EPSS ≥ {threatintel.EPSS_HIGH:.0%}")
+        console.print("Threat intel: " + " · ".join(parts))
+    elif isinstance(summary, VtSummary):
+        console.print(f"[muted]VirusTotal: {summary.looked_up} looked up, {summary.flagged} flagged.[/muted]")
 
 
 def _plan_view(

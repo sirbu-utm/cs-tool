@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import functools
-import json
 import shutil
 from datetime import datetime, timezone
 from pathlib import Path
@@ -14,7 +13,7 @@ import typer
 from rich.live import Live
 from rich.markup import escape
 
-from cyberfw import motion, threatintel, triage, vt
+from cyberfw import motion, triage, vt
 from cyberfw.cli.app import app
 from cyberfw.cli.common import (
     VerboseOption,
@@ -26,8 +25,19 @@ from cyberfw.cli.common import (
     _session_tag,
     _wants_to_save,
 )
-from cyberfw.cli.views import _node_table, _plan_view, _print_changes, _record_table, _run_summary
+from cyberfw.cli.views import (
+    _node_table,
+    _plan_view,
+    _print_changes,
+    _print_note,
+    _print_step_start,
+    _print_step_summary,
+    _record_table,
+    _run_summary,
+)
 from cyberfw.config import Settings
+from cyberfw.core.events import Note, RunObserver, StepEvent
+from cyberfw.core.steps import post_scan
 from cyberfw.core.workspace import tool_state
 from cyberfw.exceptions import (
     CyberfwError,
@@ -46,11 +56,8 @@ from cyberfw.pipeline.engine import (
     StageEvent,
     dependency_hint,
 )
-from cyberfw.pipeline.schemas import ToolRecord, validate_record
+from cyberfw.pipeline.schemas import ToolRecord
 from cyberfw.pipelines import build
-from cyberfw.posture import mail as mailcheck
-from cyberfw.posture import takeover as takeovercheck
-from cyberfw.posture import tls as tlscheck
 from cyberfw.report import diff as rundiff
 from cyberfw.report.html_report import generate_html_report
 from cyberfw.report.json_report import generate_json_report, report_payload
@@ -259,123 +266,45 @@ def _resolve_vt_key(settings: Settings, choice: bool | None) -> str | None:
     return entered
 
 
-def _check_tls(result: PipelineResult) -> None:
-    """Certificate health from what httpx's -tls-grab already collected (no network)."""
-    certs = tlscheck.certificates(result.records)
-    if not certs:
-        return
-    now = datetime.now(timezone.utc)
-    result.records.extend(tlscheck.findings(certs, result.records, now=now))
-    expired = sum(1 for cert in certs if cert.is_expired(now))
-    soon = sum(
-        1
-        for cert in certs
-        if not cert.is_expired(now) and (days := cert.days_left(now)) is not None
-        and days <= tlscheck.SOON_DAYS
-    )
-    untrusted = sum(1 for cert in certs if cert.self_signed or cert.mismatched)
-    parts = [f"{len(certs)} certificate(s)"]
-    if expired:
-        parts.append(f"[err]{expired} expired[/err]")
-    if soon:
-        parts.append(f"[warn]{soon} expire within {tlscheck.SOON_DAYS} days[/warn]")
-    if untrusted:
-        parts.append(f"[warn]{untrusted} untrusted or for another name[/warn]")
-    if len(parts) == 1:
-        parts.append(f"[ok]all valid for {tlscheck.SOON_DAYS}+ days[/ok]")
-    console.print("TLS: " + " · ".join(parts))
+#: Steps that show a live activity line while they run: its label and detail.
+_ACTIVITIES = {
+    "mail": ("Email {subject}", "SPF · DMARC · MX"),
+    "takeover": ("Subdomain takeover", "dangling CNAMEs"),
+    "intel": ("Rating CVEs", "KEV · EPSS · Exploit-DB"),
+    "vt": ("VirusTotal", "free tier: 4 lookups/min"),
+}
 
 
-def _check_mail(result: PipelineResult, seed: str, *, animate: bool = True) -> None:
-    """Whether mail can be forged as the seed domain (SPF / DMARC over DNS-over-HTTPS)."""
-    domain = mailcheck.mail_domain(seed)
-    if domain is None:
-        return
-    try:
-        with motion.Activity(console, f"Email {domain}", animate=animate, detail="SPF · DMARC · MX"):
-            record, found = anyio.run(mailcheck.check, domain)
-    except mailcheck.DnsError as exc:
-        console.print(f"[warn]Email check skipped — DNS-over-HTTPS unreachable: {exc}[/warn]")
-        return
-    except Exception as exc:  # noqa: BLE001 - a posture check must never fail the scan
-        console.print(f"[warn]Email check failed: {exc}[/warn]")
-        return
-    result.records.append(record)
-    result.records.extend(found)
-    style = {"protected": "ok", "partial": "warn"}.get(record.verdict, "err")
-    rank = {"critical": 0, "high": 1, "medium": 2, "low": 3}
-    worst = sorted(found, key=lambda f: rank.get(f.severity, 4))
-    reason = f" — {worst[0].name}" if worst else ""
-    console.print(f"Email ({domain}): [{style}]{record.verdict}[/{style}]{reason}")
+class _CliObserver(RunObserver):
+    """Shows a run on the console: a live activity line while a slow step runs,
+    the step's result line when it ends, and notes as warning or muted lines."""
 
+    def __init__(self, *, animate: bool) -> None:
+        self.animate = animate
+        self._activity: motion.Activity | None = None
 
-def _check_takeover(result: PipelineResult, *, animate: bool = True) -> None:
-    """Flag subdomains with a dangling CNAME to an unclaimed third-party service."""
-    hosts = takeovercheck.candidates(result.records)
-    if not hosts:
-        return
-    try:
-        total = min(len(hosts), 300)
-        with motion.Activity(console, "Subdomain takeover", animate=animate, total=total,
-                             detail="dangling CNAMEs") as activity:
-            findings, notes = anyio.run(
-                functools.partial(takeovercheck.scan, hosts, progress=activity.advance)
-            )
-    except Exception as exc:  # noqa: BLE001 - a posture check must never fail the scan
-        console.print(f"[warn]Subdomain-takeover check failed: {escape(str(exc))}[/warn]")
-        return
-    result.records.extend(findings)
-    for note in notes:
-        console.print(f"[warn]Takeover: {escape(note)}[/warn]")
-    if findings:
-        hosts_hit = ", ".join(sorted({f.target.split("//", 1)[-1] for f in findings})[:3])
-        console.print(f"Subdomain takeover: [err]{len(findings)} possible[/err] — {escape(hosts_hit)}")
-    else:
-        console.print(f"Subdomain takeover: [ok]none[/ok] in {len(hosts)} host(s)")
+    def on_step(self, event: StepEvent) -> None:
+        if event.kind == "start":
+            _print_step_start(event)
+            if event.step in _ACTIVITIES:
+                label, detail = _ACTIVITIES[event.step]
+                self._activity = motion.Activity(
+                    console, label.format(subject=event.subject), animate=self.animate,
+                    total=event.total, detail=detail,
+                )
+                self._activity.__enter__()
+        elif event.kind == "advance":
+            if self._activity is not None:
+                self._activity.advance(event.done)
+        else:
+            if self._activity is not None:
+                self._activity.__exit__(None, None, None)
+                self._activity = None
+            if event.summary is not None:
+                _print_step_summary(event.summary)
 
-
-def _enrich_with_intel(result: PipelineResult, cache_dir: Path, *, animate: bool = True) -> None:
-    """Rate CVE findings by real-world exploitation (CISA KEV, EPSS, Exploit-DB)."""
-    if not any(threatintel.cve_ids(r) for r in result.records if r.kind == "vuln"):
-        return
-    console.print("[muted]Threat intel: checking CVEs against CISA KEV, EPSS and Exploit-DB…[/muted]")
-    try:
-        with motion.Activity(console, "Rating CVEs", animate=animate, detail="KEV · EPSS · Exploit-DB"):
-            summary = anyio.run(threatintel.enrich, result.records, cache_dir)
-    except Exception as exc:  # noqa: BLE001 - intel must never fail the scan
-        console.print(f"[warn]Threat intel failed: {exc}[/warn]")
-        return
-    for error in summary.errors:
-        console.print(f"[warn]Threat intel — {error}[/warn]")
-    parts = [f"{summary.cves} CVE(s) in {summary.findings} finding(s)"]
-    if summary.exploited:
-        parts.append(f"[err]{summary.exploited} exploited in the wild (CISA KEV)[/err]")
-    if summary.exploits:
-        parts.append(f"{summary.exploits} with a public exploit")
-    if summary.likely:
-        parts.append(f"{summary.likely} with EPSS ≥ {threatintel.EPSS_HIGH:.0%}")
-    console.print("Threat intel: " + " · ".join(parts))
-
-
-def _enrich_with_vt(result: PipelineResult, api_key: str, limit: int, *, animate: bool = True) -> None:
-    """Append VirusTotal reputation records for the run's discovered targets."""
-    targets = vt.enrichment_targets(result.records)
-    if not targets:
-        return
-    count = min(len(targets), limit)
-    console.print(f"[muted]VirusTotal: looking up {count} target(s), throttled to 4/min…[/muted]")
-    try:
-        # At the free tier's 4/min this can take minutes: a live counter, not silence.
-        with motion.Activity(console, "VirusTotal", animate=animate, total=count,
-                             detail="free tier: 4 lookups/min") as activity:
-            reps = anyio.run(functools.partial(vt.enrich, targets, api_key, limit, progress=activity.advance))
-    except Exception as exc:  # noqa: BLE001 - enrichment must never fail the scan
-        console.print(f"[warn]VirusTotal enrichment failed: {exc}[/warn]")
-        return
-    for index, rep in enumerate(reps, 1):
-        result.records.append(validate_record("virustotal", json.dumps(rep.as_record()), index))
-    flagged = sum(1 for rep in reps if rep.flagged)
-    console.print(f"[muted]VirusTotal: {len(reps)} looked up, {flagged} flagged.[/muted]")
+    def on_note(self, note: Note) -> None:
+        _print_note(note)
 
 
 @app.command("run")
@@ -839,16 +768,10 @@ def pipeline_cmd(
     if result.excluded:
         console.print(f"[muted]scope: {len(result.excluded)} host(s) excluded[/muted]")
 
-    animate = settings.animations
-    _check_tls(result)
-    if mail:
-        _check_mail(result, target, animate=animate)
-    if takeover:
-        _check_takeover(result, animate=animate)
-    if intel:
-        _enrich_with_intel(result, settings.cache_dir, animate=animate)
-    if vt_key:
-        _enrich_with_vt(result, vt_key, vt_limit, animate=animate)
+    post_scan(
+        result, seed=target, settings=settings, mail=mail, takeover=takeover, intel=intel,
+        vt_key=vt_key, vt_limit=vt_limit, observer=_CliObserver(animate=settings.animations),
+    )
 
     _apply_triage(result, settings.triage_file)
     run_info = _run_info(manager, name=name, seed=target, session_id=session_id, tools={n.tool for n in nodes})

@@ -19,6 +19,7 @@ from pathlib import Path
 
 import pytest
 from rich.console import Console
+from rich.text import Text
 from typer.testing import CliRunner
 
 from cyberfw import completion
@@ -3042,3 +3043,24 @@ class TestInitLockMessages:
         assert result.exit_code == 0
         assert "Created tools.lock with pinme" in _one_line(result.stdout)
         assert "commit" not in result.stdout
+
+
+class TestLiveDisplaysOnATerminal:
+    """On a terminal the scan's live view and each step's activity line are Rich
+    live displays, opened and closed by the run's events."""
+
+    def test_every_live_display_is_closed_when_the_run_ends(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # Rich nests live displays, so one left open raises nothing — it keeps
+        # redrawing and leaves the cursor hidden. Every hidden cursor comes back.
+        monkeypatch.setenv("TERM", "xterm-256color")
+        monkeypatch.setenv("CYBERFW_ANIMATIONS", "true")
+        terminal = Console(file=io.StringIO(), force_terminal=True, width=120, theme=THEME)
+        patch_cli(monkeypatch, "console", terminal)
+
+        result = runner.invoke(app, ["pipeline", "recon-to-vuln", "-t", "example.com", "--no-report"])
+
+        assert result.exit_code == 0, repr(result.exception)
+        raw = terminal.file.getvalue()  # type: ignore[attr-defined]
+        assert raw.count("\x1b[?25l") == raw.count("\x1b[?25h") > 1, "a live display was left open"
+        drawn = Text.from_ansi(raw).plain
+        assert "recon-to-vuln · example.com" in drawn and "Email check skipped" in drawn

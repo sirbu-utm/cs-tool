@@ -6,11 +6,12 @@ alone does not guarantee the repo root is on ``sys.path``.
 
 from __future__ import annotations
 
+import logging
 import os
 import sys
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from pathlib import Path
 
 import pytest
@@ -49,6 +50,19 @@ def _offline_dns(monkeypatch: pytest.MonkeyPatch) -> None:
 
     monkeypatch.setattr(mail, "doh_query", no_dns)
     monkeypatch.setattr(takeover, "doh", no_dns)
+
+
+@pytest.fixture
+def prints_nothing(capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    """Fail the test if the code under test writes to stdout.
+
+    Logging is the caller's to set up — the CLI does, a script may not — so the
+    ``cyberfw`` logger's handlers are detached for the test: a console handler
+    another test installed must not count as the code printing.
+    """
+    monkeypatch.setattr(logging.getLogger("cyberfw"), "handlers", [])
+    yield
+    assert capsys.readouterr().out == "", "the code under test printed to stdout"
 
 
 @pytest.fixture
