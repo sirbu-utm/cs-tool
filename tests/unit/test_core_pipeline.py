@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import os
+import subprocess
+import sys
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -18,7 +21,7 @@ from cyberfw.manager import ToolManager
 from cyberfw.pipeline.engine import PipelineEngine, StageEvent
 from cyberfw.pipeline.schemas import ToolRecord
 
-from .test_cli import _write_fake_binaries, _write_registry
+from .test_cli import _break_tool, _write_fake_binaries, _write_registry
 
 pytestmark = pytest.mark.usefixtures("prints_nothing")
 
@@ -165,3 +168,37 @@ def test_ffuf_without_a_wordlist_says_which_list_it_falls_back_to(
     monkeypatch.setattr(scan, "default_wordlist", lambda: None)
     choose_wordlist(settings, None, ffuf=True, observer=seen)
     assert seen.notes[1].level == "warn" and "the fuzz stage will be skipped" in seen.notes[1].text
+
+
+def test_a_script_driving_the_core_writes_nothing_to_either_stream(settings: Settings) -> None:
+    # A plain script sets up no logging: the engine's warning about a failed
+    # stage must not fall through to Python's last-resort handler on stderr.
+    _break_tool(settings.root_dir, "httpx")
+    script = (
+        "from pathlib import Path\n"
+        "from cyberfw.config import Settings\n"
+        "from cyberfw.core.events import RunObserver\n"
+        "from cyberfw.core.scan import execute_pipeline, prepare_pipeline\n"
+        "from cyberfw.core.sessions import open_session\n"
+        "from cyberfw.core.workspace import open_manager\n"
+        "settings = Settings(root_dir=Path.cwd())\n"
+        "prepared = prepare_pipeline('recon-to-vuln', 'example.com', settings=settings,\n"
+        "                            manager=open_manager(settings))\n"
+        "session = open_session(settings.reports_dir, kind='pipeline', name='recon-to-vuln',\n"
+        "                       session=None, stream=True)\n"
+        "result = execute_pipeline(prepared, session=session, wordlist=None, observer=RunObserver())\n"
+        "assert not result.succeeded()\n"
+    )
+
+    run = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=settings.root_dir,
+        capture_output=True,
+        encoding="utf-8",
+        errors="replace",
+        env={**os.environ, "PYTHONUTF8": "1"},
+        timeout=120,
+    )
+
+    assert run.returncode == 0, run.stderr
+    assert (run.stdout, run.stderr) == ("", "")
