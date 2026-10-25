@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import functools
-import shutil
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Annotated
@@ -36,9 +34,9 @@ from cyberfw.cli.views import (
 from cyberfw.config import Settings
 from cyberfw.core.events import Note, RunObserver, StepEvent
 from cyberfw.core.finish import finalize, run_info, write_reports
+from cyberfw.core.scan import choose_wordlist, execute_pipeline, prepare_pipeline
 from cyberfw.core.sessions import open_session
 from cyberfw.core.steps import post_scan
-from cyberfw.core.workspace import tool_state
 from cyberfw.exceptions import (
     CyberfwError,
     RegistryError,
@@ -46,7 +44,6 @@ from cyberfw.exceptions import (
 )
 from cyberfw.live_view import PipelineLiveView, TopologyView
 from cyberfw.logging import console
-from cyberfw.manager import ToolManager
 from cyberfw.pipeline.context import SessionContext
 from cyberfw.pipeline.engine import (
     Node,
@@ -54,12 +51,9 @@ from cyberfw.pipeline.engine import (
     PipelineEngine,
     PipelineResult,
     StageEvent,
-    dependency_hint,
 )
 from cyberfw.pipeline.schemas import ToolRecord
-from cyberfw.pipelines import build
 from cyberfw.report import diff as rundiff
-from cyberfw.resources import default_wordlist
 from cyberfw.tools import adapter_class
 from cyberfw.tools.base import ToolContext
 
@@ -100,56 +94,6 @@ def _pipeline_exit_code(*, succeeded: bool, alert_hits: int) -> int:
     if alert_hits > 0:
         return 3
     return 0
-
-
-def _preflight(
-    manager: ToolManager, nodes: list[Node], tools_dir: Path
-) -> tuple[list[tuple[str, str, str]], list[str]]:
-    """What stands between this plan and a useful run, in plan order.
-
-    Returns ``(blocking, warnings)``. Blocking: a binary that cannot run, or a
-    hard external requirement the adapter reports missing (gowitness without
-    Chrome) — the stage could only fail. Warnings: a ``check_deps`` entry that
-    is not on PATH (RustScan's Nmap), which costs capability, not the run.
-    """
-    blocking: list[tuple[str, str, str]] = []
-    warnings: list[str] = []
-    seen: set[str] = set()
-    for node in nodes:
-        if node.tool in seen:
-            continue
-        seen.add(node.tool)
-        state = tool_state(manager, node.tool, tools_dir)
-        if state != "ready":
-            blocking.append((node.stage, node.tool, state))
-            continue
-        requirement = adapter_class(node.tool).missing_requirement(tools_dir)
-        if requirement is not None:
-            blocking.append((node.stage, node.tool, requirement))
-        for dep in manager.spec(node.tool).check_deps:
-            if shutil.which(dep) is None:
-                warnings.append(
-                    f"{node.tool} works best with `{dep}`, which is not on PATH — {dependency_hint(dep)}"
-                )
-    return blocking, warnings
-
-
-def _resolve_gowitness(flag: bool | None, manager: ToolManager, tools_dir: Path) -> bool:
-    """Whether recon-to-vuln should run gowitness.
-
-    An explicit ``--gowitness`` / ``--no-gowitness`` is taken as given. The
-    vanilla default (``None``) includes it only when it can actually run —
-    registered, installed, and a Chrome/Chromium present — so a plain run gains
-    screenshots where possible and never fails for the lack of a browser."""
-    if flag is not None:
-        return flag
-    from cyberfw.tools.gowitness import _find_chrome
-
-    return (
-        "gowitness" in manager.registry.names()
-        and manager.is_installed("gowitness")
-        and _find_chrome(tools_dir) is not None
-    )
 
 
 def _resolve_vt_key(settings: Settings, choice: bool | None) -> str | None:
@@ -198,15 +142,54 @@ _ACTIVITIES = {
 
 
 class _CliObserver(RunObserver):
-    """Shows a run on the console: a live activity line while a slow step runs,
-    the step's result line when it ends, and notes as warning or muted lines."""
+    """Shows a run on the console.
 
-    def __init__(self, *, animate: bool) -> None:
+    During the scan, stages and records go to the live view when there is one.
+    The view IS the final frame, so it is not reprinted afterwards: Live leaves
+    its last frame on screen, and on a non-TTY (CI, a pipe) Rich prints that
+    frame once instead of redrawing. Both views are renderables driven by
+    auto-refresh, so spinners, bars, timers and the growth pulse animate between
+    events — events only change their state. With ``echo_output`` the scan prints
+    every raw stdout/stderr line instead. After the scan: a live activity line
+    while a slow step runs, its result line when it ends, notes as warning or
+    muted lines.
+    """
+
+    def __init__(
+        self,
+        *,
+        animate: bool,
+        view: PipelineLiveView | TopologyView | None = None,
+        echo_output: bool = False,
+        fps: int = 4,
+    ) -> None:
         self.animate = animate
+        self.view = view
+        self.echo_output = echo_output
+        self.fps = fps
+        self._live: Live | None = None
         self._activity: motion.Activity | None = None
 
+    def on_stage(self, event: StageEvent) -> None:
+        if self.view is not None:
+            self.view.on_stage(event)
+
+    def on_record(self, record: ToolRecord) -> None:
+        if self.view is not None:
+            self.view.on_record(record)
+
+    def on_output(self, line: str, stream: str) -> None:
+        if not self.echo_output:
+            return
+        if stream == "stderr":
+            console.print(line, style="dim")
+        else:
+            console.print(line)
+
     def on_step(self, event: StepEvent) -> None:
-        if event.kind == "start":
+        if event.step == "scan":
+            self._scan(event)
+        elif event.kind == "start":
             _print_step_start(event)
             if event.step in _ACTIVITIES:
                 label, detail = _ACTIVITIES[event.step]
@@ -227,6 +210,20 @@ class _CliObserver(RunObserver):
 
     def on_note(self, note: Note) -> None:
         _print_note(note)
+
+    def _scan(self, event: StepEvent) -> None:
+        """Open the live view as the scan starts; leave its final frame when it ends."""
+        if self.view is None:
+            return
+        if event.kind == "start":
+            self._live = Live(self.view, console=console, refresh_per_second=self.fps, transient=False)
+            self._live.start(refresh=True)
+        elif event.kind == "done" and self._live is not None:
+            self.view.finish()
+            self._live.refresh()
+            self._live.stop()
+            self._live = None
+            _after_live()
 
 
 @app.command("run")
@@ -561,36 +558,26 @@ def pipeline_cmd(
     # view takes over the terminal — a prompt and a Live render cannot coexist.
     # A --plan dry run scans nothing, so it never prompts for a key.
     vt_key = None if plan else _resolve_vt_key(settings, vt_enrich)
-    include_gowitness = _resolve_gowitness(gowitness, manager, settings.tools_dir)
+    # Whether the run can happen at all is knowable now, and a scan takes
+    # minutes: report what is unavailable up front instead of spending the
+    # time only to say that a stage never ran.
     try:
-        nodes = build(
-            name,
-            pipelines_dir=settings.pipelines_dir,
-            include_ffuf=ffuf,
-            include_gowitness=include_gowitness,
-            max_httpx=max_httpx,
+        prepared = prepare_pipeline(
+            name, target, settings=settings, manager=manager, ffuf=ffuf, gowitness=gowitness, max_httpx=max_httpx
         )
-        for node in nodes:  # a YAML pipeline may name a tool the registry (or the code) lacks
-            manager.spec(node.tool)
-            adapter_class(node.tool)
     except RegistryError as exc:
         console.print(f"[err]{exc}[/err]")
         manager.close()
         raise typer.Exit(2) from exc
-
-    # Whether the run can happen at all is knowable now, and a scan takes
-    # minutes: report what is unavailable up front instead of spending the
-    # time only to say that a stage never ran.
-    blocking, dep_warnings = _preflight(manager, nodes, settings.tools_dir)
     if plan:
-        console.print(_plan_view(manager, name, target, nodes, blocking, dep_warnings, settings.tools_dir))
+        console.print(_plan_view(prepared))
         manager.close()
         return
     assert target is not None  # a non-plan run required --target above; narrows for the scan path
-    for warning in dep_warnings:
+    for warning in prepared.warnings:
         console.print(f"[warn]{warning}[/warn]")
-    if blocking and not force_start:
-        for stage, tool, reason in blocking:
+    if prepared.blocking and not force_start:
+        for stage, tool, reason in prepared.blocking:
             console.print(f"[err]{tool}[/err] ({stage}): [err]{reason}[/err]")
         console.print(
             "[warn]Fix the above (`cyberfw init`, `cyberfw status`), "
@@ -599,32 +586,24 @@ def pipeline_cmd(
         manager.close()
         raise typer.Exit(2)
 
-    wordlist = wordlist or settings.wordlist
-    if ffuf and not wordlist:
-        bundled = default_wordlist()
-        if bundled is not None:
-            console.print(
-                f"[muted]--ffuf: no wordlist given, using the bundled {bundled.name} "
-                "(pass --wordlist <path> to override)[/muted]"
-            )
-        else:
-            console.print(
-                "[warn]--ffuf needs a wordlist and the bundled default was not found; "
-                "the fuzz stage will be skipped. Re-run with --wordlist <path>.[/warn]"
-            )
-    # The session knows whether its directory is ours: declining to save may
-    # remove it, and a --session pointing at an earlier run must never be deleted.
-    run_session = open_session(settings.reports_dir, kind="pipeline", name=name, session=session, stream=True)
-    # The pre-flight above already reported any missing optional dependency.
-    engine = PipelineEngine(settings, manager, context=run_session.context, report_missing_deps=False)
-
     # Verbose view when parsing is disabled (config parse=false or --no-parse):
     # stream each stage's raw stdout/stderr live instead of the quiet spinner.
     # Stages are still parsed internally so results thread from one to the next.
     verbose = no_parse or not settings.parse
-    run_engine = functools.partial(engine.run, extra_input=wordlist)
     # The flag overrides the `view` setting for this run; unset falls back to it.
     use_topology = topology if topology is not None else settings.view == "topology"
+    view: PipelineLiveView | TopologyView | None = None
+    if not verbose:
+        if use_topology:
+            view = TopologyView(prepared.nodes, seed=target, title=f"{name} · {target}", animate=settings.animations)
+        else:
+            view = PipelineLiveView(prepared.nodes, title=f"pipeline {name} · {target}", animate=settings.animations)
+    observer = _CliObserver(animate=settings.animations, view=view, echo_output=verbose, fps=_live_fps(settings))
+
+    wordlist = choose_wordlist(settings, wordlist, ffuf=ffuf, observer=observer)
+    # The session knows whether its directory is ours: declining to save may
+    # remove it, and a --session pointing at an earlier run must never be deleted.
+    run_session = open_session(settings.reports_dir, kind="pipeline", name=name, session=session, stream=True)
     if topology is True and verbose:
         # Only when the user explicitly asked: the config default silently yields
         # to the raw stream under --no-parse rather than nagging every run.
@@ -633,60 +612,12 @@ def pipeline_cmd(
     if verbose:
         why = "--no-parse" if no_parse else "config parse=false"
         console.print(f"[muted]{why}: streaming raw stdout/stderr from every stage[/muted]")
+    try:
+        result = execute_pipeline(prepared, session=run_session, wordlist=wordlist, observer=observer)
+    except CyberfwError as exc:
+        console.print(f"[err]{exc}[/err]")
+        raise typer.Exit(1) from exc
 
-        async def _print_stdout(line: str) -> None:
-            console.print(line)
-
-        async def _print_stderr(line: str) -> None:
-            console.print(line, style="dim")
-
-        engine.set_stdout_raw_callback(_print_stdout)
-        engine.set_stderr_callback(_print_stderr)
-        try:
-            result = anyio.run(run_engine, nodes, target)
-        except CyberfwError as exc:
-            console.print(f"[err]{exc}[/err]")
-            raise typer.Exit(1) from exc
-        finally:
-            manager.close()
-    else:
-        # The live view IS the final frame, so it is not reprinted afterwards:
-        # Live leaves its last frame on screen. On a non-TTY (CI, a pipe) Rich
-        # prints that final frame once instead of redrawing.
-        #
-        # Both views are renderable objects (``__rich__``) driven by
-        # auto-refresh, so spinners, bars, timers and the growth pulse animate
-        # between events — callbacks only mutate state.
-        view: PipelineLiveView | TopologyView
-        if use_topology:
-            view = TopologyView(nodes, seed=target, title=f"{name} · {target}", animate=settings.animations)
-        else:
-            view = PipelineLiveView(nodes, title=f"pipeline {name} · {target}", animate=settings.animations)
-        with Live(view, console=console, refresh_per_second=_live_fps(settings), transient=False) as live:
-
-            async def _on_record(record: ToolRecord) -> None:
-                view.on_record(record)
-
-            async def _on_stage(event: StageEvent) -> None:
-                view.on_stage(event)
-
-            engine.set_record_callback(_on_record)
-            engine.set_stage_callback(_on_stage)
-            try:
-                result = anyio.run(run_engine, nodes, target)
-            except CyberfwError as exc:
-                console.print(f"[err]{exc}[/err]")
-                raise typer.Exit(1) from exc
-            finally:
-                manager.close()
-                view.finish()
-                live.refresh()
-        _after_live()
-
-    if result.excluded:
-        console.print(f"[muted]scope: {len(result.excluded)} host(s) excluded[/muted]")
-
-    observer = _CliObserver(animate=settings.animations)
     post_scan(
         result, seed=target, settings=settings, mail=mail, takeover=takeover, intel=intel,
         vt_key=vt_key, vt_limit=vt_limit, observer=observer,
@@ -701,7 +632,7 @@ def pipeline_cmd(
     try:
         finished = finalize(
             result, manager=manager, settings=settings, name=name, seed=target,
-            tools={n.tool for n in nodes}, session=run_session, compare=not no_baseline,
+            tools={n.tool for n in prepared.nodes}, session=run_session, compare=not no_baseline,
             baseline=baseline, save=_decide, observer=observer,
         )
     except CyberfwError as exc:

@@ -2287,7 +2287,7 @@ class TestGowitnessDefault:
             return self._installed
 
     def test_an_explicit_flag_is_honoured(self, tmp_path: Path) -> None:
-        _resolve_gowitness = cli._resolve_gowitness
+        _resolve_gowitness = cli.resolve_gowitness
 
         mgr = self._Mgr(["gowitness"], True)
         assert _resolve_gowitness(True, mgr, tmp_path) is True
@@ -2296,7 +2296,7 @@ class TestGowitnessDefault:
     def test_default_includes_it_only_when_registered_installed_and_chrome_present(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        _resolve_gowitness = cli._resolve_gowitness
+        _resolve_gowitness = cli.resolve_gowitness
 
         monkeypatch.setattr("cyberfw.tools.gowitness._find_chrome", lambda _d: "/usr/bin/chrome")
         assert _resolve_gowitness(None, self._Mgr(["gowitness"], True), tmp_path) is True

@@ -24,7 +24,7 @@ from cyberfw.core.events import (
     TlsSummary,
     VtSummary,
 )
-from cyberfw.core.workspace import tool_state
+from cyberfw.core.scan import PreparedPipeline
 from cyberfw.hud import (
     ALERT,
     BRAND,
@@ -38,7 +38,6 @@ from cyberfw.hud import (
 from cyberfw.logging import console
 from cyberfw.manager import ToolManager
 from cyberfw.pipeline.engine import (
-    Node,
     NodeResult,
     PipelineResult,
 )
@@ -233,15 +232,7 @@ def _print_step_summary(summary: StepSummary) -> None:
         _print_changes(summary, limit=8)
 
 
-def _plan_view(
-    manager: ToolManager,
-    name: str,
-    seed: str | None,
-    nodes: list[Node],
-    blocking: list[tuple[str, str, str]],
-    warnings: list[str],
-    tools_dir: Path,
-) -> HudFrame:
+def _plan_view(prepared: PreparedPipeline) -> HudFrame:
     """A dry-run picture of a pipeline: each stage, what it consumes, the state
     of its tool and any per-stage options, then the pre-flight verdict."""
     table = hud_table()
@@ -252,7 +243,7 @@ def _plan_view(
     table.add_column("state", no_wrap=True)
     table.add_column("options", style="muted", overflow="fold", ratio=1)
     previous: str | None = None
-    for index, node in enumerate(nodes, start=1):
+    for index, node in enumerate(prepared.nodes, start=1):
         consumes = node.input_from or ("seed" if previous is None else previous)
         opts = []
         if node.severity:
@@ -263,20 +254,20 @@ def _plan_view(
             opts.append(f"rate={node.rate_limit}")
         if node.max_records:
             opts.append(f"max={node.max_records}")
-        state = tool_state(manager, node.tool, tools_dir)
+        state = prepared.states[node.tool]
         table.add_row(
             str(index), node.tool, node.stage, consumes, pip_word(state, state_style(state)), "  ".join(opts)
         )
         previous = node.stage
     verdict = (
-        Text(f"{len(blocking)} stage(s) cannot run as-is — --force-start runs the rest", style="warn")
-        if blocking
+        Text(f"{len(prepared.blocking)} stage(s) cannot run as-is — --force-start runs the rest", style="warn")
+        if prepared.blocking
         else Text("ready to run", style="ok")
     )
-    footer = join([Text(f"plan · {seed or '<target>'}", style="muted"), verdict], "   ")
-    panes = [Pane(table, title=f"Plan · {name}", pad=0)]
-    if warnings:
-        panes.append(Pane(Group(*(Text(w, style="warn") for w in warnings)), title="Notes"))
+    footer = join([Text(f"plan · {prepared.target or '<target>'}", style="muted"), verdict], "   ")
+    panes = [Pane(table, title=f"Plan · {prepared.name}", pad=0)]
+    if prepared.warnings:
+        panes.append(Pane(Group(*(Text(w, style="warn") for w in prepared.warnings)), title="Notes"))
     return HudFrame(panes, footer=footer)
 
 
