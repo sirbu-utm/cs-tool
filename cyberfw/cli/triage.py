@@ -34,7 +34,7 @@ def mute_cmd(
     """
     settings = load_settings()
     if reason not in triage.REASONS:
-        console.print(f"[err]Unknown reason {reason!r}. Use one of: {', '.join(sorted(triage.REASONS))}.[/err]")
+        console.print(f"[err]Unknown reason {escape(repr(reason))}. Use one of: {', '.join(sorted(triage.REASONS))}.[/err]")
         raise typer.Exit(2)
     if expires and not _is_iso_date(expires):
         console.print("[err]--expires must be a date like 2027-01-31.[/err]")

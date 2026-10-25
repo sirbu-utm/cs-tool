@@ -7,6 +7,7 @@ from typing import Annotated, Any, TextIO
 
 import typer
 from rich.console import Console
+from rich.markup import escape
 from rich.prompt import Confirm as _RichConfirm
 from rich.prompt import Prompt as _RichPrompt
 from rich.text import Text, TextType
@@ -123,7 +124,7 @@ def _checked_session(session: str) -> str:
     try:
         return checked_session(session)
     except ValueError:
-        console.print(f"[err]--session must be a plain directory name under reports/, got {session!r}.[/err]")
+        console.print(f"[err]--session must be a plain directory name under reports/, got {escape(repr(session))}.[/err]")
         raise typer.Exit(2) from None
 
 

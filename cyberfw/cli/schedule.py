@@ -79,7 +79,7 @@ def schedule_cmd(
             console.print("[err]--cron is POSIX-only; on Windows use --every/--at.[/err]")
             raise typer.Exit(2)
         if len(cron.split()) != 5:
-            console.print(f"[err]--cron must be a 5-field expression, got {escape(cron)!r}.[/err]")
+            console.print(f"[err]--cron must be a 5-field expression, got {escape(repr(cron))}.[/err]")
             raise typer.Exit(2)
 
     scan_args: list[str] = []

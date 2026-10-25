@@ -68,7 +68,7 @@ def _ensure_tools() -> None:
                                      detail=manager.spec(name).repo):
                     result = manager.install(name)
             except CyberfwError as exc:
-                console.print(f"[err]  failed {name}:[/err] {exc}")
+                console.print(f"[err]  failed {name}:[/err] {escape(str(exc))}")
             else:
                 console.print(f"[ok]  ready {name} v{result.version}[/ok]")
         _report_lock_additions(manager, existed=lock_existed)
@@ -248,7 +248,7 @@ def lock_cmd(
         manager = ToolManager(settings, manager.registry, manager.mapping, lock_path=manager.lock_path)
     for name in tools or []:
         if name not in manager.registry:
-            console.print(f"[err]Unknown tool {name!r}.[/err] Known: {', '.join(manager.registry.names())}")
+            console.print(f"[err]Unknown tool {escape(repr(name))}.[/err] Known: {', '.join(manager.registry.names())}")
             manager.close()
             raise typer.Exit(2)
         if manager.spec(name).is_local:
@@ -257,7 +257,7 @@ def lock_cmd(
     try:
         update = manager.update_lock(tools or None, upgrade=upgrade)
     except CyberfwError as exc:
-        console.print(f"[err]{exc}[/err]")
+        console.print(f"[err]{escape(str(exc))}[/err]")
         raise typer.Exit(1) from exc
     finally:
         manager.close()

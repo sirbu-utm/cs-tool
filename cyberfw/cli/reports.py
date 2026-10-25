@@ -49,7 +49,7 @@ def vt_cmd(
         with motion.Activity(console, f"VirusTotal {target}", animate=settings.animations and not json_out):
             rep = anyio.run(_vt_lookup, key, target)
     except vt.VtError as exc:
-        console.print(f"[err]VirusTotal: {exc}[/err]")
+        console.print(f"[err]VirusTotal: {escape(str(exc))}[/err]")
         raise typer.Exit(1) from exc
     if json_out:
         print(json.dumps(rep.as_record()))

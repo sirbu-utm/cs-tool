@@ -3064,3 +3064,178 @@ class TestLiveDisplaysOnATerminal:
         assert raw.count("\x1b[?25l") == raw.count("\x1b[?25h") > 1, "a live display was left open"
         drawn = Text.from_ansi(raw).plain
         assert "recon-to-vuln · example.com" in drawn and "Email check skipped" in drawn
+
+
+class TestBracketsArePrintedAsIs:
+    """Text the CLI did not write — an error, a tool's raw line, the user's bad
+    value — reaches the screen as it is. Printed through Rich markup, a ``[x]``
+    in it would be taken for a style tag and vanish."""
+
+    def _tool_prints(self, root: Path, tool: str, *, stdout: str, stderr: str = "") -> None:
+        binary = root / "tools_bin" / tool
+        binary.write_text(
+            f"#!/usr/bin/env bash\nprintf '%s\n' '{stderr}' >&2\nprintf '%s\n' '{stdout}'\n", encoding="utf-8"
+        )
+        binary.chmod(binary.stat().st_mode | stat.S_IEXEC)
+
+    def test_run_no_parse_streams_raw_lines_verbatim(self, tmp_path: Path) -> None:
+        self._tool_prints(tmp_path, "subfinder", stdout="found [x] :ok:", stderr="warn [y]")
+
+        result = runner.invoke(app, ["run", "subfinder", "-t", "example.com", "--no-parse"])
+
+        assert result.exit_code == 0, result.stdout
+        assert "found [x] :ok:" in result.stdout
+        assert "warn [y]" in result.stdout
+
+    def test_pipeline_no_parse_streams_raw_stdout_verbatim(self, tmp_path: Path) -> None:
+        self._tool_prints(tmp_path, "subfinder", stdout="chatter [x]")
+
+        result = runner.invoke(app, ["pipeline", "recon-to-vuln", "-t", "example.com", "--no-parse", "--no-report"])
+
+        assert result.exit_code == 0, result.stdout
+        assert "chatter [x]" in result.stdout
+
+    @pytest.mark.parametrize(
+        ("error", "code"),
+        [("ValueError", 2), ("ToolNotFoundError", 1), ("CyberfwError", 1)],
+    )
+    def test_a_tool_check_error(self, monkeypatch: pytest.MonkeyPatch, error: str, code: int) -> None:
+        from cyberfw import exceptions
+
+        kind = ValueError if error == "ValueError" else getattr(exceptions, error)
+
+        def refuse(*_args: object, **_kwargs: object) -> None:
+            raise kind("refused [x]")
+
+        patch_cli(monkeypatch, "check_tool", refuse)
+
+        result = runner.invoke(app, ["run", "subfinder", "-t", "example.com"])
+
+        assert result.exit_code == code
+        assert "refused [x]" in result.stdout
+
+    def test_a_failed_run_names_its_error(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        import dataclasses
+
+        real = cli.run_tool_once
+
+        def failed(*args: object, **kwargs: object) -> object:
+            ran = real(*args, **kwargs)
+            return dataclasses.replace(ran, node=dataclasses.replace(ran.node, ok=False, error="OSError: [x]"))
+
+        patch_cli(monkeypatch, "run_tool_once", failed)
+
+        result = runner.invoke(app, ["run", "subfinder", "-t", "example.com"])
+
+        assert result.exit_code == 1
+        assert "OSError: [x]" in result.stdout
+
+    def test_a_registry_error_before_the_pipeline(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from cyberfw.exceptions import RegistryError
+
+        def broken(*_args: object, **_kwargs: object) -> None:
+            raise RegistryError("registry [x]")
+
+        patch_cli(monkeypatch, "prepare_pipeline", broken)
+
+        result = runner.invoke(app, ["pipeline", "recon-to-vuln", "-t", "example.com"])
+
+        assert result.exit_code == 2
+        assert "registry [x]" in result.stdout
+
+    def test_an_engine_error(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from cyberfw.exceptions import CyberfwError
+
+        def broken(*_args: object, **_kwargs: object) -> None:
+            raise CyberfwError("the engine [broke]")
+
+        patch_cli(monkeypatch, "execute_pipeline", broken)
+
+        result = runner.invoke(app, ["pipeline", "recon-to-vuln", "-t", "example.com"])
+
+        assert result.exit_code == 1
+        assert "the engine [broke]" in result.stdout
+
+    def test_a_report_error(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from cyberfw.exceptions import CyberfwError
+
+        def broken(*_args: object, **_kwargs: object) -> None:
+            raise CyberfwError("cannot write [x]")
+
+        patch_cli(monkeypatch, "finalize", broken)
+
+        result = runner.invoke(app, ["pipeline", "recon-to-vuln", "-t", "example.com"])
+
+        assert "report failed:" in result.stdout
+        assert "cannot write [x]" in result.stdout
+
+    def test_a_virustotal_error(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from cyberfw import vt
+
+        async def broken(key: str, target: str) -> vt.Reputation:
+            raise vt.VtError("quota [x]")
+
+        patch_cli(monkeypatch, "_vt_lookup", broken)
+
+        result = runner.invoke(app, ["vt", "example.com", "--api-key", "k"])
+
+        assert result.exit_code == 1
+        assert "quota [x]" in result.stdout
+
+    def test_virustotal_categories(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from cyberfw import vt
+
+        async def found(key: str, target: str) -> vt.Reputation:
+            return vt.Reputation(target=target, kind="domain", found=True, categories=["phishing [x]"])
+
+        patch_cli(monkeypatch, "_vt_lookup", found)
+
+        result = runner.invoke(app, ["vt", "example.com", "--api-key", "k"])
+
+        assert result.exit_code == 0, result.stdout
+        assert "phishing [x]" in result.stdout
+
+    def test_a_failed_install(self, fake_github: object, monkeypatch: pytest.MonkeyPatch) -> None:
+        from cyberfw.exceptions import CyberfwError
+        from cyberfw.manager import ToolManager
+
+        def broken(self: object, name: str, *, force: bool = False) -> None:
+            raise CyberfwError("checksum [x]")
+
+        monkeypatch.setattr(ToolManager, "install", broken)
+
+        result = runner.invoke(app, ["prepare"])
+
+        assert "checksum [x]" in result.stdout
+
+    def test_a_lock_error(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from cyberfw.exceptions import LockError
+        from cyberfw.manager import ToolManager
+
+        def broken(self: object, *_args: object, **_kwargs: object) -> None:
+            raise LockError("tools.lock [x]")
+
+        monkeypatch.setattr(ToolManager, "update_lock", broken)
+
+        result = runner.invoke(app, ["lock"])
+
+        assert result.exit_code == 1
+        assert "tools.lock [x]" in result.stdout
+
+    @pytest.mark.parametrize(
+        ("command", "echo"),
+        [
+            (["run", "subfinder", "-t", "example.com", "--session", "[x]/a"], "'[x]/a'"),
+            (["lock", "[x]"], "'[x]'"),
+            (["mute", "self-signed", "--reason", "[x]"], "'[x]'"),
+            (["schedule", "recon-to-vuln", "-t", "example.com", "--cron", "[x]"], "'[x]'"),
+        ],
+        ids=["session", "lock", "mute", "cron"],
+    )
+    def test_a_bad_value_is_echoed(self, monkeypatch: pytest.MonkeyPatch, command: list[str], echo: str) -> None:
+        patch_cli(monkeypatch, "_is_posix", lambda: True)
+
+        result = runner.invoke(app, command)
+
+        assert result.exit_code == 2
+        assert echo in _one_line(result.stdout)

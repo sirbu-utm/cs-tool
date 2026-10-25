@@ -619,5 +619,5 @@ def _print_reputation(rep: vt.Reputation) -> None:
         f"{rep.harmless} harmless · reputation {rep.reputation}"
     )
     if rep.categories:
-        console.print(f"  categories: {', '.join(rep.categories)}")
+        console.print(f"  categories: {escape(', '.join(rep.categories))}")
     console.print(f"  [dim]{rep.permalink}[/dim]")

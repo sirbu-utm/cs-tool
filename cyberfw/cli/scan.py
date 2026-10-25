@@ -8,6 +8,7 @@ from typing import Annotated
 import typer
 from rich.live import Live
 from rich.markup import escape
+from rich.text import Text
 
 from cyberfw import motion, vt
 from cyberfw.cli.app import app
@@ -144,7 +145,9 @@ class _CliObserver(RunObserver):
     auto-refresh, so spinners, bars, timers and the growth pulse animate between
     events — events only change their state. With ``echo_output`` the scan prints
     every raw stdout/stderr line instead; with ``raw_records`` (``run
-    --no-parse``) each record's raw line, and stderr dimmed. After the scan: a live activity line
+    --no-parse``) each record's raw line, and stderr dimmed. Raw lines are printed
+    as ``Text``, never as markup, so a tool's ``[...]`` or ``:ok:`` shows as the
+    tool wrote it. After the scan: a live activity line
     while a slow step runs, its result line when it ends, notes as warning or
     muted lines.
     """
@@ -174,13 +177,13 @@ class _CliObserver(RunObserver):
         if self.view is not None:
             self.view.on_record(record)
         elif self.raw_records:
-            console.print(record.raw)
+            console.print(Text(record.raw))
 
     def on_output(self, line: str, stream: str) -> None:
         if stream == "stderr" and (self.echo_output or self.raw_records):
-            console.print(line, style="dim")
+            console.print(Text(line, style="dim"))
         elif stream == "stdout" and self.echo_output:
-            console.print(line)
+            console.print(Text(line))
 
     def on_step(self, event: StepEvent) -> None:
         if event.step == "scan":
@@ -272,14 +275,14 @@ def run_cmd(
         # looking for the binary so a wrong target is a usage error (exit 2).
         check_tool(manager, tool, target)
     except ValueError as exc:
-        console.print(f"[err]{exc}[/err]")
+        console.print(f"[err]{escape(str(exc))}[/err]")
         raise typer.Exit(2) from exc
     except ToolNotFoundError as exc:
-        console.print(f"[err]{exc}[/err]")
+        console.print(f"[err]{escape(str(exc))}[/err]")
         console.print("[warn]Run `cyberfw init` first (or export CYBERFW_GITHUB_TOKEN).[/warn]")
         raise typer.Exit(1) from exc
     except CyberfwError as exc:
-        console.print(f"[err]{exc}[/err]")
+        console.print(f"[err]{escape(str(exc))}[/err]")
         raise typer.Exit(1) from exc
 
     # Only --save streams into reports/<session>/ as records arrive (crash-safe).
@@ -323,7 +326,7 @@ def run_cmd(
             console.print(f"[ok]{label}:[/ok] {path}")
 
     if not ran.node.ok:
-        console.print(f"[err]{ran.node.error or 'stage failed'}[/err]")
+        console.print(f"[err]{escape(ran.node.error or 'stage failed')}[/err]")
         raise typer.Exit(1)
 
 
@@ -503,7 +506,7 @@ def pipeline_cmd(
             name, target, settings=settings, manager=manager, ffuf=ffuf, gowitness=gowitness, max_httpx=max_httpx
         )
     except RegistryError as exc:
-        console.print(f"[err]{exc}[/err]")
+        console.print(f"[err]{escape(str(exc))}[/err]")
         manager.close()
         raise typer.Exit(2) from exc
     if plan:
@@ -552,7 +555,7 @@ def pipeline_cmd(
     try:
         result = execute_pipeline(prepared, session=run_session, wordlist=wordlist, observer=observer)
     except CyberfwError as exc:
-        console.print(f"[err]{exc}[/err]")
+        console.print(f"[err]{escape(str(exc))}[/err]")
         raise typer.Exit(1) from exc
 
     post_scan(
@@ -573,7 +576,7 @@ def pipeline_cmd(
             baseline=baseline, save=_decide, observer=observer,
         )
     except CyberfwError as exc:
-        console.print(f"[err]report failed:[/err] {exc}")
+        console.print(f"[err]report failed:[/err] {escape(str(exc))}")
         return
     changes = finished.changes
     written = list(finished.reports.items())
