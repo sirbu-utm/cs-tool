@@ -13,8 +13,9 @@ from rich.table import Table
 from rich.text import Text
 
 from cyberfw import motion, vt
-from cyberfw.cli.common import _tool_state, _tool_states, _tool_version
+from cyberfw.cli.common import _tool_states, _tool_version
 from cyberfw.config import Settings
+from cyberfw.core.workspace import tool_state
 from cyberfw.hud import (
     ALERT,
     BRAND,
@@ -200,7 +201,7 @@ def _plan_view(
             opts.append(f"rate={node.rate_limit}")
         if node.max_records:
             opts.append(f"max={node.max_records}")
-        state = _tool_state(manager, node.tool, tools_dir)
+        state = tool_state(manager, node.tool, tools_dir)
         table.add_row(
             str(index), node.tool, node.stage, consumes, pip_word(state, state_style(state)), "  ".join(opts)
         )

@@ -2,9 +2,26 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
+import cyberfw
+
 from ._cli import cli, cli_modules, patch_cli
+
+
+def test_the_helper_covers_every_cli_and_core_module() -> None:
+    # Taken from the files on disk, so a module added later is reached too.
+    root = Path(cyberfw.__file__).resolve().parent
+    on_disk = {
+        f"cyberfw.{package}.{path.stem}"
+        for package in ("cli", "core")
+        for path in (root / package).glob("*.py")
+        if path.stem not in {"__init__", "__main__"}
+    }
+
+    assert {module.__name__ for module in cli_modules()} == on_disk
 
 
 def test_a_name_is_read_from_the_module_that_has_it() -> None:

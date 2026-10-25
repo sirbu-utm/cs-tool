@@ -1198,7 +1198,7 @@ class TestRegistryLookup:
     def test_candidates_prefer_cwd_then_checkout_root_then_packaged_copy(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        _registry_candidates = cli._registry_candidates
+        _registry_candidates = cli.registry_candidates
 
         patch_cli(monkeypatch, "packaged_data", lambda *parts: tmp_path / "site" / "registry.yaml")
         candidates = _registry_candidates()
@@ -1208,20 +1208,20 @@ class TestRegistryLookup:
         assert candidates[-1] == tmp_path / "site" / "registry.yaml"
 
     def test_first_existing_candidate_wins(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        _registry_path = cli._registry_path
+        _registry_path = cli.registry_path
 
         packaged = tmp_path / "site" / "registry.yaml"
         packaged.parent.mkdir()
         packaged.write_text("{}\n", encoding="utf-8")
-        patch_cli(monkeypatch, "_registry_candidates", lambda: [tmp_path / "missing.yaml", packaged])
+        patch_cli(monkeypatch, "registry_candidates", lambda: [tmp_path / "missing.yaml", packaged])
 
         assert _registry_path() == packaged
 
     def test_no_registry_anywhere_is_a_registry_error(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        _registry_path = cli._registry_path
+        _registry_path = cli.registry_path
         from cyberfw.exceptions import RegistryError
 
-        patch_cli(monkeypatch, "_registry_candidates", lambda: [tmp_path / "missing.yaml"])
+        patch_cli(monkeypatch, "registry_candidates", lambda: [tmp_path / "missing.yaml"])
 
         with pytest.raises(RegistryError, match="registry.yaml"):
             _registry_path()
@@ -1443,7 +1443,7 @@ class TestInventoryPresentation:
     def test_a_runnable_binary_without_an_install_record_is_ready_not_blocked(self, tmp_path: Path) -> None:
         """A checkout whose tools_bin was copied from elsewhere has binaries but no
         records; calling those "blocked" would send the user hunting an antivirus."""
-        _tool_state = cli._tool_state
+        _tool_state = cli.tool_state
         from cyberfw.config import Settings
         from cyberfw.manager import ToolManager, load_registry
 
@@ -1461,7 +1461,7 @@ class TestInventoryPresentation:
         """_binary_on_disk walks tools_bin with rglob/is_file; a directory that lists
         but cannot be entered raises PermissionError there on Python 3.10-3.13, which
         _tool_state caught only as CyberfwError. It must read as not installed."""
-        _tool_state = cli._tool_state
+        _tool_state = cli.tool_state
         from cyberfw.config import Settings
         from cyberfw.manager import ToolManager, load_registry
 
@@ -1508,13 +1508,13 @@ class TestInventoryPresentation:
         """The banner and the first launcher frame share one inventory pass."""
 
         calls: list[str] = []
-        real_state = cli._tool_state
+        real_state = cli.tool_state
 
         def counting_state(manager, name, tools_dir):  # type: ignore[no-untyped-def]
             calls.append(name)
             return real_state(manager, name, tools_dir)
 
-        patch_cli(monkeypatch, "_tool_state", counting_state)
+        patch_cli(monkeypatch, "tool_state", counting_state)
         patch_cli(monkeypatch, "_ensure_tools", lambda: None)
         patch_cli(monkeypatch, "_prompt_choice", lambda names: "0")
         cli.interactive_menu()
@@ -2855,7 +2855,7 @@ class TestLockCommand:
         (checkout / "registry.yaml").write_text(
             (tmp_path / "registry.yaml").read_text(encoding="utf-8"), encoding="utf-8"
         )
-        patch_cli(monkeypatch, "_registry_path", lambda: checkout / "registry.yaml")
+        patch_cli(monkeypatch, "registry_path", lambda: checkout / "registry.yaml")
 
         result = runner.invoke(app, ["lock", "pinme", "--token", "t0ken"])
 
@@ -3034,7 +3034,7 @@ class TestInitLockMessages:
         site = tmp_path / "site" / "cyberfw" / "data"
         site.mkdir(parents=True)
         (site / "registry.yaml").write_text((tmp_path / "registry.yaml").read_text(encoding="utf-8"), encoding="utf-8")
-        patch_cli(monkeypatch, "_registry_path", lambda: site / "registry.yaml")
+        patch_cli(monkeypatch, "registry_path", lambda: site / "registry.yaml")
         patch_cli(monkeypatch, "packaged_data", lambda *parts: site.joinpath(*parts))
 
         result = runner.invoke(app, ["init", "pinme"])

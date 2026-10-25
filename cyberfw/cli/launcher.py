@@ -20,13 +20,13 @@ from cyberfw.cli.common import (
     _clear_screen,
     _fresh_screen,
     _is_interactive,
-    _tool_state,
     _tool_version,
 )
 from cyberfw.cli.scan import pipeline_cmd, run_cmd
 from cyberfw.cli.tools import _ensure_tools
 from cyberfw.cli.views import _tool_rows, _ToolRow, _tools_table
 from cyberfw.config import Settings, load_settings
+from cyberfw.core.workspace import tool_state
 from cyberfw.exceptions import (
     RegistryError,
 )
@@ -450,7 +450,7 @@ def _tool_facts(tool: str) -> dict[str, str | None]:
             return {}
         version = _tool_version(manager, tool)
         return {
-            "state": _tool_state(manager, tool, settings.tools_dir),
+            "state": tool_state(manager, tool, settings.tools_dir),
             "version": version or None,
             "repo": manager.spec(tool).repo,
         }

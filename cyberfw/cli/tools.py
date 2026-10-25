@@ -15,9 +15,10 @@ from rich.text import Text
 
 from cyberfw import motion
 from cyberfw.cli.app import app
-from cyberfw.cli.common import VerboseOption, _after_live, _bootstrap, _is_packaged, _live_fps
+from cyberfw.cli.common import VerboseOption, _after_live, _bootstrap, _live_fps
 from cyberfw.cli.views import _status_view, _tool_rows
 from cyberfw.config import Settings
+from cyberfw.core.workspace import is_packaged
 from cyberfw.exceptions import (
     ChromiumUnsupportedError,
     CyberfwError,
@@ -186,7 +187,7 @@ def _report_lock_additions(manager: ToolManager, *, existed: bool) -> None:
     names = ", ".join(added)
     name = manager.lock_path.name
     what = f"Added {names} to {name}" if existed else f"Created {name} with {names}"
-    hint = "" if _is_packaged(manager.lock_path) else " — commit it so every machine installs the same, verified tools."
+    hint = "" if is_packaged(manager.lock_path) else " — commit it so every machine installs the same, verified tools."
     console.print(f"[info]{escape(what)}[/info]{hint}")
 
 
@@ -265,7 +266,7 @@ def lock_cmd(
     if update.error:
         console.print(f"[err]{escape(update.error)}[/err]")
     elif update.written:
-        hint = "" if _is_packaged(update.path) else " — commit it so every machine installs the same, verified tools."
+        hint = "" if is_packaged(update.path) else " — commit it so every machine installs the same, verified tools."
         console.print(f"[ok]Wrote {update.path.name}[/ok]{hint}")
     elif not update.changes and not update.path.exists():
         console.print("[muted]Nothing to lock: registry.yaml lists no downloadable tools.[/muted]")

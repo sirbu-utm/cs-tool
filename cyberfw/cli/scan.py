@@ -24,11 +24,11 @@ from cyberfw.cli.common import (
     _is_interactive,
     _live_fps,
     _session_tag,
-    _tool_state,
     _wants_to_save,
 )
 from cyberfw.cli.views import _node_table, _plan_view, _print_changes, _record_table, _run_summary
 from cyberfw.config import Settings
+from cyberfw.core.workspace import tool_state
 from cyberfw.exceptions import (
     CyberfwError,
     RegistryError,
@@ -190,7 +190,7 @@ def _preflight(
         if node.tool in seen:
             continue
         seen.add(node.tool)
-        state = _tool_state(manager, node.tool, tools_dir)
+        state = tool_state(manager, node.tool, tools_dir)
         if state != "ready":
             blocking.append((node.stage, node.tool, state))
             continue

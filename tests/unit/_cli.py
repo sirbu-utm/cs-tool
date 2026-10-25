@@ -1,41 +1,47 @@
-"""The CLI's internals for tests, wherever they live.
+"""The internals of the CLI and the core it drives, for tests, wherever they live.
 
-`cyberfw.cli` is being split from one module into a package, and every module
-that imports a name holds its own reference to it. Tests therefore read
-internals through ``cli.<name>`` and replace them through :func:`patch_cli`,
-which work the same on the single module and on the package.
+Code keeps moving between the modules of ``cyberfw.cli`` and ``cyberfw.core``,
+and every module that imports a name holds its own reference to it. Tests
+therefore read internals through ``cli.<name>`` and replace them through
+:func:`patch_cli`, which reach every module of both packages.
 """
 
 from __future__ import annotations
 
 import importlib
+import pkgutil
 from types import ModuleType
 from typing import Any
 
 import pytest
 
-#: The package's modules, the launcher first: it imports the most names.
-_SUBMODULES = ("launcher", "scan", "tools", "reports", "triage", "schedule", "views", "common", "app")
+#: The packages whose modules tests reach into.
+_PACKAGES = ("cyberfw.cli", "cyberfw.core")
 
 
 def cli_modules() -> list[ModuleType]:
-    """Every module of the CLI — just ``cyberfw.cli`` while it is a single file."""
-    package = importlib.import_module("cyberfw.cli")
-    if not hasattr(package, "__path__"):
-        return [package]
-    return [importlib.import_module(f"cyberfw.cli.{name}") for name in _SUBMODULES]
+    """Every module of the CLI and the core — found on disk, so a new one is never missed.
+
+    ``__main__`` is left out: importing it would run the CLI."""
+    modules: list[ModuleType] = []
+    for package_name in _PACKAGES:
+        package = importlib.import_module(package_name)
+        for info in pkgutil.iter_modules(package.__path__):
+            if info.name != "__main__":
+                modules.append(importlib.import_module(f"{package_name}.{info.name}"))
+    return modules
 
 
 def _bound(name: str) -> list[ModuleType]:
-    """The CLI modules that bind ``name``."""
+    """The CLI and core modules that bind ``name``."""
     return [module for module in cli_modules() if name in vars(module)]
 
 
 class _Cli:
-    """``cli.<name>``: what the CLI module that has that name binds it to.
+    """``cli.<name>``: what the CLI or core module that has that name binds it to.
 
     Setting ``cli.<name>`` — as ``monkeypatch.setattr(cli, name, value)`` does —
-    rebinds it in every CLI module that has it, never on this object, where it
+    rebinds it in every module that has it, never on this object, where it
     would only shadow the real bindings."""
 
     def __getattr__(self, name: str) -> Any:
@@ -56,8 +62,8 @@ cli = _Cli()
 
 
 def patch_cli(monkeypatch: pytest.MonkeyPatch, name: str, value: object) -> None:
-    """Replace ``name`` in every CLI module that binds it: patching one module
-    would miss the callers that live in the others."""
+    """Replace ``name`` in every CLI and core module that binds it: patching one
+    module would miss the callers that live in the others."""
     bound = _bound(name)
     assert bound, f"no cyberfw.cli module binds {name!r}"
     for module in bound:
