@@ -41,7 +41,13 @@ def checked_session(session: str) -> str:
 
 def open_session(reports_dir: Path, *, kind: str, name: str, session: str | None, stream: bool) -> Session:
     """The run's session: the id given, else a fresh one. With ``stream`` its
-    records go to disk as they arrive (crash-safe); without, nothing is written yet."""
+    records go to disk as they arrive (crash-safe); without, nothing is written yet.
+
+    A given id must be a plain directory name (:func:`checked_session`, else
+    :class:`ValueError` before anything touches the disk): a session this run
+    made is removed when the run is not saved."""
+    if session:
+        checked_session(session)
     session_id = session or session_tag(kind, name)
     session_dir = reports_dir / session_id
     created = not session_dir.exists()

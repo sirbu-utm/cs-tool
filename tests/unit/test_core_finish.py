@@ -167,3 +167,15 @@ def test_muted_findings_are_noted(settings: Settings, manager: ToolManager) -> N
     _finish(_scan(1, ("xss", "medium")), settings, manager, seen, save=False)
 
     assert seen.notes[0].level == "info" and seen.notes[0].text.startswith("Triage: 1 finding(s) muted")
+
+
+@pytest.mark.parametrize("name", ["../outside", "a/b"])
+def test_opening_a_session_refuses_a_name_that_is_not_plain(tmp_path: Path, name: str) -> None:
+    # The core removes a session it made when the run is not saved, so a name
+    # must never reach the disk as a path — whoever calls the core.
+    reports = tmp_path / "reports"
+
+    with pytest.raises(ValueError, match="plain directory name"):
+        open_session(reports, kind="pipeline", name="scan", session=name, stream=True)
+
+    assert not (tmp_path / "outside").exists() and not reports.exists()
