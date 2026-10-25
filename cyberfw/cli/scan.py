@@ -1,12 +1,10 @@
-"""`run` and `pipeline` — running a tool or a pipeline and finishing the run."""
+"""`run` and `pipeline`: their flags, questions and rendering — the runs themselves are cyberfw.core's."""
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Annotated
 
-import anyio
 import typer
 from rich.live import Live
 from rich.markup import escape
@@ -33,10 +31,11 @@ from cyberfw.cli.views import (
 )
 from cyberfw.config import Settings
 from cyberfw.core.events import Note, RunObserver, StepEvent
-from cyberfw.core.finish import finalize, run_info, write_reports
+from cyberfw.core.finish import finalize
 from cyberfw.core.scan import choose_wordlist, execute_pipeline, prepare_pipeline
 from cyberfw.core.sessions import open_session
 from cyberfw.core.steps import post_scan
+from cyberfw.core.tool_run import check_tool, keep_tool_run, run_tool_once
 from cyberfw.exceptions import (
     CyberfwError,
     RegistryError,
@@ -44,18 +43,12 @@ from cyberfw.exceptions import (
 )
 from cyberfw.live_view import PipelineLiveView, TopologyView
 from cyberfw.logging import console
-from cyberfw.pipeline.context import SessionContext
 from cyberfw.pipeline.engine import (
     Node,
-    NodeResult,
-    PipelineEngine,
-    PipelineResult,
     StageEvent,
 )
 from cyberfw.pipeline.schemas import ToolRecord
 from cyberfw.report import diff as rundiff
-from cyberfw.tools import adapter_class
-from cyberfw.tools.base import ToolContext
 
 
 def _read_hosts(path: Path) -> list[str]:
@@ -150,7 +143,8 @@ class _CliObserver(RunObserver):
     frame once instead of redrawing. Both views are renderables driven by
     auto-refresh, so spinners, bars, timers and the growth pulse animate between
     events — events only change their state. With ``echo_output`` the scan prints
-    every raw stdout/stderr line instead. After the scan: a live activity line
+    every raw stdout/stderr line instead; with ``raw_records`` (``run
+    --no-parse``) each record's raw line, and stderr dimmed. After the scan: a live activity line
     while a slow step runs, its result line when it ends, notes as warning or
     muted lines.
     """
@@ -161,11 +155,13 @@ class _CliObserver(RunObserver):
         animate: bool,
         view: PipelineLiveView | TopologyView | None = None,
         echo_output: bool = False,
+        raw_records: bool = False,
         fps: int = 4,
     ) -> None:
         self.animate = animate
         self.view = view
         self.echo_output = echo_output
+        self.raw_records = raw_records
         self.fps = fps
         self._live: Live | None = None
         self._activity: motion.Activity | None = None
@@ -177,13 +173,13 @@ class _CliObserver(RunObserver):
     def on_record(self, record: ToolRecord) -> None:
         if self.view is not None:
             self.view.on_record(record)
+        elif self.raw_records:
+            console.print(record.raw)
 
     def on_output(self, line: str, stream: str) -> None:
-        if not self.echo_output:
-            return
-        if stream == "stderr":
+        if stream == "stderr" and (self.echo_output or self.raw_records):
             console.print(line, style="dim")
-        else:
+        elif stream == "stdout" and self.echo_output:
             console.print(line)
 
     def on_step(self, event: StepEvent) -> None:
@@ -274,17 +270,10 @@ def run_cmd(
     try:
         # The adapter knows what kind of target it takes; check that before
         # looking for the binary so a wrong target is a usage error (exit 2).
-        if target is not None:
-            adapter_class(tool).validate_target(target)
+        check_tool(manager, tool, target)
     except ValueError as exc:
         console.print(f"[err]{exc}[/err]")
         raise typer.Exit(2) from exc
-    except CyberfwError as exc:
-        console.print(f"[err]{exc}[/err]")
-        raise typer.Exit(1) from exc
-    try:
-        # Validate the binary is installed so we can offer a targeted hint.
-        manager.binary_path(tool)
     except ToolNotFoundError as exc:
         console.print(f"[err]{exc}[/err]")
         console.print("[warn]Run `cyberfw init` first (or export CYBERFW_GITHUB_TOKEN).[/warn]")
@@ -297,96 +286,44 @@ def run_cmd(
     # Undecided runs write nothing until the user has answered, so an ad-hoc
     # `run` never litters the filesystem with a folder nobody asked for.
     run_session = open_session(settings.reports_dir, kind="run", name=tool, session=session, stream=bool(save))
-    engine = PipelineEngine(settings, manager, context=run_session.context)
-
     hosts = _read_hosts(list_file) if list_file is not None else []
-    ctx = ToolContext(
-        target=target, inputs=hosts, extra_input=wordlist or settings.wordlist, controls=engine._controls()
-    )
     target_label = target or f"{len(hosts)} host(s) from {list_file}"
     console.print(f"[info]tool:[/info] [tool]{tool}[/tool]  [info]target:[/info] {target_label}")
 
     # Parsing is on by default; disable it via the config `parse:` setting
     # (CYBERFW_PARSE=false) or override per-run with --no-parse.
     do_parse = settings.parse and not no_parse
-
-    # Timed here, around the process, so a saved report's duration is the
-    # tool's — not the instant the user answered the save prompt.
-    started_at = datetime.now(timezone.utc)
-    if not do_parse:
-        why = "--no-parse" if no_parse else "config parse=false"
-        console.print(f"[muted]{why}: streaming raw stdout/stderr exactly as the tool prints it[/muted]")
-
-        async def _print_stdout(record: ToolRecord) -> None:
-            console.print(record.raw)
-
-        async def _print_stderr(line: str) -> None:
-            console.print(line, style="dim")
-
-        engine.set_record_callback(_print_stdout)
-        engine.set_stderr_callback(_print_stderr)
-        try:
-            node_result, records = anyio.run(_run_single, engine, ctx, tool, False)
-        finally:
-            manager.close()
-        console.print(f"[info]{len(records)} line(s) captured[/info]")
-    else:
+    if do_parse:
         view = PipelineLiveView(
             [Node(tool=tool, stage=tool)], title=f"{tool} · {target_label}", animate=settings.animations
         )
-        # The view is a renderable (``__rich__``) on auto-refresh: callbacks only
-        # change its state, and the spinner, bars and timer move between them.
-        with Live(view, console=console, refresh_per_second=_live_fps(settings), transient=False) as live:
+        observer = _CliObserver(animate=settings.animations, view=view, fps=_live_fps(settings))
+    else:
+        why = "--no-parse" if no_parse else "config parse=false"
+        console.print(f"[muted]{why}: streaming raw stdout/stderr exactly as the tool prints it[/muted]")
+        observer = _CliObserver(animate=settings.animations, raw_records=True)
+    ran = run_tool_once(
+        tool, settings=settings, manager=manager, target=target, inputs=hosts, wordlist=wordlist,
+        parse=do_parse, session=run_session, observer=observer,
+    )
+    records = ran.records
+    if not do_parse:
+        console.print(f"[info]{len(records)} line(s) captured[/info]")
+    elif records:
+        console.print(_record_table(records, tool=tool, target=target_label))
+    else:
+        console.print("[muted]No records found.[/muted]")
 
-            async def _on_record(record: ToolRecord) -> None:
-                view.on_record(record)
-
-            async def _on_stage(event: StageEvent) -> None:
-                view.on_stage(event)
-
-            engine.set_record_callback(_on_record)
-            engine.set_stage_callback(_on_stage)
-            try:
-                node_result, records = anyio.run(_run_single, engine, ctx, tool, True)
-            finally:
-                manager.close()
-                view.finish()
-                live.refresh()
-        _after_live()
-        if records:
-            console.print(_record_table(records, tool=tool, target=target_label))
-        else:
-            console.print("[muted]No records found.[/muted]")
-    finished_at = datetime.now(timezone.utc)
-
-    if run_session.context is not None:
-        run_session.context.close()
     # --save decided up front (and streamed the records as they came); an
     # undecided run asks now, and only when there is something to keep.
     if save or (save is None and records and _wants_to_save(save, default=False, what=tool)):
-        result = PipelineResult(
-            nodes=[node_result],
-            records=records,
-            started_at=started_at,
-            finished_at=finished_at,
-        )
-        if run_session.context is None:
-            # Nothing was streamed, so archive the records now.
-            with SessionContext(settings.reports_dir, run_session.id) as store:
-                for record in records:
-                    store.append(tool, record)
-        written = write_reports(
-            result,
-            session_id=run_session.id,
-            settings=settings,
-            run=run_info(manager, name=tool, seed=target, session_id=run_session.id, tools={tool}),
-        )
+        written = keep_tool_run(ran, settings=settings, manager=manager)
         console.print(f"[ok]saved:[/ok] {run_session.dir}")
         for label, path in written.items():
             console.print(f"[ok]{label}:[/ok] {path}")
 
-    if not node_result.ok:
-        console.print(f"[err]{node_result.error or 'stage failed'}[/err]")
+    if not ran.node.ok:
+        console.print(f"[err]{ran.node.error or 'stage failed'}[/err]")
         raise typer.Exit(1)
 
 
@@ -664,11 +601,3 @@ def pipeline_cmd(
     code = _pipeline_exit_code(succeeded=result.succeeded(), alert_hits=alert_hits)
     if code:
         raise typer.Exit(code)
-
-
-# -- async helpers for anyio --------------------------------------------------------------------
-async def _run_single(
-    engine: PipelineEngine, ctx: ToolContext, tool: str, parse: bool
-) -> tuple[NodeResult, list[ToolRecord]]:
-    """Run one tool stage through the engine (handles fan-out and crashes)."""
-    return await engine.run_single(Node(tool=tool, stage=tool), ctx, parse=parse)

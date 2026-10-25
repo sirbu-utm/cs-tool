@@ -1020,6 +1020,8 @@ uv run pytest -m integration -q
 cyberfw/
   cli/                   Typer CLI: команды по модулям (tools, scan, reports, triage,
                          schedule), общие помощники (common), отрисовка (views), лаунчер
+  core/                  прогон без интерфейса: реестр и lock (workspace), сессии, события
+                         (events), подготовка, запуск и завершение скана (runs)
   ui.py                  Rich UI, логотипы и гайды инструментов
   manager/               GitHub API, реестр, установка и проверка бинарников
   pipeline/              executor, context store и pipeline engine
