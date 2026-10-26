@@ -2130,26 +2130,6 @@ class TestBaselineComparison:
         assert missing.exit_code == 2 and "no report.json" in missing.stdout
 
 
-class TestAlertExitCode:
-    """The exit code ranks a failed run above an alert above a clean run."""
-
-    def test_a_failed_run_outranks_an_alert(self) -> None:
-        _pipeline_exit_code = cli._pipeline_exit_code
-
-        # Even with new findings to alert on, a broken scan is reported as broken.
-        assert _pipeline_exit_code(succeeded=False, alert_hits=5) == 1
-
-    def test_new_findings_exit_3(self) -> None:
-        _pipeline_exit_code = cli._pipeline_exit_code
-
-        assert _pipeline_exit_code(succeeded=True, alert_hits=1) == 3
-
-    def test_a_clean_run_exits_0(self) -> None:
-        _pipeline_exit_code = cli._pipeline_exit_code
-
-        assert _pipeline_exit_code(succeeded=True, alert_hits=0) == 0
-
-
 class TestAlert:
     """`pipeline --alert` turns new findings into exit code 3 and an ALERT line."""
 
@@ -3186,10 +3166,10 @@ class TestBracketsArePrintedAsIs:
         assert "the engine [broke]" in result.stdout
 
     def test_a_report_error(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        from cyberfw.exceptions import CyberfwError
+        from cyberfw.exceptions import ReportError
 
         def broken(*_args: object, **_kwargs: object) -> None:
-            raise CyberfwError("cannot write [x]")
+            raise ReportError("cannot write [x]")
 
         patch_cli(monkeypatch, "finalize", broken)
 
@@ -3268,3 +3248,50 @@ class TestBracketsArePrintedAsIs:
 
         assert result.exit_code == 2
         assert echo in _one_line(result.stdout)
+
+
+class TestPipelineErrors:
+    """What `pipeline` prints and returns when it cannot start, cannot finish, or cannot save."""
+
+    def test_missing_dependencies_are_named_before_the_stages_that_cannot_run(self, tmp_path: Path) -> None:
+        registry = (tmp_path / "registry.yaml").read_text(encoding="utf-8")
+        (tmp_path / "registry.yaml").write_text(
+            registry.replace("  binary: subfinder\n", "  binary: subfinder\n  check_deps: [cyberfw-test-missing-dep]\n"),
+            encoding="utf-8",
+        )
+        (tmp_path / "tools_bin" / "nuclei").unlink()
+
+        res = runner.invoke(app, ["pipeline", "recon-to-vuln", "-t", "example.com", "--no-report", "--no-mail"])
+
+        assert res.exit_code == 2
+        assert res.stdout.index("works best with `cyberfw-test-missing-dep`") < res.stdout.index(
+            "nuclei (vulns): not installed"
+        ) < res.stdout.index("--force-start")
+
+    def test_an_engine_failure_exits_1_with_its_message(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from cyberfw.exceptions import CyberfwError
+        from cyberfw.pipeline.engine import PipelineEngine
+
+        async def broken(self: object, *_a: object, **_k: object) -> object:
+            raise CyberfwError("the engine [broke]")
+
+        monkeypatch.setattr(PipelineEngine, "run", broken)
+
+        res = runner.invoke(app, ["pipeline", "recon-to-vuln", "-t", "example.com", "--no-report", "--no-mail"])
+
+        assert res.exit_code == 1 and res.stdout.rstrip().endswith("the engine [broke]")
+
+    def test_reports_that_cannot_be_written_are_reported_and_the_run_ends(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from cyberfw.exceptions import ReportError
+
+        def refuse(*_a: object, **_k: object) -> object:
+            raise ReportError("cannot write report.json: [denied]")
+
+        patch_cli(monkeypatch, "generate_json_report", refuse)
+
+        res = runner.invoke(app, ["pipeline", "recon-to-vuln", "-t", "example.com", "--session", "w", "--no-mail"])
+
+        assert res.exit_code == 0
+        assert res.stdout.rstrip().endswith("report failed: cannot write report.json: [denied]")

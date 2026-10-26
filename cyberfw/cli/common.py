@@ -75,8 +75,8 @@ VerboseOption = Annotated[
 ]
 
 
-def _bootstrap(*, verbose: bool = False) -> tuple[Settings, ToolManager]:
-    """Load settings + registry, ensure directories, wire logging, return manager.
+def _setup(*, verbose: bool = False) -> Settings:
+    """Load the settings, make sure their directories exist, wire logging.
 
     ``verbose`` forces this process's log level to DEBUG regardless of the
     configured ``log_level``, so ``-v`` surfaces the install/download trace
@@ -87,6 +87,12 @@ def _bootstrap(*, verbose: bool = False) -> tuple[Settings, ToolManager]:
         settings = settings.model_copy(update={"log_level": "DEBUG"})
     settings.ensure_dirs()
     setup_logging(level=settings.log_level, log_dir=settings.logs_dir, log_to_file=settings.log_to_file)
+    return settings
+
+
+def _bootstrap(*, verbose: bool = False) -> tuple[Settings, ToolManager]:
+    """:func:`_setup`, and a tool manager over the registry in use."""
+    settings = _setup(verbose=verbose)
     return settings, open_manager(settings)
 
 
