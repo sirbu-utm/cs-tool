@@ -24,7 +24,7 @@ from cyberfw.core.events import (
     TlsSummary,
     VtSummary,
 )
-from cyberfw.core.scan import PreparedPipeline
+from cyberfw.core.scan import Plan
 from cyberfw.hud import (
     ALERT,
     BRAND,
@@ -232,7 +232,7 @@ def _print_step_summary(summary: StepSummary) -> None:
         _print_changes(summary, limit=8)
 
 
-def _plan_view(prepared: PreparedPipeline) -> HudFrame:
+def _plan_view(plan: Plan) -> HudFrame:
     """A dry-run picture of a pipeline: each stage, what it consumes, the state
     of its tool and any per-stage options, then the pre-flight verdict."""
     table = hud_table()
@@ -242,32 +242,20 @@ def _plan_view(prepared: PreparedPipeline) -> HudFrame:
     table.add_column("consumes", style="muted", no_wrap=True)
     table.add_column("state", no_wrap=True)
     table.add_column("options", style="muted", overflow="fold", ratio=1)
-    previous: str | None = None
-    for index, node in enumerate(prepared.nodes, start=1):
-        consumes = node.input_from or ("seed" if previous is None else previous)
-        opts = []
-        if node.severity:
-            opts.append(f"severity={node.severity}")
-        if node.tags:
-            opts.append(f"tags={node.tags}")
-        if node.rate_limit:
-            opts.append(f"rate={node.rate_limit}")
-        if node.max_records:
-            opts.append(f"max={node.max_records}")
-        state = prepared.states[node.tool]
+    for stage in plan.stages:
         table.add_row(
-            str(index), node.tool, node.stage, consumes, pip_word(state, state_style(state)), "  ".join(opts)
+            str(stage.index), stage.tool, stage.stage, stage.consumes, pip_word(stage.state, state_style(stage.state)),
+            "  ".join(f"{key}={value}" for key, value in stage.options),
         )
-        previous = node.stage
     verdict = (
-        Text(f"{len(prepared.blocking)} stage(s) cannot run as-is — --force-start runs the rest", style="warn")
-        if prepared.blocking
+        Text(f"{len(plan.blocking)} stage(s) cannot run as-is — --force-start runs the rest", style="warn")
+        if plan.blocking
         else Text("ready to run", style="ok")
     )
-    footer = join([Text(f"plan · {prepared.target or '<target>'}", style="muted"), verdict], "   ")
-    panes = [Pane(table, title=f"Plan · {prepared.name}", pad=0)]
-    if prepared.warnings:
-        panes.append(Pane(Group(*(Text(w, style="warn") for w in prepared.warnings)), title="Notes"))
+    footer = join([Text(f"plan · {plan.target or '<target>'}", style="muted"), verdict], "   ")
+    panes = [Pane(table, title=f"Plan · {plan.name}", pad=0)]
+    if plan.warnings:
+        panes.append(Pane(Group(*(Text(w, style="warn") for w in plan.warnings)), title="Notes"))
     return HudFrame(panes, footer=footer)
 
 

@@ -12,6 +12,7 @@ import functools
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
+from typing import NamedTuple
 
 import anyio
 
@@ -33,6 +34,46 @@ from cyberfw.resources import default_wordlist
 from cyberfw.tools import adapter_class
 
 
+class Blocker(NamedTuple):
+    """A stage that cannot run as things stand, and why."""
+
+    stage: str
+    tool: str
+    reason: str
+
+
+@dataclass(frozen=True)
+class PlanStage:
+    """One stage of a planned pipeline."""
+
+    #: Its place in the pipeline, counted from 1.
+    index: int
+    tool: str
+    stage: str
+    #: ``seed``, or the stage whose targets it reads.
+    consumes: str
+    #: ``ready`` / ``blocked`` / ``not installed``.
+    state: str
+    #: The stage's own scan controls, when set, as ``(name, value)`` pairs:
+    #: ``severity``, ``tags``, ``rate``, ``max``.
+    options: tuple[tuple[str, str], ...] = ()
+
+
+@dataclass(frozen=True)
+class Plan:
+    """A pipeline as it would run: its stages, what blocks them, what only weakens them."""
+
+    name: str
+    target: str | None
+    stages: tuple[PlanStage, ...]
+    blocking: tuple[Blocker, ...]
+    warnings: tuple[str, ...]
+
+    @property
+    def ready(self) -> bool:
+        return not self.blocking
+
+
 @dataclass
 class PreparedPipeline:
     """A pipeline ready to run — or to show as a plan: its stages and what stands in their way."""
@@ -40,8 +81,8 @@ class PreparedPipeline:
     name: str
     target: str | None
     nodes: list[Node]
-    #: ``(stage, tool, reason)`` for each stage that cannot run as things stand.
-    blocking: list[tuple[str, str, str]]
+    #: Each stage that cannot run as things stand, and why.
+    blocking: list[Blocker]
     #: Missing optional dependencies: they cost capability, not the run.
     warnings: list[str]
     #: ``ready`` / ``blocked`` / ``not installed`` for each tool the stages use.
@@ -74,7 +115,7 @@ def resolve_gowitness(flag: bool | None, manager: ToolManager, tools_dir: Path) 
 
 def _preflight(
     manager: ToolManager, nodes: list[Node], tools_dir: Path
-) -> tuple[list[tuple[str, str, str]], list[str], dict[str, str]]:
+) -> tuple[list[Blocker], list[str], dict[str, str]]:
     """What stands between this plan and a useful run, in plan order.
 
     Returns ``(blocking, warnings, states)``. Blocking: a binary that cannot run,
@@ -82,7 +123,7 @@ def _preflight(
     Chrome) — the stage could only fail. Warnings: a ``check_deps`` entry that is
     not on PATH (RustScan's Nmap), which costs capability, not the run.
     """
-    blocking: list[tuple[str, str, str]] = []
+    blocking: list[Blocker] = []
     warnings: list[str] = []
     states: dict[str, str] = {}
     for node in nodes:
@@ -90,11 +131,11 @@ def _preflight(
             continue
         state = states[node.tool] = tool_state(manager, node.tool, tools_dir)
         if state != "ready":
-            blocking.append((node.stage, node.tool, state))
+            blocking.append(Blocker(node.stage, node.tool, state))
             continue
         requirement = adapter_class(node.tool).missing_requirement(tools_dir)
         if requirement is not None:
-            blocking.append((node.stage, node.tool, requirement))
+            blocking.append(Blocker(node.stage, node.tool, requirement))
         for dep in manager.spec(node.tool).check_deps:
             if shutil.which(dep) is None:
                 warnings.append(
@@ -133,6 +174,28 @@ def prepare_pipeline(
     return PreparedPipeline(
         name=name, target=target, nodes=nodes, blocking=blocking, warnings=warnings, states=states,
         settings=settings, manager=manager,
+    )
+
+
+def plan_of(prepared: PreparedPipeline) -> Plan:
+    """The plan a prepared pipeline would run: each stage, the stage it reads, its
+    tool's state and its own scan controls, then what blocks and what weakens it."""
+    stages: list[PlanStage] = []
+    previous: str | None = None
+    for index, node in enumerate(prepared.nodes, start=1):
+        controls = (("severity", node.severity), ("tags", node.tags), ("rate", node.rate_limit), ("max", node.max_records))
+        stages.append(PlanStage(
+            index=index,
+            tool=node.tool,
+            stage=node.stage,
+            consumes=node.input_from or ("seed" if previous is None else previous),
+            state=prepared.states[node.tool],
+            options=tuple((key, str(value)) for key, value in controls if value),
+        ))
+        previous = node.stage
+    return Plan(
+        name=prepared.name, target=prepared.target, stages=tuple(stages),
+        blocking=tuple(prepared.blocking), warnings=tuple(prepared.warnings),
     )
 
 

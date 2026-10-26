@@ -9,12 +9,15 @@ other line worth showing — a skipped step, a warning, a hint.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Literal, TypeAlias
+from typing import TYPE_CHECKING, Literal, TypeAlias
 
 from cyberfw.pipeline.engine import PipelineResult, StageEvent
 from cyberfw.pipeline.schemas import ToolRecord
 from cyberfw.report.diff import RunDiff
 from cyberfw.threatintel import IntelSummary
+
+if TYPE_CHECKING:
+    from cyberfw.core.scan import Plan
 
 #: The scan itself, then each step after it, in the order they run.
 StepName: TypeAlias = Literal["scan", "tls", "mail", "takeover", "intel", "vt", "compare"]
@@ -103,6 +106,9 @@ class Note:
 
 class RunObserver:
     """Receives a run's events. Every method does nothing: override what you need."""
+
+    def on_plan(self, plan: Plan) -> None:
+        """The pipeline as prepared — its stages, their tools' states, what blocks — before anything runs."""
 
     def on_stage(self, event: StageEvent) -> None:
         """A pipeline stage started, progressed or finished."""

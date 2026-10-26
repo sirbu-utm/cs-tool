@@ -13,12 +13,19 @@ import pytest
 from cyberfw.config import Settings
 from cyberfw.core import scan
 from cyberfw.core.events import Note, RunObserver, StepEvent
-from cyberfw.core.scan import choose_wordlist, execute_pipeline, prepare_pipeline
+from cyberfw.core.scan import (
+    Blocker,
+    PreparedPipeline,
+    choose_wordlist,
+    execute_pipeline,
+    plan_of,
+    prepare_pipeline,
+)
 from cyberfw.core.sessions import open_session
 from cyberfw.core.workspace import open_manager
 from cyberfw.exceptions import CyberfwError, RegistryError
 from cyberfw.manager import ToolManager
-from cyberfw.pipeline.engine import PipelineEngine, PipelineResult, StageEvent
+from cyberfw.pipeline.engine import Node, PipelineEngine, PipelineResult, StageEvent
 from cyberfw.pipeline.schemas import ToolRecord
 
 from .test_cli import _break_tool, _write_fake_binaries, _write_registry
@@ -240,3 +247,41 @@ def test_the_scan_still_ends_when_closing_the_manager_fails(settings: Settings, 
 
     assert [event.step for event in seen.ends] == ["scan"]
     assert isinstance(seen.ends[0].summary, PipelineResult) and seen.ends[0].summary.succeeded()
+
+
+def test_a_plan_lists_each_stage_with_what_it_reads_and_its_tool_state(
+    settings: Settings, manager: ToolManager
+) -> None:
+    (settings.tools_dir / "nuclei").unlink()
+
+    plan = plan_of(prepare_pipeline("recon-to-vuln", "example.com", settings=settings, manager=manager))
+
+    assert [(s.index, s.tool, s.stage, s.consumes, s.state) for s in plan.stages] == [
+        (1, "subfinder", "subdomains", "seed", "ready"),
+        (2, "httpx", "live_http", "subdomains", "ready"),
+        (3, "nuclei", "vulns", "live_http", "not installed"),
+    ]
+    assert plan.blocking == (Blocker("vulns", "nuclei", "not installed"),) and not plan.ready
+    assert (plan.name, plan.target, plan.warnings) == ("recon-to-vuln", "example.com", ())
+
+
+def test_a_planned_stage_shows_its_own_options_and_the_stage_it_reads(
+    settings: Settings, manager: ToolManager
+) -> None:
+    nodes = [
+        Node(tool="subfinder", stage="subs"),
+        Node(tool="httpx", stage="live", rate_limit=50),
+        Node(tool="nuclei", stage="vulns", input_from="subs", severity="high", tags="cve", max_records=10),
+    ]
+    prepared = PreparedPipeline(
+        name="custom", target=None, nodes=nodes, blocking=[], warnings=["subfinder works best with x"],
+        states={"subfinder": "ready", "httpx": "ready", "nuclei": "ready"}, settings=settings, manager=manager,
+    )
+
+    plan = plan_of(prepared)
+
+    assert [stage.consumes for stage in plan.stages] == ["seed", "subs", "subs"]
+    assert [stage.options for stage in plan.stages] == [
+        (), (("rate", "50"),), (("severity", "high"), ("tags", "cve"), ("max", "10")),
+    ]
+    assert plan.ready and plan.warnings == ("subfinder works best with x",)

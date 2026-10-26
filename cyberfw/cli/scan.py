@@ -33,7 +33,7 @@ from cyberfw.cli.views import (
 from cyberfw.config import Settings
 from cyberfw.core.events import Note, RunObserver, StepEvent
 from cyberfw.core.finish import finalize
-from cyberfw.core.scan import choose_wordlist, execute_pipeline, prepare_pipeline
+from cyberfw.core.scan import choose_wordlist, execute_pipeline, plan_of, prepare_pipeline
 from cyberfw.core.sessions import open_session
 from cyberfw.core.steps import post_scan
 from cyberfw.core.tool_run import check_tool, keep_tool_run, run_tool_once
@@ -516,7 +516,7 @@ def pipeline_cmd(
         manager.close()
         raise typer.Exit(2) from exc
     if plan:
-        console.print(_plan_view(prepared))
+        console.print(_plan_view(plan_of(prepared)))
         manager.close()
         return
     assert target is not None  # a non-plan run required --target above; narrows for the scan path
