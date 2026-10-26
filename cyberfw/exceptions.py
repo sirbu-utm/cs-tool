@@ -27,6 +27,7 @@ __all__ = [
     "ParseError",
     "ContextStoreError",
     "ReportError",
+    "PreflightError",
 ]
 
 
@@ -101,3 +102,12 @@ class ContextStoreError(CyberfwError):
 
 class ReportError(CyberfwError):
     """Generation of an HTML/JSON report failed."""
+
+
+class PreflightError(CyberfwError):
+    """Stages of a pipeline cannot run as things stand, and ``force_start`` was not given."""
+
+    def __init__(self, blocking: Sequence[tuple[str, str, str]]) -> None:
+        #: ``(stage, tool, reason)`` for each stage that cannot run.
+        self.blocking = list(blocking)
+        super().__init__("; ".join(f"{tool} ({stage}): {reason}" for stage, tool, reason in self.blocking))

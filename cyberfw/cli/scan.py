@@ -11,6 +11,7 @@ from rich.markup import escape
 from rich.text import Text
 
 from cyberfw import motion, vt
+from cyberfw.api import _scan_control_overrides
 from cyberfw.cli.app import app
 from cyberfw.cli.common import (
     VerboseOption,
@@ -60,23 +61,6 @@ def _read_hosts(path: Path) -> list[str]:
         if line and not line.startswith("#"):
             hosts.append(line)
     return hosts
-
-
-def _scan_control_overrides(
-    *, severity: str, tags: str, rate_limit: int | None, exclude: list[str]
-) -> dict[str, object]:
-    """The ``Settings`` fields to override for this run — only the controls the
-    caller actually set, so an unset flag leaves the env/YAML/default in place."""
-    overrides: dict[str, object] = {}
-    if severity:
-        overrides["severity"] = severity
-    if tags:
-        overrides["tags"] = tags
-    if rate_limit is not None:
-        overrides["rate_limit"] = rate_limit
-    if exclude:
-        overrides["exclude"] = exclude
-    return overrides
 
 
 def _pipeline_exit_code(*, succeeded: bool, alert_hits: int) -> int:

@@ -11,7 +11,7 @@ import cyberfw
 from ._cli import cli, cli_modules, patch_cli
 
 
-def test_the_helper_covers_every_cli_and_core_module() -> None:
+def test_the_helper_covers_every_cli_and_core_module_and_the_api() -> None:
     # Taken from the files on disk, so a module added later is reached too.
     root = Path(cyberfw.__file__).resolve().parent
     on_disk = {
@@ -19,7 +19,7 @@ def test_the_helper_covers_every_cli_and_core_module() -> None:
         for package in ("cli", "core")
         for path in (root / package).glob("*.py")
         if path.stem not in {"__init__", "__main__"}
-    }
+    } | {"cyberfw.api"}
 
     assert {module.__name__ for module in cli_modules()} == on_disk
 

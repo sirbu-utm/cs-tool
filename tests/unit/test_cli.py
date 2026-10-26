@@ -2475,15 +2475,6 @@ class TestExportCommand:
 class TestScanControlsCli:
     """`--severity/--tags/--rate-limit/--exclude` override the settings for one run."""
 
-    def test_overrides_picks_only_the_flags_that_were_set(self) -> None:
-        _scan_control_overrides = cli._scan_control_overrides
-
-        assert _scan_control_overrides(severity="", tags="", rate_limit=None, exclude=[]) == {}
-        assert _scan_control_overrides(severity="high", tags="", rate_limit=None, exclude=[]) == {"severity": "high"}
-        assert _scan_control_overrides(severity="high", tags="cve", rate_limit=20, exclude=["*.dev"]) == {
-            "severity": "high", "tags": "cve", "rate_limit": 20, "exclude": ["*.dev"],
-        }
-
     def test_rate_limit_zero_is_a_usage_error(self) -> None:
         res = runner.invoke(app, ["pipeline", "recon-to-vuln", "-t", "example.com", "--rate-limit", "0"])
         assert res.exit_code == 2

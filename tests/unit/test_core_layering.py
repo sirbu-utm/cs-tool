@@ -1,4 +1,4 @@
-"""cyberfw.core never reaches for the UI: no CLI, typer, Rich, presentation modules or console."""
+"""cyberfw.core and cyberfw.api never reach for the UI: no CLI, typer, Rich, presentation modules or console."""
 
 from __future__ import annotations
 
@@ -10,7 +10,10 @@ from pathlib import Path
 
 import cyberfw
 
-CORE = Path(cyberfw.__file__).resolve().parent / "core"
+PACKAGE = Path(cyberfw.__file__).resolve().parent
+CORE = PACKAGE / "core"
+#: The core's modules, and the public API on top of them.
+CHECKED = [*sorted(CORE.glob("*.py")), PACKAGE / "api.py"]
 #: Modules the core must not import — nor anything inside them.
 FORBIDDEN = ("cyberfw.cli", "cyberfw.ui", "cyberfw.hud", "cyberfw.live_view", "cyberfw.motion", "typer", "rich")
 #: Of these, what a fresh interpreter must not have loaded after importing the core
@@ -37,7 +40,7 @@ def _forbidden(name: str) -> bool:
 def test_the_core_imports_no_ui() -> None:
     offenders = [
         f"{path.name} imports {name}"
-        for path in sorted(CORE.glob("*.py"))
+        for path in CHECKED
         for name in _imported_names(path)
         if _forbidden(name)
     ]
@@ -47,6 +50,7 @@ def test_the_core_imports_no_ui() -> None:
 
 def test_importing_the_core_loads_no_ui() -> None:
     modules = [f"cyberfw.core.{path.stem}" for path in sorted(CORE.glob("*.py")) if path.stem != "__init__"]
+    modules.append("cyberfw.api")
     code = (
         "import importlib, sys\n"
         f"for name in {modules!r}:\n"

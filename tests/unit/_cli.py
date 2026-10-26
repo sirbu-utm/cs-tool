@@ -15,12 +15,13 @@ from typing import Any
 
 import pytest
 
-#: The packages whose modules tests reach into.
+#: The packages whose modules tests reach into, and the API module on top of them.
 _PACKAGES = ("cyberfw.cli", "cyberfw.core")
+_MODULES = ("cyberfw.api",)
 
 
 def cli_modules() -> list[ModuleType]:
-    """Every module of the CLI and the core — found on disk, so a new one is never missed.
+    """Every module of the CLI and the core — found on disk, so a new one is never missed — and the API.
 
     ``__main__`` is left out: importing it would run the CLI."""
     modules: list[ModuleType] = []
@@ -29,7 +30,7 @@ def cli_modules() -> list[ModuleType]:
         for info in pkgutil.iter_modules(package.__path__):
             if info.name != "__main__":
                 modules.append(importlib.import_module(f"{package_name}.{info.name}"))
-    return modules
+    return modules + [importlib.import_module(name) for name in _MODULES]
 
 
 def _bound(name: str) -> list[ModuleType]:
