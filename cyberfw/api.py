@@ -1,6 +1,6 @@
 """cyberfw's Python API: run a pipeline or one tool, plan a pipeline, read and compare saved runs.
 
-Stable within a major version: the functions and types in ``__all__``.
+Stable within a major version: the functions, types and errors in ``__all__``.
 ``cyberfw.core`` and ``cyberfw.cli`` are internal. Nothing here prints, prompts
 or calls ``sys.exit``: results come back as data, progress goes to an optional
 :class:`RunObserver`, and logging is the caller's to set up. The calls are
@@ -49,8 +49,14 @@ from cyberfw.core.sessions import checked_session, open_session
 from cyberfw.core.steps import post_scan
 from cyberfw.core.tool_run import check_tool, keep_tool_run, run_tool_once
 from cyberfw.core.workspace import open_manager
-from cyberfw.exceptions import PreflightError
-from cyberfw.pipeline.engine import PipelineResult, StageEvent
+from cyberfw.exceptions import (
+    CyberfwError,
+    PreflightError,
+    RegistryError,
+    ReportError,
+    ToolNotFoundError,
+)
+from cyberfw.pipeline.engine import NodeResult, PipelineResult, StageEvent
 from cyberfw.pipeline.schemas import ToolRecord
 from cyberfw.report import diff as rundiff
 from cyberfw.report.csv_report import to_csv
@@ -61,18 +67,23 @@ from cyberfw.threatintel import IntelSummary
 
 __all__ = [
     "Blocker",
+    "CyberfwError",
     "IntelSummary",
     "MailSummary",
+    "NodeResult",
     "Note",
     "PipelineResult",
     "Plan",
     "PlanStage",
     "PreflightError",
+    "RegistryError",
+    "ReportError",
     "RunDiff",
     "RunInfo",
     "RunObserver",
     "RunOutcome",
     "SavedRun",
+    "Settings",
     "StageEvent",
     "StepEvent",
     "StepName",
@@ -80,6 +91,7 @@ __all__ = [
     "Stream",
     "TakeoverSummary",
     "TlsSummary",
+    "ToolNotFoundError",
     "ToolRecord",
     "VtSummary",
     "compare_runs",
@@ -137,6 +149,13 @@ class SavedRun:
     payload: dict[str, Any]
 
 
+def _check_list(name: str, values: Sequence[str] | None) -> None:
+    # A bare str is a Sequence[str] too, of one-character items: as `exclude` its "*"
+    # would take every host out of scope, as `inputs` it would scan single letters.
+    if isinstance(values, str):
+        raise TypeError(f"{name} takes a list of strings, e.g. [{values!r}], not a bare str")
+
+
 def _check_severity(severity: str) -> None:
     if severity not in rundiff.REAL:
         raise ValueError(f"severity must be one of {', '.join(rundiff.REAL)}, got {severity!r}")
@@ -168,11 +187,17 @@ def _settings(
     exclude: Sequence[str] = (),
 ) -> Settings:
     """The settings for one call: as given, else loaded the way the CLI loads them;
-    the scan controls the caller set override them for this call only."""
+    the scan controls the caller set override them for this call only, checked as
+    the settings check them (a rate limit below 1 is a :class:`ValueError`)."""
+    _check_list("exclude", exclude)
     settings = settings if settings is not None else load_settings()
-    settings.ensure_dirs()
     overrides = _scan_control_overrides(severity=severity, tags=tags, rate_limit=rate_limit, exclude=list(exclude))
-    return settings.model_copy(update=overrides) if overrides else settings
+    if overrides:
+        settings = settings.model_copy()
+        for key, value in overrides.items():
+            setattr(settings, key, value)  # Settings validates every assignment
+    settings.ensure_dirs()
+    return settings
 
 
 class _Relay(RunObserver):
@@ -238,7 +263,8 @@ def run_pipeline(
     reports; a callable is asked after the comparison, before anything is written.
     A session this call made is removed when the run is not saved.
 
-    Raises :class:`ValueError` (no target; a session that is not a plain name),
+    Raises :class:`ValueError` (no target; a session that is not a plain name; a
+    rate limit below 1), :class:`TypeError` (``exclude`` as one bare str),
     :class:`RegistryError` (an unknown pipeline, or a tool it names),
     :class:`PreflightError` (stages cannot run and ``force_start`` is not set),
     :class:`ReportError` (the reports cannot be written) and
@@ -313,7 +339,7 @@ def run_tool(
     tool: str,
     *,
     target: str | None = None,
-    inputs: Sequence[str] = (),
+    inputs: Sequence[str] | None = None,
     wordlist: str | None = None,
     settings: Settings | None = None,
     severity: str = "",
@@ -324,18 +350,22 @@ def run_tool(
     save: bool | Callable[[], bool] = False,
     observer: RunObserver | None = None,
 ) -> RunOutcome:
-    """Run one registered tool on its own against ``target`` and/or ``inputs``.
-
-    With neither, the tool has nothing to work on and finds nothing. Without
+    """Run one registered tool on its own against ``target`` and/or ``inputs`` (a
+    list of hosts). It needs one of them; an empty list leaves the tool nothing
+    to work on, so it finds nothing — what ``run --list <empty file>`` does. Without
     ``parse`` every stdout line is a raw record. ``save=True`` streams the records
     into ``reports/<session>/`` as they arrive and writes both reports; a callable
     is asked after the run — only when it produced records — before anything is
     written; ``False`` writes nothing.
 
-    Raises :class:`ValueError` (a target the tool cannot take; a session that is
-    not a plain name), :class:`RegistryError` (an unknown tool) and
-    :class:`ToolNotFoundError` (a tool that is not installed).
+    Raises :class:`ValueError` (neither a target nor inputs; a target the tool
+    cannot take; a session that is not a plain name; a rate limit below 1),
+    :class:`TypeError` (``inputs`` as one bare str), :class:`RegistryError` (an
+    unknown tool) and :class:`ToolNotFoundError` (a tool that is not installed).
     """
+    if not target and inputs is None:
+        raise ValueError("run_tool needs a target or inputs (a list of hosts)")
+    _check_list("inputs", inputs)
     if session:
         checked_session(session)
     settings = _settings(settings, severity=severity, tags=tags, rate_limit=rate_limit)
@@ -348,7 +378,7 @@ def run_tool(
         raise
     run_session = open_session(settings.reports_dir, kind="run", name=tool, session=session, stream=save is True)
     ran = run_tool_once(
-        tool, settings=settings, manager=manager, target=target, inputs=inputs, wordlist=wordlist,
+        tool, settings=settings, manager=manager, target=target, inputs=inputs or (), wordlist=wordlist,
         parse=parse, session=run_session, observer=relay,
     )
     keep = save if isinstance(save, bool) else bool(ran.records) and save()

@@ -39,20 +39,40 @@ def checked_session(session: str) -> str:
     return session
 
 
+def _fresh_session(reports_dir: Path, *, kind: str, name: str, claim: bool) -> str:
+    """An id no earlier run has used: :func:`session_tag`, else ``<tag>-2``, ``-3``…
+    when another run started in the same second. With ``claim`` its directory is
+    made here, atomically, so a run in another process cannot take it as well."""
+    tag, n = session_tag(kind, name), 1
+    while True:
+        session_id = tag if n == 1 else f"{tag}-{n}"
+        session_dir = reports_dir / session_id
+        n += 1
+        if session_dir.exists():
+            continue
+        if claim:
+            try:
+                session_dir.mkdir(parents=True)
+            except FileExistsError:  # another process took it a moment ago
+                continue
+        return session_id
+
+
 def open_session(reports_dir: Path, *, kind: str, name: str, session: str | None, stream: bool) -> Session:
     """The run's session: the id given, else a fresh one. With ``stream`` its
     records go to disk as they arrive (crash-safe); without, nothing is written yet.
 
     A given id must be a plain directory name (:func:`checked_session`, else
     :class:`ValueError` before anything touches the disk): a session this run
-    made is removed when the run is not saved."""
+    made is removed when the run is not saved. A fresh id never reuses an
+    earlier run's directory, however close together the runs start."""
     if session:
         checked_session(session)
-    session_id = session or session_tag(kind, name)
-    session_dir = reports_dir / session_id
-    created = not session_dir.exists()
+        session_id, created = session, not (reports_dir / session).exists()
+    else:
+        session_id, created = _fresh_session(reports_dir, kind=kind, name=name, claim=stream), True
     context = SessionContext(reports_dir, session_id) if stream else None
-    return Session(id=session_id, dir=session_dir, created=created, context=context)
+    return Session(id=session_id, dir=reports_dir / session_id, created=created, context=context)
 
 
 def discard_session(session_dir: Path, *, created: bool) -> bool:

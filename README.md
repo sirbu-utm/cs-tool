@@ -1008,13 +1008,17 @@ raise SystemExit(outcome.exit_code(alert_severity="high"))  # 0 / 1 / 3, как 
   `True`/`False` или функция, которую спросят после сравнения, до записи отчётов.
 - `plan_pipeline(name, target=None, ...)` → `Plan`: этапы, что каждый читает,
   состояние инструментов, что блокирует запуск (`ready`).
-- `run_tool(tool, target=..., inputs=..., save=...)` → `RunOutcome`.
+- `run_tool(tool, target=..., inputs=..., save=...)` → `RunOutcome`; нужен
+  `target` или список хостов `inputs` (пустой список — прогон без входа).
 - `load_run(ref)` → `SavedRun`; `compare_runs(old, new)`, `export_sarif(run)`,
   `export_csv(run)`.
-- Ошибки: `RegistryError` (неизвестный pipeline или инструмент), `ValueError`
-  (цель не того вида, сессия не простым именем, неизвестная severity),
-  `PreflightError` с `.blocking` (этапы не могут запуститься без `force_start`),
-  `ToolNotFoundError`, `ReportError`, `FileNotFoundError` из `load_run`.
+- Ошибки cyberfw импортируются из `cyberfw.api`: `RegistryError` (неизвестный
+  pipeline или инструмент), `PreflightError` с `.blocking` (этапы не могут
+  запуститься без `force_start`), `ToolNotFoundError`, `ReportError`; все они —
+  `CyberfwError`, ею же сообщает о сбое сам движок. Из стандартных: `ValueError`
+  (цели нет или она не того вида, сессия не простым именем, неизвестная
+  severity, `rate_limit` меньше 1), `TypeError` (одна строка вместо списка в
+  `exclude` или `inputs`), `FileNotFoundError` из `load_run`.
 - Вызовы синхронные и запускают свой event loop — вызывайте их из обычного кода,
   не изнутри работающего asyncio-цикла.
 

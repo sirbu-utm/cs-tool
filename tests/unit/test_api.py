@@ -7,6 +7,8 @@ from pathlib import Path
 import pytest
 
 from cyberfw import api
+from cyberfw.config import Settings
+from cyberfw.core import sessions
 from cyberfw.exceptions import CyberfwError, RegistryError, ToolNotFoundError
 from cyberfw.pipeline.context import SessionContext
 from cyberfw.pipeline.engine import Node, NodeResult, PipelineEngine
@@ -219,10 +221,59 @@ def test_a_tool_run_asks_to_save_only_when_it_found_something(workspace: Path) -
     assert asked == [] and outcome.reports == {}
 
 
-def test_a_tool_run_with_nothing_to_work_on_finds_nothing() -> None:
-    outcome = api.run_tool("subfinder")
+def test_a_tool_run_with_an_empty_host_list_finds_nothing() -> None:
+    # What `cyberfw run --list <empty file>` does.
+    outcome = api.run_tool("subfinder", inputs=[])
 
     assert outcome.succeeded and outcome.result.records == []
+
+
+def test_a_tool_run_needs_a_target_or_inputs() -> None:
+    # A forgotten target must not pass for a clean scan that found nothing.
+    with pytest.raises(ValueError, match="a target or inputs"):
+        api.run_tool("subfinder")
+
+
+def test_runs_started_in_the_same_second_keep_their_own_sessions(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A script looping over targets starts its runs well within a second of each other.
+    monkeypatch.setattr(sessions, "strftime", lambda _format: "20261026-120000")
+
+    first = api.run_pipeline("recon-to-vuln", "example.com", mail=False)
+    second = api.run_pipeline("recon-to-vuln", "example.org", mail=False)
+
+    assert (first.session_id, second.session_id) == (
+        "pipeline-recon-to-vuln-20261026-120000", "pipeline-recon-to-vuln-20261026-120000-2",
+    )
+    assert api.load_run(first.session_id).payload["run"]["seed"] == "example.com"
+
+
+def test_tool_runs_started_in_the_same_second_keep_their_own_reports(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(sessions, "strftime", lambda _format: "20261026-120000")
+
+    first = api.run_tool("subfinder", target="example.com", save=lambda: True)
+    second = api.run_tool("subfinder", target="example.org", save=lambda: True)
+
+    assert first.session_id != second.session_id
+    assert api.load_run(first.session_id).payload["run"]["seed"] == "example.com"
+
+
+def test_one_exclude_pattern_or_host_still_comes_as_a_list() -> None:
+    # A bare str is a sequence of one-character globs: its "*" would take every host out of scope.
+    with pytest.raises(TypeError, match="exclude"):
+        api.run_pipeline(*PIPELINE, exclude="*.staging.example.com")
+    with pytest.raises(TypeError, match="inputs"):
+        api.run_tool("httpx", inputs="sub.example.com")
+
+
+def test_scan_controls_are_checked_like_the_settings_they_override() -> None:
+    with pytest.raises(ValueError, match="rate_limit"):
+        api.run_pipeline(*PIPELINE, rate_limit=0)
+
+
+def test_the_types_a_script_handles_come_from_the_api() -> None:
+    # The settings it passes in, and each stage of the result it reads.
+    assert {"Settings", "NodeResult"} <= set(api.__all__)
+    assert (api.Settings, api.NodeResult) == (Settings, NodeResult)
 
 
 def test_a_target_the_tool_cannot_take_is_a_value_error() -> None:
