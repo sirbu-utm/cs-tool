@@ -1,4 +1,4 @@
-"""`run` and `pipeline`: their flags, questions and rendering — the runs themselves are cyberfw.core's."""
+"""`run` and `pipeline`: their flags, questions and rendering — the runs themselves go through cyberfw.api."""
 
 from __future__ import annotations
 
@@ -12,12 +12,11 @@ from rich.markup import escape
 from rich.text import Text
 
 from cyberfw import motion, vt
-from cyberfw.api import Plan, _scan_control_overrides, plan_pipeline, run_pipeline
+from cyberfw.api import Plan, plan_pipeline, run_pipeline, run_tool
 from cyberfw.cli.app import app
 from cyberfw.cli.common import (
     VerboseOption,
     _after_live,
-    _bootstrap,
     _checked_session,
     _is_interactive,
     _live_fps,
@@ -35,8 +34,6 @@ from cyberfw.cli.views import (
 )
 from cyberfw.config import Settings
 from cyberfw.core.events import Note, RunObserver, StepEvent
-from cyberfw.core.sessions import open_session
-from cyberfw.core.tool_run import check_tool, keep_tool_run, run_tool_once
 from cyberfw.exceptions import (
     CyberfwError,
     PreflightError,
@@ -137,6 +134,7 @@ class _CliObserver(RunObserver):
         fps: int = 4,
         make_view: Callable[[Plan], PipelineLiveView | TopologyView | None] | None = None,
         before_scan: Callable[[], None] | None = None,
+        after_scan: Callable[[PipelineResult], None] | None = None,
     ) -> None:
         self.animate = animate
         self.view = view
@@ -147,6 +145,8 @@ class _CliObserver(RunObserver):
         self.make_view = make_view
         #: Prints what comes right before the scan: the mode lines, a tool's header.
         self.before_scan = before_scan
+        #: Prints what the scan's result shows right after it: a tool's records.
+        self.after_scan = after_scan
         #: The scan's own result, once it has ended.
         self.scan_result: PipelineResult | None = None
         self._live: Live | None = None
@@ -221,6 +221,8 @@ class _CliObserver(RunObserver):
                     self._live.stop()
                     self._live = None
                     _after_live()
+            if self.after_scan is not None and self.scan_result is not None:
+                self.after_scan(self.scan_result)
 
 
 @app.command("run")
@@ -264,14 +266,47 @@ def run_cmd(
     if session:
         _checked_session(session)
 
-    settings, manager = _bootstrap(verbose=verbose)
-    overrides = _scan_control_overrides(severity=severity, tags=tags, rate_limit=rate_limit, exclude=[])
-    if overrides:
-        settings = settings.model_copy(update=overrides)
+    settings = _setup(verbose=verbose)
+    hosts = _read_hosts(list_file) if list_file is not None else []
+    target_label = target or f"{len(hosts)} host(s) from {list_file}"
+    # Parsing is on by default; disable it via the config `parse:` setting
+    # (CYBERFW_PARSE=false) or override per-run with --no-parse.
+    do_parse = settings.parse and not no_parse
+
+    def _header() -> None:
+        console.print(f"[info]tool:[/info] [tool]{tool}[/tool]  [info]target:[/info] {target_label}")
+        if not do_parse:
+            why = "--no-parse" if no_parse else "config parse=false"
+            console.print(f"[muted]{why}: streaming raw stdout/stderr exactly as the tool prints it[/muted]")
+
+    def _records(result: PipelineResult) -> None:
+        if not do_parse:
+            console.print(f"[info]{len(result.records)} line(s) captured[/info]")
+        elif result.records:
+            console.print(_record_table(result.records, tool=tool, target=target_label))
+        else:
+            console.print("[muted]No records found.[/muted]")
+
+    view = (
+        PipelineLiveView([Node(tool=tool, stage=tool)], title=f"{tool} · {target_label}", animate=settings.animations)
+        if do_parse
+        else None
+    )
+    observer = _CliObserver(
+        animate=settings.animations, view=view, raw_records=not do_parse, fps=_live_fps(settings),
+        before_scan=_header, after_scan=_records,
+    )
+    # --save streams into reports/<session>/ as records arrive (crash-safe). An
+    # undecided run asks once the results are on screen, and only when there is
+    # something to keep, so an ad-hoc `run` never litters the filesystem.
+    decide = save if save is not None else (lambda: _wants_to_save(None, default=False, what=tool))
     try:
-        # The adapter knows what kind of target it takes; check that before
-        # looking for the binary so a wrong target is a usage error (exit 2).
-        check_tool(manager, tool, target)
+        # The adapter knows what kind of target it takes; that is checked before
+        # the binary is looked for, so a wrong target is a usage error (exit 2).
+        outcome = run_tool(
+            tool, target=target, inputs=hosts, wordlist=wordlist, settings=settings, severity=severity,
+            tags=tags, rate_limit=rate_limit, parse=do_parse, session=session, save=decide, observer=observer,
+        )
     except ValueError as exc:
         console.print(f"[err]{escape(str(exc))}[/err]")
         raise typer.Exit(2) from exc
@@ -283,48 +318,14 @@ def run_cmd(
         console.print(f"[err]{escape(str(exc))}[/err]")
         raise typer.Exit(1) from exc
 
-    # Only --save streams into reports/<session>/ as records arrive (crash-safe).
-    # Undecided runs write nothing until the user has answered, so an ad-hoc
-    # `run` never litters the filesystem with a folder nobody asked for.
-    run_session = open_session(settings.reports_dir, kind="run", name=tool, session=session, stream=bool(save))
-    hosts = _read_hosts(list_file) if list_file is not None else []
-    target_label = target or f"{len(hosts)} host(s) from {list_file}"
-    console.print(f"[info]tool:[/info] [tool]{tool}[/tool]  [info]target:[/info] {target_label}")
-
-    # Parsing is on by default; disable it via the config `parse:` setting
-    # (CYBERFW_PARSE=false) or override per-run with --no-parse.
-    do_parse = settings.parse and not no_parse
-    if do_parse:
-        view = PipelineLiveView(
-            [Node(tool=tool, stage=tool)], title=f"{tool} · {target_label}", animate=settings.animations
-        )
-        observer = _CliObserver(animate=settings.animations, view=view, fps=_live_fps(settings))
-    else:
-        why = "--no-parse" if no_parse else "config parse=false"
-        console.print(f"[muted]{why}: streaming raw stdout/stderr exactly as the tool prints it[/muted]")
-        observer = _CliObserver(animate=settings.animations, raw_records=True)
-    ran = run_tool_once(
-        tool, settings=settings, manager=manager, target=target, inputs=hosts, wordlist=wordlist,
-        parse=do_parse, session=run_session, observer=observer,
-    )
-    records = ran.records
-    if not do_parse:
-        console.print(f"[info]{len(records)} line(s) captured[/info]")
-    elif records:
-        console.print(_record_table(records, tool=tool, target=target_label))
-    else:
-        console.print("[muted]No records found.[/muted]")
-
-    # --save decided up front (and streamed the records as they came); an
-    # undecided run asks now, and only when there is something to keep.
-    if save or (save is None and records and _wants_to_save(save, default=False, what=tool)):
-        written = keep_tool_run(ran, settings=settings, manager=manager)
-        console.print(f"[ok]saved:[/ok] {run_session.dir}")
-        for label, path in written.items():
+    if outcome.reports:
+        console.print(f"[ok]saved:[/ok] {outcome.session_dir}")
+        for label, path in outcome.reports.items():
             console.print(f"[ok]{label}:[/ok] {path}")
 
-    if not ran.node.ok:
-        console.print(f"[err]{escape(ran.node.error or 'stage failed')}[/err]")
+    (stage,) = outcome.result.nodes
+    if not stage.ok:
+        console.print(f"[err]{escape(stage.error or 'stage failed')}[/err]")
         raise typer.Exit(1)
 
 

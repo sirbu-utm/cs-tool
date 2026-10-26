@@ -979,6 +979,45 @@ x64-сборку, а Apple silicon — x86_64 под Rosetta; Linux ARM на x64
 - `.zip`, `.tar.gz` и raw-бинарники;
 - Windows PE-сигнатуру `MZ`, чтобы не запускать Linux ELF-файлы.
 
+## Python API
+
+Всё, что CLI делает с прогонами, доступно из Python — для своих скриптов и CI.
+`cyberfw.api` стабилен в пределах мажорной версии; `cyberfw.core` и
+`cyberfw.cli` — внутренние. API ничего не печатает, не спрашивает и не вызывает
+`sys.exit`: результат возвращается данными, ход прогона — через необязательный
+наблюдатель, логирование настраивает вызывающий.
+
+```python
+from cyberfw import api
+
+
+class Progress(api.RunObserver):
+    def on_step(self, event: api.StepEvent) -> None:
+        if event.kind == "done":
+            print("done:", event.step)
+
+
+outcome = api.run_pipeline("recon-to-vuln", "example.com", save=False, observer=Progress())
+print(outcome.succeeded, len(outcome.result.records))
+raise SystemExit(outcome.exit_code(alert_severity="high"))  # 0 / 1 / 3, как у CLI
+```
+
+- `run_pipeline(name, target, ...)` → `RunOutcome`: `result` (этапы, записи,
+  время), `run`, `session_id`, `session_dir`, `reports`, `changes`, `notes`;
+  `succeeded`, `alert_hits(severity)`, `exit_code(alert_severity)`. `save` —
+  `True`/`False` или функция, которую спросят после сравнения, до записи отчётов.
+- `plan_pipeline(name, target=None, ...)` → `Plan`: этапы, что каждый читает,
+  состояние инструментов, что блокирует запуск (`ready`).
+- `run_tool(tool, target=..., inputs=..., save=...)` → `RunOutcome`.
+- `load_run(ref)` → `SavedRun`; `compare_runs(old, new)`, `export_sarif(run)`,
+  `export_csv(run)`.
+- Ошибки: `RegistryError` (неизвестный pipeline или инструмент), `ValueError`
+  (цель не того вида, сессия не простым именем, неизвестная severity),
+  `PreflightError` с `.blocking` (этапы не могут запуститься без `force_start`),
+  `ToolNotFoundError`, `ReportError`, `FileNotFoundError` из `load_run`.
+- Вызовы синхронные и запускают свой event loop — вызывайте их из обычного кода,
+  не изнутри работающего asyncio-цикла.
+
 ## Разработка
 
 ```bash
@@ -1020,8 +1059,10 @@ uv run pytest -m integration -q
 cyberfw/
   cli/                   Typer CLI: команды по модулям (tools, scan, reports, triage,
                          schedule), общие помощники (common), отрисовка (views), лаунчер
-  core/                  прогон без интерфейса: реестр и lock (workspace), сессии, события
-                         (events), подготовка, запуск и завершение скана (runs)
+  core/                  прогон без интерфейса: реестр и lock (workspace), события (events),
+                         сессии (sessions), запуск пайплайна (scan), проверки после скана
+                         (steps), завершение и отчёты (finish), одиночный run (tool_run)
+  api.py                 публичный Python API (стабилен в пределах мажорной версии)
   ui.py                  Rich UI, логотипы и гайды инструментов
   manager/               GitHub API, реестр, установка и проверка бинарников
   pipeline/              executor, context store и pipeline engine

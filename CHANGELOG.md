@@ -33,6 +33,12 @@
   воспроизводим независимо от того, как этапы переслоились.
 
 ### Added
+- Публичный Python API `cyberfw.api`: `run_pipeline`, `plan_pipeline`, `run_tool`,
+  `load_run`, `compare_runs`, `export_sarif`, `export_csv` и их типы результатов
+  (`RunOutcome`, `Plan`, `SavedRun`), ошибка `PreflightError`. Ничего не печатает
+  и не спрашивает: результат — данными, ход прогона — через наблюдатель
+  `RunObserver`. Команды `pipeline`, `run`, `pipeline --plan`, `diff` и `export`
+  теперь работают через него. Описание — в README, раздел «Python API».
 - `tools.lock` и `cyberfw lock [TOOLS...] [--upgrade]`: каждый скачиваемый
   инструмент закреплён на одном релизе с SHA-256 ассета для linux/amd64,
   linux/arm64, darwin/amd64, darwin/arm64, windows/amd64 и windows/arm64 (без

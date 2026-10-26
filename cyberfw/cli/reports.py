@@ -12,14 +12,12 @@ import typer
 from rich.markup import escape
 
 from cyberfw import motion, vt
+from cyberfw.api import compare_runs, export_csv, export_sarif, load_run
 from cyberfw.cli.app import app
 from cyberfw.cli.common import _is_interactive
 from cyberfw.cli.views import _print_changes, _print_reputation
 from cyberfw.config import load_settings
 from cyberfw.logging import console
-from cyberfw.report import diff as rundiff
-from cyberfw.report.csv_report import to_csv
-from cyberfw.report.sarif import to_sarif
 
 
 @app.command("vt")
@@ -70,12 +68,11 @@ def diff_cmd(
     """
     settings = load_settings()
     try:
-        before = rundiff.load_report(rundiff.resolve_report(old, settings.reports_dir))
-        after = rundiff.load_report(rundiff.resolve_report(new, settings.reports_dir))
+        before, after = load_run(old, settings=settings), load_run(new, settings=settings)
     except (FileNotFoundError, ValueError) as exc:
         console.print(f"[err]{escape(str(exc))}[/err]")
         raise typer.Exit(2) from exc
-    changes = rundiff.compare(before, after)
+    changes = compare_runs(before, after)
     if json_out:
         print(json.dumps(changes.as_dict(), ensure_ascii=False, indent=2))
         return
@@ -108,12 +105,12 @@ def export_cmd(
         raise typer.Exit(2)
     settings = load_settings()
     try:
-        payload = rundiff.load_report(rundiff.resolve_report(run, settings.reports_dir))
+        saved = load_run(run, settings=settings)
     except (FileNotFoundError, ValueError) as exc:
         console.print(f"[err]{escape(str(exc))}[/err]")
         raise typer.Exit(2) from exc
 
-    document = json.dumps(to_sarif(payload), ensure_ascii=False, indent=2) if sarif else to_csv(payload)
+    document = json.dumps(export_sarif(saved), ensure_ascii=False, indent=2) if sarif else export_csv(saved)
     if output is None:
         print(document)  # the whole of stdout is the document — nothing themed
         return
