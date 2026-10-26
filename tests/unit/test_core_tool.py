@@ -14,6 +14,7 @@ from cyberfw.core.tool_run import check_tool, keep_tool_run, run_tool_once
 from cyberfw.core.workspace import open_manager
 from cyberfw.exceptions import RegistryError, ToolNotFoundError
 from cyberfw.manager import ToolManager
+from cyberfw.pipeline.engine import PipelineResult
 from cyberfw.pipeline.schemas import ToolRecord
 
 from .test_cli import _write_fake_binaries, _write_registry
@@ -110,3 +111,20 @@ def test_a_streamed_run_is_not_archived_twice(settings: Settings, manager: ToolM
 
     archived = list(session.dir.glob("*.jsonl"))
     assert len(archived) == 1 and len(archived[0].read_text(encoding="utf-8").splitlines()) == 1
+
+
+def test_a_tool_run_ends_its_scan_with_a_one_stage_result(settings: Settings, manager: ToolManager) -> None:
+    session = open_session(settings.reports_dir, kind="run", name="subfinder", session=None, stream=False)
+    ends: list[StepEvent] = []
+
+    class Ends(RunObserver):
+        def on_step(self, event: StepEvent) -> None:
+            if event.kind == "done":
+                ends.append(event)
+
+    ran = run_tool_once("subfinder", settings=settings, manager=manager, target="example.com",
+                        session=session, observer=Ends())
+
+    (end,) = ends
+    assert isinstance(end.summary, PipelineResult)
+    assert end.summary.nodes == [ran.node] and end.summary.records == ran.records

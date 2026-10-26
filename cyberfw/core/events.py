@@ -11,10 +11,15 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Literal, TypeAlias
 
-from cyberfw.pipeline.engine import StageEvent
+from cyberfw.pipeline.engine import PipelineResult, StageEvent
 from cyberfw.pipeline.schemas import ToolRecord
 from cyberfw.report.diff import RunDiff
 from cyberfw.threatintel import IntelSummary
+
+#: The scan itself, then each step after it, in the order they run.
+StepName: TypeAlias = Literal["scan", "tls", "mail", "takeover", "intel", "vt", "compare"]
+#: Which of a tool's streams a raw output line came from.
+Stream: TypeAlias = Literal["stdout", "stderr"]
 
 
 @dataclass(frozen=True)
@@ -57,10 +62,13 @@ class VtSummary:
     flagged: int
 
 
-#: A step's result, sent with its ``done`` event: the comparison with an earlier
-#: run is a :class:`~cyberfw.report.diff.RunDiff`, threat intel a
+#: A step's result, sent with its ``done`` event: the scan's own is its
+#: :class:`~cyberfw.pipeline.engine.PipelineResult`, the comparison with an earlier
+#: run a :class:`~cyberfw.report.diff.RunDiff`, threat intel a
 #: :class:`~cyberfw.threatintel.IntelSummary`.
-StepSummary: TypeAlias = TlsSummary | MailSummary | TakeoverSummary | IntelSummary | VtSummary | RunDiff
+StepSummary: TypeAlias = (
+    PipelineResult | TlsSummary | MailSummary | TakeoverSummary | IntelSummary | VtSummary | RunDiff
+)
 
 
 @dataclass(frozen=True)
@@ -74,11 +82,11 @@ class StepEvent:
     """
 
     kind: Literal["start", "advance", "done"]
-    step: str
+    step: StepName
     #: Units of work, when known (takeover hosts, VirusTotal lookups).
     total: int | None = None
     #: Units finished so far, on ``advance``.
-    done: int = 0
+    completed: int = 0
     #: What the step is about, on ``start`` (the mail domain).
     subject: str | None = None
     #: The step's result on ``done``, when it has one.
@@ -102,7 +110,7 @@ class RunObserver:
     def on_record(self, record: ToolRecord) -> None:
         """A tool produced a record."""
 
-    def on_output(self, line: str, stream: str) -> None:
+    def on_output(self, line: str, stream: Stream) -> None:
         """A tool printed ``line`` on ``stream`` (``stdout`` or ``stderr``)."""
 
     def on_step(self, event: StepEvent) -> None:

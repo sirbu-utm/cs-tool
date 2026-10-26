@@ -18,7 +18,7 @@ from cyberfw.core.sessions import open_session
 from cyberfw.core.workspace import open_manager
 from cyberfw.exceptions import CyberfwError, RegistryError
 from cyberfw.manager import ToolManager
-from cyberfw.pipeline.engine import PipelineEngine, StageEvent
+from cyberfw.pipeline.engine import PipelineEngine, PipelineResult, StageEvent
 from cyberfw.pipeline.schemas import ToolRecord
 
 from .test_cli import _break_tool, _write_fake_binaries, _write_registry
@@ -202,3 +202,41 @@ def test_a_script_driving_the_core_writes_nothing_to_either_stream(settings: Set
 
     assert run.returncode == 0, run.stderr
     assert (run.stdout, run.stderr) == ("", "")
+
+
+class _Ends(RunObserver):
+    """Keeps the done events."""
+
+    def __init__(self) -> None:
+        self.ends: list[StepEvent] = []
+
+    def on_step(self, event: StepEvent) -> None:
+        if event.kind == "done":
+            self.ends.append(event)
+
+
+def test_the_scan_ends_with_its_result(settings: Settings, manager: ToolManager) -> None:
+    prepared = prepare_pipeline("recon-to-vuln", "example.com", settings=settings, manager=manager)
+    session = open_session(settings.reports_dir, kind="pipeline", name="recon-to-vuln", session=None, stream=True)
+    seen = _Ends()
+
+    result = execute_pipeline(prepared, session=session, wordlist=None, observer=seen)
+
+    assert [event.step for event in seen.ends] == ["scan"] and seen.ends[0].summary is result
+
+
+def test_the_scan_still_ends_when_closing_the_manager_fails(settings: Settings, manager: ToolManager) -> None:
+    def stuck() -> None:
+        raise OSError("connection pool [stuck]")
+
+    prepared = prepare_pipeline("recon-to-vuln", "example.com", settings=settings, manager=manager)
+    session = open_session(settings.reports_dir, kind="pipeline", name="recon-to-vuln", session=None, stream=True)
+    seen = _Ends()
+
+    with pytest.MonkeyPatch.context() as patch:  # the fixture closes the real manager afterwards
+        patch.setattr(manager, "close", stuck)
+        with pytest.raises(OSError, match="stuck"):
+            execute_pipeline(prepared, session=session, wordlist=None, observer=seen)
+
+    assert [event.step for event in seen.ends] == ["scan"]
+    assert isinstance(seen.ends[0].summary, PipelineResult) and seen.ends[0].summary.succeeded()

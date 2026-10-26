@@ -12,7 +12,7 @@ import anyio
 from cyberfw.config import Settings
 from cyberfw.core.events import RunObserver, StepEvent
 from cyberfw.core.finish import run_info, write_reports
-from cyberfw.core.scan import wire_observer
+from cyberfw.core.scan import end_scan, wire_observer
 from cyberfw.core.sessions import Session
 from cyberfw.manager import ToolManager
 from cyberfw.pipeline.context import SessionContext
@@ -43,6 +43,13 @@ class ToolRun:
     started_at: datetime
     finished_at: datetime
     session: Session
+
+    @property
+    def result(self) -> PipelineResult:
+        """The run as a one-stage pipeline result."""
+        return PipelineResult(
+            nodes=[self.node], records=self.records, started_at=self.started_at, finished_at=self.finished_at
+        )
 
 
 async def _run_single(
@@ -80,16 +87,17 @@ def run_tool_once(
     observer.on_step(StepEvent("start", "scan"))
     try:
         node, records = anyio.run(_run_single, engine, ctx, tool, parse)
-    finally:
-        manager.close()
-        observer.on_step(StepEvent("done", "scan"))
-    finished_at = datetime.now(timezone.utc)
+    except BaseException:
+        end_scan(manager, observer, None)
+        raise
+    ran = ToolRun(
+        tool=tool, target=target, node=node, records=records, started_at=started_at,
+        finished_at=datetime.now(timezone.utc), session=session,
+    )
+    end_scan(manager, observer, ran.result)
     if session.context is not None:
         session.context.close()
-    return ToolRun(
-        tool=tool, target=target, node=node, records=records, started_at=started_at, finished_at=finished_at,
-        session=session,
-    )
+    return ran
 
 
 def keep_tool_run(run: ToolRun, *, settings: Settings, manager: ToolManager) -> dict[str, Path]:
@@ -99,6 +107,5 @@ def keep_tool_run(run: ToolRun, *, settings: Settings, manager: ToolManager) -> 
         with SessionContext(settings.reports_dir, run.session.id) as store:
             for record in run.records:
                 store.append(run.tool, record)
-    result = PipelineResult(nodes=[run.node], records=run.records, started_at=run.started_at, finished_at=run.finished_at)
     info = run_info(manager, name=run.tool, seed=run.target, session_id=run.session.id, tools={run.tool})
-    return write_reports(result, session_id=run.session.id, settings=settings, run=info)
+    return write_reports(run.result, session_id=run.session.id, settings=settings, run=info)

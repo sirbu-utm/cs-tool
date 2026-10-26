@@ -191,6 +191,7 @@ class _CliObserver(RunObserver):
         elif event.kind == "start":
             _print_step_start(event)
             if event.step in _ACTIVITIES:
+                self._close_activity()  # one a step never ended must not stay on screen
                 label, detail = _ACTIVITIES[event.step]
                 self._activity = motion.Activity(
                     console, label.format(subject=event.subject), animate=self.animate,
@@ -199,16 +200,19 @@ class _CliObserver(RunObserver):
                 self._activity.__enter__()
         elif event.kind == "advance":
             if self._activity is not None:
-                self._activity.advance(event.done)
+                self._activity.advance(event.completed)
         else:
-            if self._activity is not None:
-                self._activity.__exit__(None, None, None)
-                self._activity = None
+            self._close_activity()
             if event.summary is not None:
                 _print_step_summary(event.summary)
 
     def on_note(self, note: Note) -> None:
         _print_note(note)
+
+    def _close_activity(self) -> None:
+        if self._activity is not None:
+            self._activity.__exit__(None, None, None)
+            self._activity = None
 
     def _scan(self, event: StepEvent) -> None:
         """Open the live view as the scan starts; leave its final frame when it ends."""
@@ -218,11 +222,13 @@ class _CliObserver(RunObserver):
             self._live = Live(self.view, console=console, refresh_per_second=self.fps, transient=False)
             self._live.start(refresh=True)
         elif event.kind == "done" and self._live is not None:
-            self.view.finish()
-            self._live.refresh()
-            self._live.stop()
-            self._live = None
-            _after_live()
+            try:
+                self.view.finish()
+                self._live.refresh()
+            finally:  # a view that fails to finish must not leave the display live
+                self._live.stop()
+                self._live = None
+                _after_live()
 
 
 @app.command("run")

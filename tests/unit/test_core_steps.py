@@ -140,7 +140,7 @@ def test_takeover_reports_progress_findings_and_notes(seen: Recorder, monkeypatc
 
     steps.check_takeover(result, seen)
 
-    assert [(event.kind, event.total, event.done) for event in seen.steps] == [
+    assert [(event.kind, event.total, event.completed) for event in seen.steps] == [
         ("start", 1, 0), ("advance", 1, 1), ("done", None, 0),
     ]
     assert seen.notes == [Note("warn", "Takeover: DNS for x.example.com timed out")]
@@ -179,7 +179,7 @@ def test_virustotal_adds_reputation_records(seen: Recorder, monkeypatch: pytest.
 
     steps.enrich_vt(result, "key", 20, seen)
 
-    assert [(event.kind, event.done) for event in seen.steps] == [("start", 0), ("advance", 1), ("advance", 2), ("done", 0)]
+    assert [(event.kind, event.completed) for event in seen.steps] == [("start", 0), ("advance", 1), ("advance", 2), ("done", 0)]
     assert seen.steps[0].total == 2
     assert seen.steps[-1].summary == VtSummary(looked_up=2, flagged=1)
     assert [record.tool for record in result.records[1:]] == ["virustotal", "virustotal"]

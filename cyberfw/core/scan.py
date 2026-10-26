@@ -178,13 +178,23 @@ def wire_observer(engine: PipelineEngine, observer: RunObserver) -> None:
     engine.set_stderr_callback(on_stderr)
 
 
+def end_scan(manager: ToolManager, observer: RunObserver, result: PipelineResult | None) -> None:
+    """Close the tool manager, then end the ``scan`` step with its result (``None``
+    when it raised) — the ``done`` goes out even if closing fails."""
+    try:
+        manager.close()
+    finally:
+        observer.on_step(StepEvent("done", "scan", summary=result))
+
+
 def execute_pipeline(
     prepared: PreparedPipeline, *, session: Session, wordlist: str | None, observer: RunObserver
 ) -> PipelineResult:
     """Run the prepared stages, streaming every stage, record and output line to the observer.
 
-    The scan is a step of its own: ``start`` before the engine runs and ``done``
-    after it — also when it raises — then a note for any hosts kept out of scope.
+    The scan is a step of its own: ``start`` before the engine runs and ``done``,
+    carrying the result, after it — also when it raises — then a note for any
+    hosts kept out of scope.
     The tool manager is closed once the stages have run.
     """
     # The pre-flight already reported any missing optional dependency.
@@ -193,9 +203,10 @@ def execute_pipeline(
     observer.on_step(StepEvent("start", "scan"))
     try:
         result = anyio.run(functools.partial(engine.run, extra_input=wordlist), prepared.nodes, prepared.target)
-    finally:
-        prepared.manager.close()
-        observer.on_step(StepEvent("done", "scan"))
+    except BaseException:
+        end_scan(prepared.manager, observer, None)
+        raise
+    end_scan(prepared.manager, observer, result)
     if result.excluded:
         observer.on_note(Note("info", f"scope: {len(result.excluded)} host(s) excluded"))
     return result

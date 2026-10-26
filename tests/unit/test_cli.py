@@ -3066,6 +3066,44 @@ class TestLiveDisplaysOnATerminal:
         assert "recon-to-vuln · example.com" in drawn and "Email check skipped" in drawn
 
 
+    def test_a_live_view_that_fails_to_finish_is_still_closed(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from cyberfw.core.events import StepEvent
+
+        monkeypatch.setenv("TERM", "xterm-256color")
+        terminal = Console(file=io.StringIO(), force_terminal=True, width=120, theme=THEME)
+        patch_cli(monkeypatch, "console", terminal)
+
+        class Broken:
+            def __rich__(self) -> str:
+                return "scan"
+
+            def finish(self) -> None:
+                raise RuntimeError("view [broke]")
+
+        observer = cli._CliObserver(animate=True, view=Broken(), fps=4)
+        observer.on_step(StepEvent("start", "scan"))
+        with pytest.raises(RuntimeError, match="broke"):
+            observer.on_step(StepEvent("done", "scan"))
+
+        raw = terminal.file.getvalue()  # type: ignore[attr-defined]
+        assert raw.count("\x1b[?25l") == raw.count("\x1b[?25h") > 0, "the live view was left open"
+
+    def test_a_new_activity_line_closes_one_left_open(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from cyberfw.core.events import StepEvent
+
+        monkeypatch.setenv("TERM", "xterm-256color")
+        terminal = Console(file=io.StringIO(), force_terminal=True, width=120, theme=THEME)
+        patch_cli(monkeypatch, "console", terminal)
+
+        observer = cli._CliObserver(animate=True)
+        observer.on_step(StepEvent("start", "mail", subject="example.com"))  # never ends
+        observer.on_step(StepEvent("start", "takeover", total=1))
+        observer.on_step(StepEvent("done", "takeover"))
+
+        raw = terminal.file.getvalue()  # type: ignore[attr-defined]
+        assert raw.count("\x1b[?25l") == raw.count("\x1b[?25h") > 0, "an activity line was left open"
+
+
 class TestBracketsArePrintedAsIs:
     """Text the CLI did not write — an error, a tool's raw line, the user's bad
     value — reaches the screen as it is. Printed through Rich markup, a ``[x]``

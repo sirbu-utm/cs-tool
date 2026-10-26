@@ -23,6 +23,7 @@ from cyberfw.core.events import (
     Note,
     RunObserver,
     StepEvent,
+    StepName,
     StepSummary,
     TakeoverSummary,
     TlsSummary,
@@ -39,9 +40,9 @@ _TAKEOVER_LIMIT = 300
 _SEVERITY_RANK = {"critical": 0, "high": 1, "medium": 2, "low": 3}
 
 
-def _advance(observer: RunObserver, step: str, total: int) -> Callable[[int], None]:
-    """A ``progress`` callback that reports ``done`` units of ``step`` to the observer."""
-    return lambda done: observer.on_step(StepEvent("advance", step, total=total, done=done))
+def _advance(observer: RunObserver, step: StepName, total: int) -> Callable[[int], None]:
+    """A ``progress`` callback that reports how many units of ``step`` are finished."""
+    return lambda completed: observer.on_step(StepEvent("advance", step, total=total, completed=completed))
 
 
 def check_tls(result: PipelineResult, observer: RunObserver) -> None:
