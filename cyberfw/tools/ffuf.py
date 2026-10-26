@@ -12,7 +12,8 @@ from __future__ import annotations
 from pathlib import Path
 
 from cyberfw.exceptions import ToolNotFoundError
-from cyberfw.plugin import BaseTool, ToolContext
+from cyberfw.pipeline.schemas import FfufResult
+from cyberfw.plugin import CONTRACT, BaseTool, ToolContext, ToolPlugin
 from cyberfw.resources import default_wordlist
 
 
@@ -56,3 +57,6 @@ class FfufTool(BaseTool):
     @property
     def input_flag(self) -> str | None:
         return None
+
+
+PLUGIN = ToolPlugin(contract=CONTRACT, adapter=FfufTool, record=FfufResult)

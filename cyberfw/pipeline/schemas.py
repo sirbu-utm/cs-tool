@@ -381,25 +381,14 @@ class MailSecurity(ToolRecord):
     dmarc_pct: int = 100
 
 
-#: Dispatch map — registry name → validating model.
-MODELS: dict[str, type[ToolRecord]] = {
-    "subfinder": SubfinderResult,
-    "naabu": NaabuResult,
-    "httpx": HttpxResult,
-    "ffuf": FfufResult,
-    "nuclei": NucleiResult,
-    "gitleaks": GitleaksResult,
-    "gowitness": GowitnessResult,
-    "rustscan": RustscanResult,
-    "virustotal": VirusTotalResult,
-}
-
-
 def validate_record(tool: str, line: str, lineno: int) -> ToolRecord:
-    """Validate one raw JSONL line for ``tool``.
+    """Validate one raw JSONL line for ``tool``, with the record model its
+    description names (:data:`cyberfw.tools.MODELS`).
 
     Raises :class:`ParseError` for malformed or unknown-tool input.
     """
+    from cyberfw.tools import MODELS  # the tools import this module, so not at its top
+
     model = MODELS.get(tool)
     if model is None:
         raise ParseError(f"[{tool}:{lineno}] no schema for tool {tool!r}")

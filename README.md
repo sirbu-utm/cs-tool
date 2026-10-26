@@ -1071,6 +1071,8 @@ cyberfw/
   manager/               GitHub API, реестр, установка и проверка бинарников
   pipeline/              executor, context store и pipeline engine
   pipelines/             встроенные pipeline и загрузчик YAML-описаний
+  plugin.py              контракт адаптера инструмента: по нему описаны встроенные инструменты
+                         и пишутся плагины (стабилен в пределах своей версии)
   tools/                 адаптеры девяти внешних инструментов (вкл. локальный nmap)
   posture/               проверки после скана: TLS, подделка почты (SPF/DMARC), захват поддомена
   threatintel.py         опасность CVE: CISA KEV, EPSS, Exploit-DB

@@ -14,7 +14,9 @@ import pytest
 
 import cyberfw
 from cyberfw import plugin
+from cyberfw.manager.registry import load_registry
 from cyberfw.pipeline.schemas import PostureFinding
+from cyberfw.tools import ADAPTERS, BUILTIN, MODELS
 
 PACKAGE = Path(cyberfw.__file__).resolve().parent
 
@@ -264,3 +266,30 @@ def test_a_tool_written_against_the_contract_builds_its_command_with_its_helpers
     ]
     assert tool.build_cmd(plugin.ToolContext()) == ["echo", "-json", "-c", "5"]
     assert plugin.BaseTool.unique(["a", "b", "a"]) == ["a", "b"]
+
+
+def test_every_built_in_tool_is_described_the_way_a_plugin_describes_its_own() -> None:
+    registry = load_registry(PACKAGE.parent / "registry.yaml")
+
+    assert sorted(BUILTIN) == registry.names()
+    for name, tool in BUILTIN.items():
+        assert isinstance(tool, plugin.ToolPlugin) and tool.contract == plugin.CONTRACT, name
+        assert issubclass(tool.adapter, plugin.BaseTool) and issubclass(tool.record, plugin.ToolRecord), name
+        assert tool.install is None, f"{name}'s recipe is its registry.yaml entry"
+    assert ADAPTERS == {name: tool.adapter for name, tool in BUILTIN.items()}
+
+
+def test_records_validate_against_the_model_each_tool_s_description_names() -> None:
+    assert {name: model.__name__ for name, model in MODELS.items()} == {
+        "subfinder": "SubfinderResult",
+        "naabu": "NaabuResult",
+        "nmap": "NmapResult",
+        "rustscan": "RustscanResult",
+        "httpx": "HttpxResult",
+        "ffuf": "FfufResult",
+        "nuclei": "NucleiResult",
+        "gitleaks": "GitleaksResult",
+        "gowitness": "GowitnessResult",
+        "virustotal": "VirusTotalResult",
+    }
+    assert all(MODELS[name] is tool.record for name, tool in BUILTIN.items())

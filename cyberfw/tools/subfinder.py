@@ -4,7 +4,8 @@ from __future__ import annotations
 
 from urllib.parse import urlsplit
 
-from cyberfw.plugin import BaseTool, ToolContext
+from cyberfw.pipeline.schemas import SubfinderResult
+from cyberfw.plugin import CONTRACT, BaseTool, ToolContext, ToolPlugin
 
 
 class SubfinderTool(BaseTool):
@@ -28,3 +29,6 @@ def _apex(target: str) -> str:
     """Reduce a pasted URL to the bare domain subfinder expects for ``-d``."""
     host = urlsplit(target).hostname if "://" in target else None
     return host or target.strip("/")
+
+
+PLUGIN = ToolPlugin(contract=CONTRACT, adapter=SubfinderTool, record=SubfinderResult)

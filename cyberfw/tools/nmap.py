@@ -18,7 +18,7 @@ from defusedxml.common import DefusedXmlException
 from defusedxml.ElementTree import fromstring
 
 from cyberfw.pipeline.schemas import NmapResult
-from cyberfw.plugin import BaseTool, ToolContext, ToolRecord
+from cyberfw.plugin import CONTRACT, BaseTool, ToolContext, ToolPlugin, ToolRecord
 from cyberfw.tools.targets import hostname_of
 
 
@@ -108,3 +108,6 @@ class NmapTool(BaseTool):
             return hostname.get("name", "")
         address = host_el.find("address")
         return address.get("addr", "") if address is not None else ""
+
+
+PLUGIN = ToolPlugin(contract=CONTRACT, adapter=NmapTool, record=NmapResult)

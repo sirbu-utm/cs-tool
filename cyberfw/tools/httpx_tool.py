@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from cyberfw.plugin import BaseTool, ToolContext
+from cyberfw.pipeline.schemas import HttpxResult
+from cyberfw.plugin import CONTRACT, BaseTool, ToolContext, ToolPlugin
 
 
 class HttpxTool(BaseTool):
@@ -22,3 +23,6 @@ class HttpxTool(BaseTool):
         elif ctx.input_file:
             cmd += ["-l", str(ctx.input_file)]
         return cmd
+
+
+PLUGIN = ToolPlugin(contract=CONTRACT, adapter=HttpxTool, record=HttpxResult)
