@@ -19,7 +19,7 @@ from cyberfw.manager.registry import load_registry
 from cyberfw.pipeline.context import SessionContext
 from cyberfw.pipeline.engine import Node, PipelineEngine, StageEvent
 from cyberfw.pipeline.schemas import ToolRecord
-from cyberfw.tools.base import BaseTool, ToolContext
+from cyberfw.plugin import BaseTool, ToolContext
 
 
 class _StubTool(BaseTool):

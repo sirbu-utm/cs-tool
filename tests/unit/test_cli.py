@@ -1022,8 +1022,8 @@ class TestLauncherPromptsComeFromTheAdapter:
     def test_a_new_adapter_brings_its_own_prompt(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """No per-tool branch in the CLI: registering an adapter is all a new tool needs."""
         _interactive_run = cli._interactive_run
+        from cyberfw.plugin import BaseTool
         from cyberfw.tools import ADAPTERS
-        from cyberfw.tools.base import BaseTool
 
         class PlanetScan(BaseTool):
             target_prompt = "Which planet?"

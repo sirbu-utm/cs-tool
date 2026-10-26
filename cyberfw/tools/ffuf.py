@@ -12,8 +12,8 @@ from __future__ import annotations
 from pathlib import Path
 
 from cyberfw.exceptions import ToolNotFoundError
+from cyberfw.plugin import BaseTool, ToolContext
 from cyberfw.resources import default_wordlist
-from cyberfw.tools.base import BaseTool, ToolContext
 
 
 class FfufTool(BaseTool):
@@ -48,8 +48,8 @@ class FfufTool(BaseTool):
             "-w",
             wordlist,
             "-json",
-            *self._static_flags(),
-            *self._rate_args(ctx, "-rate"),  # ffuf: requests/sec
+            *self.static_flags(),
+            *self.rate_args(ctx, "-rate"),  # ffuf: requests/sec
         ]
         return cmd
 

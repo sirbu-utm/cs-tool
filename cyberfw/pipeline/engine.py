@@ -34,7 +34,7 @@ from cyberfw.manager import ToolManager
 from cyberfw.pipeline.context import SessionContext
 from cyberfw.pipeline.executor import run_stage
 from cyberfw.pipeline.schemas import ToolRecord
-from cyberfw.tools.base import BaseTool, ScanControls, ToolContext
+from cyberfw.plugin import BaseTool, ScanControls, ToolContext
 from cyberfw.tools.targets import hostname_of, in_scope
 
 LOG = get_logger("engine")

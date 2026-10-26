@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from cyberfw.tools.base import BaseTool, ToolContext
+from cyberfw.plugin import BaseTool, ToolContext
 
 
 class NucleiTool(BaseTool):
@@ -11,12 +11,12 @@ class NucleiTool(BaseTool):
         return "-l"
 
     def build_cmd(self, ctx: ToolContext) -> list[str]:
-        cmd: list[str] = [str(self.binary), "-silent", "-jsonl", *self._static_flags()]
+        cmd: list[str] = [str(self.binary), "-silent", "-jsonl", *self.static_flags()]
         if ctx.controls.severity:
             cmd += ["-severity", ctx.controls.severity]
         if ctx.controls.tags:
             cmd += ["-tags", ctx.controls.tags]
-        cmd += self._rate_args(ctx)  # nuclei: -rate-limit
+        cmd += self.rate_args(ctx)  # nuclei: -rate-limit
         if ctx.target:
             cmd += ["-u", ctx.target]
         elif ctx.input_file:

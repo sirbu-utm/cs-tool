@@ -7,7 +7,7 @@ targets (httpx's live URLs) are therefore reduced to a bare hostname.
 
 from __future__ import annotations
 
-from cyberfw.tools.base import BaseTool, ToolContext
+from cyberfw.plugin import BaseTool, ToolContext
 from cyberfw.tools.targets import hostname_of
 
 
@@ -22,8 +22,8 @@ class NaabuTool(BaseTool):
         return [hostname_of(host) for host in inputs]
 
     def build_cmd(self, ctx: ToolContext) -> list[str]:
-        cmd: list[str] = [str(self.binary), "-silent", "-json", *self._static_flags()]
-        cmd += self._rate_args(ctx, "-rate")  # naabu: packets/sec
+        cmd: list[str] = [str(self.binary), "-silent", "-json", *self.static_flags()]
+        cmd += self.rate_args(ctx, "-rate")  # naabu: packets/sec
         if ctx.target:
             cmd += ["-host", hostname_of(ctx.target)]
         elif ctx.input_file:

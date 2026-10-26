@@ -19,7 +19,7 @@ import shutil
 from pathlib import Path
 
 from cyberfw.exceptions import ToolNotFoundError
-from cyberfw.tools.base import BaseTool, ToolContext
+from cyberfw.plugin import BaseTool, ToolContext
 
 #: Executable names gowitness / chromedp look for on PATH.
 _CHROME_NAMES = ("google-chrome", "google-chrome-stable", "chromium", "chromium-browser", "chrome")
@@ -101,7 +101,7 @@ class GowitnessTool(BaseTool):
             screenshots,
             "--write-stdout",
             "-q",
-            *self._static_flags(),
+            *self.static_flags(),
         ]
 
     def _tools_dir(self) -> Path | None:

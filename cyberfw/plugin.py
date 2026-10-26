@@ -1,17 +1,27 @@
-"""BaseTool — ABC every tool adapter implements.
+"""The contract a tool adapter is written against — cyberfw's own tools and plugins alike.
 
-Each adapter is declaratively configured by a :class:`ToolSpec` from
-``registry.yaml`` (repo, archive patterns, static CLI flags) and supplies two
-things the framework cannot derive from YAML:
+A plugin is a Python package that declares each of its tools as an entry point
+in the ``cyberfw.tools`` group, pointing at a :class:`ToolPlugin`::
 
-* ``build_cmd(ctx)`` — turn a validated cross-tool context into the concrete
-  argv for this utility,
-* ``parse_line`` — delegate JSONL validation to the per-tool Pydantic schema
-  (``validate_record``), which is the shape-specific part of "adding a tool".
+    [project.entry-points."cyberfw.tools"]
+    foo = "cyberfw_foo:PLUGIN"
 
-Adding a brand-new tool normally means: an entry in ``registry.yaml`` plus, when
-its JSONL schema is novel, a model in ``pipeline/schemas.py`` — no changes to the
-engine.
+The entry point's name is the tool's name. The adapter subclasses
+:class:`BaseTool`: ``build_cmd`` turns the stage's :class:`ToolContext` into the
+command line, and ``parse_line`` — or ``parse_output``, for a tool that prints
+one document — turns what the tool prints into records: a :class:`ToolRecord`,
+or a :class:`Finding` for a problem the tool found, which the reports, SARIF,
+the run comparison and triage then treat like a nuclei finding. A line that is
+not the tool's output raises :class:`ParseError` and is skipped. ``install`` is
+the recipe for the tool's binary — the same :class:`ToolSpec` as an entry in
+``registry.yaml``.
+
+Everything in ``__all__`` is the contract, versioned by :data:`CONTRACT` rather
+than by cyberfw's own version. Adding something optional — a hook with a
+default, a context field with a default — keeps the version; removing, renaming
+or changing the meaning of anything bumps it, and cyberfw goes on loading the
+previous version for a while (:data:`SUPPORTED_CONTRACTS`). The rest of cyberfw
+is internal.
 """
 
 from __future__ import annotations
@@ -21,10 +31,27 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import ClassVar
 
+from cyberfw.exceptions import ParseError
 from cyberfw.manager.registry import ToolSpec
-from cyberfw.pipeline.schemas import ToolRecord, validate_record
+from cyberfw.pipeline.schemas import Finding, ToolRecord, validate_record
 
-__all__ = ["ScanControls", "ToolContext", "BaseTool"]
+__all__ = [
+    "CONTRACT",
+    "SUPPORTED_CONTRACTS",
+    "BaseTool",
+    "Finding",
+    "ParseError",
+    "ScanControls",
+    "ToolContext",
+    "ToolPlugin",
+    "ToolRecord",
+    "ToolSpec",
+]
+
+#: The contract version this cyberfw writes for.
+CONTRACT = 1
+#: The contract versions this cyberfw loads.
+SUPPORTED_CONTRACTS = frozenset({1})
 
 
 @dataclass(frozen=True)
@@ -75,7 +102,12 @@ class ToolContext:
 
 
 class BaseTool(ABC):
-    """Thin adapter over one external, precompiled binary."""
+    """Thin adapter over one external, precompiled binary.
+
+    Configured by its :class:`ToolSpec` (repo, archive patterns, static CLI
+    flags), it supplies what cannot be derived from that: ``build_cmd`` — the
+    concrete argv for a stage — and how to read the tool's output.
+    """
 
     #: True when this tool scans one target per invocation (fan-out per input),
     #: False when it can consume the whole input list in one process.
@@ -151,14 +183,14 @@ class BaseTool(ABC):
         """Parse a whole-document stdout at once (only used when ``buffered``)."""
         return []
 
-    # -- shared flag helpers --------------------------------------------------
-    def _rate_args(self, ctx: ToolContext, flag: str = "-rate-limit") -> list[str]:
+    # -- helpers for build_cmd -------------------------------------------------
+    def rate_args(self, ctx: ToolContext, flag: str = "-rate-limit") -> list[str]:
         """``[flag, N]`` when a rate limit is set, else ``[]`` — most tools spell
         the flag ``-rate-limit``; naabu/ffuf use ``-rate``."""
         limit = ctx.controls.rate_limit
         return [flag, str(limit)] if limit else []
 
-    def _static_flags(self) -> list[str]:
+    def static_flags(self) -> list[str]:
         """Flatten ``spec.interactive_input`` ({flag: value}) into argv args.
 
         A flag with an empty value is emitted alone (a switch); a flag with a
@@ -172,7 +204,7 @@ class BaseTool(ABC):
         return flags
 
     @staticmethod
-    def _u(inputs: list[str]) -> list[str]:
+    def unique(inputs: list[str]) -> list[str]:
         """Deduplicate while preserving order."""
         seen: set[str] = set()
         out: list[str] = []
@@ -181,3 +213,19 @@ class BaseTool(ABC):
                 seen.add(item)
                 out.append(item)
         return out
+
+
+@dataclass(frozen=True)
+class ToolPlugin:
+    """One tool as cyberfw sees it: what a plugin's entry point points at, and how
+    cyberfw describes each of its own tools."""
+
+    #: The contract version the tool is written for (:data:`CONTRACT`).
+    contract: int
+    #: How to build the command and read the output.
+    adapter: type[BaseTool]
+    #: The model the tool's records validate against.
+    record: type[ToolRecord]
+    #: The recipe for the tool's binary. Required for a plugin; cyberfw's own tools
+    #: leave it ``None``, their recipe being their entry in ``registry.yaml``.
+    install: ToolSpec | None = None

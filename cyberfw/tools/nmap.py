@@ -17,8 +17,8 @@ from xml.etree.ElementTree import Element, ParseError
 from defusedxml.common import DefusedXmlException
 from defusedxml.ElementTree import fromstring
 
-from cyberfw.pipeline.schemas import NmapResult, ToolRecord
-from cyberfw.tools.base import BaseTool, ToolContext
+from cyberfw.pipeline.schemas import NmapResult
+from cyberfw.plugin import BaseTool, ToolContext, ToolRecord
 from cyberfw.tools.targets import hostname_of
 
 
@@ -56,7 +56,7 @@ class NmapTool(BaseTool):
         cmd = [str(self.binary), "-sV", "-Pn"]
         if port is not None:
             cmd += ["-p", port]
-        cmd += [host, "-oX", "-", *self._static_flags()]
+        cmd += [host, "-oX", "-", *self.static_flags()]
         return cmd
 
     def parse_output(self, text: str) -> list[ToolRecord]:

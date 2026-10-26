@@ -9,9 +9,9 @@ from __future__ import annotations
 
 import re
 
-from cyberfw.exceptions import ParseError, ToolNotFoundError
+from cyberfw.exceptions import ToolNotFoundError
 from cyberfw.pipeline.schemas import RustscanResult
-from cyberfw.tools.base import BaseTool, ToolContext
+from cyberfw.plugin import BaseTool, ParseError, ToolContext
 from cyberfw.tools.targets import hostname_of
 
 
@@ -49,7 +49,7 @@ class RustscanTool(BaseTool):
             "--addresses",
             addresses,
             "--greppable",
-            *self._static_flags(),
+            *self.static_flags(),
         ]
 
     def parse_line(self, line: str, lineno: int) -> RustscanResult:

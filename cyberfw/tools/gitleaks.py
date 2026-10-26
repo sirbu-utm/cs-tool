@@ -16,9 +16,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from cyberfw.exceptions import ParseError
-from cyberfw.pipeline.schemas import GitleaksResult, ToolRecord
-from cyberfw.tools.base import BaseTool, ToolContext
+from cyberfw.pipeline.schemas import GitleaksResult
+from cyberfw.plugin import BaseTool, ParseError, ToolContext, ToolRecord
 
 
 class GitleaksTool(BaseTool):
@@ -39,7 +38,7 @@ class GitleaksTool(BaseTool):
         if ctx.target:
             cmd.append(ctx.target)
         cmd += ["--report-format", "json", "--report-path", "-", "--exit-code", "0", "--no-banner"]
-        cmd += self._static_flags()
+        cmd += self.static_flags()
         return cmd
 
     def parse_output(self, text: str) -> list[ToolRecord]:

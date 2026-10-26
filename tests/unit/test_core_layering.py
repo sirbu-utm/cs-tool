@@ -1,4 +1,4 @@
-"""cyberfw.core and cyberfw.api never reach for the UI: no CLI, typer, Rich, presentation modules or console."""
+"""cyberfw.core, cyberfw.api and cyberfw.plugin never reach for the UI: no CLI, typer, Rich, presentation modules or console."""
 
 from __future__ import annotations
 
@@ -12,8 +12,9 @@ import cyberfw
 
 PACKAGE = Path(cyberfw.__file__).resolve().parent
 CORE = PACKAGE / "core"
-#: The core's modules, and the public API on top of them.
-CHECKED = [*sorted(CORE.glob("*.py")), PACKAGE / "api.py"]
+#: The core's modules, the public API on top of them, and the contract tool adapters
+#: are written against.
+CHECKED = [*sorted(CORE.glob("*.py")), PACKAGE / "api.py", PACKAGE / "plugin.py"]
 #: Modules the core must not import — nor anything inside them.
 FORBIDDEN = ("cyberfw.cli", "cyberfw.ui", "cyberfw.hud", "cyberfw.live_view", "cyberfw.motion", "typer", "rich")
 #: Of these, what a fresh interpreter must not have loaded after importing the core
@@ -50,7 +51,7 @@ def test_the_core_imports_no_ui() -> None:
 
 def test_importing_the_core_loads_no_ui() -> None:
     modules = [f"cyberfw.core.{path.stem}" for path in sorted(CORE.glob("*.py")) if path.stem != "__init__"]
-    modules.append("cyberfw.api")
+    modules += ["cyberfw.api", "cyberfw.plugin"]
     code = (
         "import importlib, sys\n"
         f"for name in {modules!r}:\n"

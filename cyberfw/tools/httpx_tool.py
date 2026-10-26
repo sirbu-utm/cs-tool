@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from cyberfw.tools.base import BaseTool, ToolContext
+from cyberfw.plugin import BaseTool, ToolContext
 
 
 class HttpxTool(BaseTool):
@@ -15,8 +15,8 @@ class HttpxTool(BaseTool):
         # -tls-grab adds each HTTPS host's certificate (expiry, issuer, SANs,
         # expired/self-signed/mismatched) to the same probe — no second
         # connection — which cyberfw.posture.tls turns into certificate health.
-        cmd: list[str] = [str(self.binary), "-silent", "-json", "-tls-grab", *self._static_flags()]
-        cmd += self._rate_args(ctx)  # httpx: -rate-limit
+        cmd: list[str] = [str(self.binary), "-silent", "-json", "-tls-grab", *self.static_flags()]
+        cmd += self.rate_args(ctx)  # httpx: -rate-limit
         if ctx.target:
             cmd += ["-u", ctx.target]
         elif ctx.input_file:

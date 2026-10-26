@@ -28,6 +28,7 @@ __all__ = [
     "RustscanResult",
     "VirusTotalResult",
     "CveIntel",
+    "Finding",
     "PostureFinding",
     "MailSecurity",
     "validate_record",
@@ -301,15 +302,17 @@ class VirusTotalResult(ToolRecord):
         return rec
 
 
-class PostureFinding(ToolRecord):
-    """A finding cyberfw works out itself (TLS certificates, email spoofing).
+class Finding(ToolRecord):
+    """A problem a scan found, shaped like a nuclei finding.
 
-    Shaped like a nuclei finding — ``template_id``, ``matched_at`` and an
-    ``info`` block with ``name`` / ``severity`` / ``description`` /
-    ``remediation`` — so the report and every reader of ``report.json`` treat it
-    exactly like one. ``tool`` names the check (``tlscheck`` / ``mailcheck``).
+    ``template_id``, ``matched_at`` and an ``info`` block with ``name`` /
+    ``severity`` / ``description`` / ``remediation``: the report, SARIF, the run
+    comparison and triage read every finding that way, so a record of this
+    shape is treated exactly like one of nuclei's. A tool whose records are
+    findings subclasses it (see :mod:`cyberfw.plugin`).
     """
 
+    kind: str = "vuln"
     template_id: str = ""
     matched_at: str = ""
     info: dict[str, Any] = Field(default_factory=dict)
@@ -322,6 +325,12 @@ class PostureFinding(ToolRecord):
     @property
     def severity(self) -> str:
         return str(self.info.get("severity") or "unknown")
+
+
+class PostureFinding(Finding):
+    """A finding cyberfw works out itself (TLS certificates, email spoofing,
+    subdomain takeover); ``tool`` names the check (``tlscheck`` / ``mailcheck`` /
+    ``takeover``)."""
 
     @classmethod
     def make(

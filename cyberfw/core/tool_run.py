@@ -18,8 +18,8 @@ from cyberfw.manager import ToolManager
 from cyberfw.pipeline.context import SessionContext
 from cyberfw.pipeline.engine import Node, NodeResult, PipelineEngine, PipelineResult
 from cyberfw.pipeline.schemas import ToolRecord
+from cyberfw.plugin import ToolContext
 from cyberfw.tools import adapter_class
-from cyberfw.tools.base import ToolContext
 
 
 def check_tool(manager: ToolManager, tool: str, target: str | None) -> None:

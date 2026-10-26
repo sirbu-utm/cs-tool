@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from urllib.parse import urlsplit
 
-from cyberfw.tools.base import BaseTool, ToolContext
+from cyberfw.plugin import BaseTool, ToolContext
 
 
 class SubfinderTool(BaseTool):
@@ -16,7 +16,7 @@ class SubfinderTool(BaseTool):
     def build_cmd(self, ctx: ToolContext) -> list[str]:
         assert self.spec.name == "subfinder"
         # subfinder's JSONL flag is -json/-oJ, NOT -jsonl (that errors out).
-        cmd: list[str] = [str(self.binary), "-silent", "-json", *self._static_flags()]
+        cmd: list[str] = [str(self.binary), "-silent", "-json", *self.static_flags()]
         if ctx.target:
             cmd += ["-d", _apex(ctx.target)]
         elif ctx.input_file:

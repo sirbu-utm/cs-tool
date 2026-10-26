@@ -10,8 +10,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from cyberfw.exceptions import RegistryError
-from cyberfw.manager.registry import ToolSpec
-from cyberfw.tools.base import BaseTool
+from cyberfw.plugin import BaseTool, ToolSpec
 from cyberfw.tools.ffuf import FfufTool
 from cyberfw.tools.gitleaks import GitleaksTool
 from cyberfw.tools.gowitness import GowitnessTool

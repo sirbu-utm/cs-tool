@@ -8,8 +8,8 @@ import pytest
 
 from cyberfw.exceptions import ToolNotFoundError
 from cyberfw.manager.registry import ToolSpec
+from cyberfw.plugin import ScanControls, ToolContext
 from cyberfw.tools import adapter_for
-from cyberfw.tools.base import ScanControls, ToolContext
 from cyberfw.tools.targets import hostname_of
 
 

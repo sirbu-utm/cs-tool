@@ -34,8 +34,8 @@ import pytest
 
 from cyberfw.manager.registry import ToolSpec
 from cyberfw.pipeline.executor import run_stage
+from cyberfw.plugin import BaseTool, ToolContext
 from cyberfw.tools import adapter_for
-from cyberfw.tools.base import BaseTool, ToolContext
 
 pytestmark = pytest.mark.integration
 
