@@ -331,6 +331,13 @@ async def run_stage(
                 logger.debug("%s", exc)
                 unparsed += 1
                 rec = None
+            except Exception as exc:
+                # A schema's ValidationError, a plugin's TypeError, a line nested too
+                # deep: the line is not the tool's output as its parser knows it, and
+                # costs that line, never the stage and its other records.
+                logger.debug("[%s:%d] %s: %s", tool, lineno, type(exc).__name__, exc)
+                unparsed += 1
+                rec = None
             if rec is not None:
                 records.append(rec)
                 if on_record is not None:

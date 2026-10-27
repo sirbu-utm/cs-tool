@@ -693,3 +693,34 @@ class TestToolEnvironment:
 
         assert [record.raw for record in plain] == ["-", "-", "-"]
         assert [record.raw for record in allowed] == ["-", "-", "foo"]
+
+
+class TestALineAParserCannotTake:
+    """A plugin's parser may raise anything on an odd line, a built-in schema a
+    ValidationError: either way that line is dropped and counted, the stage goes on."""
+
+    async def test_any_exception_costs_the_line_not_the_stage(self, tmp_path: Path) -> None:
+        script = _write_script(tmp_path, "for line in ('good', 'wrong type', 'too deep', 'good'):\n    print(line)\n")
+
+        def parse(line: str, lineno: int) -> ToolRecord:
+            if line == "wrong type":
+                raise TypeError("an int where a str was due")
+            if line == "too deep":
+                raise RecursionError("maximum recursion depth exceeded")
+            return ToolRecord(tool="plug", line_number=lineno, raw=line, target=line)
+
+        records = await run_stage([sys.executable, str(script)], tool="plug", stage="s", context=None, parse_line=parse)
+
+        assert [record.line_number for record in records] == [1, 4]
+
+    async def test_a_line_a_built_in_schema_refuses_is_dropped(self, tmp_path: Path) -> None:
+        script = _write_script(
+            tmp_path,
+            "import json\n"
+            "print(json.dumps({'host': 'a.example.com', 'port': 'abc'}))\n"
+            "print(json.dumps({'host': 'b.example.com', 'port': 443}))\n",
+        )
+
+        records = await run_stage([sys.executable, str(script)], tool="naabu", stage="ports", context=None)
+
+        assert [record.target for record in records] == ["b.example.com:443"]
