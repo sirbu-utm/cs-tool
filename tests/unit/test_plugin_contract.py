@@ -381,12 +381,11 @@ def test_the_built_in_tools_state_the_contract_they_are_written_for() -> None:
     # Plugin authors copy the built-in tools. `contract=CONTRACT` claims whatever
     # version loads the plugin and so defeats the version check: the number it is.
     written: dict[str, object] = {}
-    for path in sorted((PACKAGE / "tools").glob("*.py")):
-        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+    for name, tool in BUILTIN.items():
+        source = Path(inspect.getfile(tool.adapter)).read_text(encoding="utf-8")
+        for node in ast.walk(ast.parse(source)):
             if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "ToolPlugin":
                 (contract,) = (keyword.value for keyword in node.keywords if keyword.arg == "contract")
-                written[path.stem] = contract.value if isinstance(contract, ast.Constant) else ast.unparse(contract)
+                written[name] = contract.value if isinstance(contract, ast.Constant) else ast.unparse(contract)
 
-    assert written == dict.fromkeys(
-        ("ffuf", "gitleaks", "gowitness", "httpx_tool", "naabu", "nmap", "nuclei", "rustscan", "subfinder"), 1
-    )
+    assert written == dict.fromkeys(BUILTIN, 1)
