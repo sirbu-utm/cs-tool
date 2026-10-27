@@ -32,7 +32,7 @@ from urllib.parse import quote
 from cyberfw.exceptions import ReportError
 from cyberfw.logging import get_logger
 from cyberfw.pipeline.engine import NodeResult, PipelineResult
-from cyberfw.pipeline.schemas import CveIntel, MailSecurity, ToolRecord
+from cyberfw.pipeline.schemas import CveIntel, MailSecurity, ToolRecord, as_int, as_mapping
 from cyberfw.posture.tls import SOON_DAYS, URGENT_DAYS, Cert, certificates
 from cyberfw.report.diff import REAL, RunDiff
 from cyberfw.report.run_info import RunInfo
@@ -479,7 +479,7 @@ def _tools_panel(result: PipelineResult) -> str:
 def _http_panel(records: list[ToolRecord]) -> str:
     """Stacked bar of HTTP status classes across httpx results."""
     classes = Counter(
-        int(getattr(r, "status_code", 0) or 0) // 100 for r in records if r.kind == "http"
+        as_int(getattr(r, "status_code", 0)) // 100 for r in records if r.kind == "http"
     )
     classes = Counter({k: v for k, v in classes.items() if 1 <= k <= 5})
     total = sum(classes.values())
@@ -691,7 +691,7 @@ def _hosts(records: Iterable[ToolRecord]) -> list[_Host]:
         kind = record.kind
         if kind == "http":
             host.live = True
-            host.status_code = int(getattr(record, "status_code", 0) or 0) or host.status_code
+            host.status_code = as_int(getattr(record, "status_code", 0)) or host.status_code
             host.title = str(getattr(record, "title", "") or "") or host.title
         elif kind == "vuln":
             host.severities[_severity(record)] += 1
@@ -710,13 +710,13 @@ def _hosts(records: Iterable[ToolRecord]) -> list[_Host]:
             host.vt_seen = True
             if getattr(record, "found", False):
                 host.vt_found = True
-            mal = int(getattr(record, "malicious", 0) or 0)
-            susp = int(getattr(record, "suspicious", 0) or 0)
+            mal = as_int(getattr(record, "malicious", 0))
+            susp = as_int(getattr(record, "suspicious", 0))
             # One host can draw several lookups (its domain and its live URLs);
             # keep the most alarming (most malicious, then most suspicious).
             if not host.vt_permalink or (mal, susp) > (host.vt_malicious, host.vt_suspicious):
                 host.vt_malicious, host.vt_suspicious = mal, susp
-                host.vt_harmless = int(getattr(record, "harmless", 0) or 0)
+                host.vt_harmless = as_int(getattr(record, "harmless", 0))
                 host.vt_permalink = str(getattr(record, "permalink", "") or "") or host.vt_permalink
     return sorted(hosts.values(), key=_Host.risk)
 
@@ -1164,7 +1164,7 @@ def _intel_tags(intel: CveIntel) -> str:
 
 def _vuln_card(record: ToolRecord, index: int) -> str:
     severity = _severity(record)
-    info = getattr(record, "info", {}) or {}
+    info = as_mapping(getattr(record, "info", None))
     classification = info.get("classification")
     if not isinstance(classification, dict):
         classification = {}
@@ -1215,7 +1215,7 @@ def _shots_section(shots: list[ToolRecord]) -> str:
         src = _e("screenshots/" + quote(name))
         url = str(getattr(record, "url", "") or record.target)
         title = str(getattr(record, "title", "") or "")
-        status = int(getattr(record, "status_code", 0) or 0)
+        status = as_int(getattr(record, "status_code", 0))
         code = f'<span class="badge http-{status // 100}xx">{status}</span>' if status else ""
         figures.append(
             f'<figure class="shot" style="--i:{min(index, 12)}">'

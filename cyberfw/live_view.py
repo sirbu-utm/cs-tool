@@ -35,7 +35,7 @@ from rich.tree import Tree
 from cyberfw.hud import HudFrame, Pane, hud_table
 from cyberfw.motion import bar, fade_mark, scanner, spinner
 from cyberfw.pipeline.engine import Node, NodeResult, StageEvent
-from cyberfw.pipeline.schemas import ToolRecord
+from cyberfw.pipeline.schemas import ToolRecord, as_int
 from cyberfw.tools.targets import hostname_of
 from cyberfw.ui import (
     NEUTRAL_STYLE,
@@ -410,7 +410,7 @@ class TopologyView:
             node.source = str(getattr(record, "source", "") or node.source)
         elif kind == "http":
             node.live = True
-            node.status_code = int(getattr(record, "status_code", 0) or 0)
+            node.status_code = as_int(getattr(record, "status_code", 0))
             node.title = str(getattr(record, "title", "") or node.title)
         elif kind == "vuln":
             node.vulns.append(

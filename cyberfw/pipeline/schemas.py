@@ -31,6 +31,8 @@ __all__ = [
     "Finding",
     "PostureFinding",
     "MailSecurity",
+    "as_int",
+    "as_mapping",
     "validate_record",
 ]
 
@@ -379,6 +381,26 @@ class MailSecurity(ToolRecord):
     dmarc_policy: str = ""
     dmarc_subdomain_policy: str = ""
     dmarc_pct: int = 100
+
+
+# -- Reading a record's fields leniently --------------------------------------------
+def as_int(value: Any) -> int:
+    """A record's field as a whole number, or ``0`` when it holds none.
+
+    A built-in tool's schema types its fields, but a plugin's record — a manifest
+    record keeps every field of its line as the tool printed it — may hold any JSON
+    value under any name: ``"N/A"`` or a list where a reader wants a number must
+    cost it a zero, never a report, an export, the comparison or a live view.
+    """
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError, OverflowError):
+        return 0
+
+
+def as_mapping(value: Any) -> dict[str, Any]:
+    """A record's field as a JSON object, or an empty one when it holds something else."""
+    return value if isinstance(value, dict) else {}
 
 
 def validate_record(tool: str, line: str, lineno: int) -> ToolRecord:

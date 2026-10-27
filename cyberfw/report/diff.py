@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
+from cyberfw.pipeline.schemas import as_int
 from cyberfw.tools.targets import hostname_of
 
 __all__ = ["Change", "RunDiff", "compare", "coverage", "find_baseline", "load_report", "resolve_report"]
@@ -234,7 +235,7 @@ def _items(record: dict[str, Any]) -> list[tuple[tuple[str, str], _Item]]:
         domain = str(record.get("domain") or target)
         return [(("email", domain), _Item("email", tool, domain, state=record.get("verdict"), tracked=False))]
     if kind == "reputation":
-        state = (int(record.get("malicious") or 0), int(record.get("suspicious") or 0))
+        state = (as_int(record.get("malicious")), as_int(record.get("suspicious")))
         return [(("reputation", target.lower()), _Item("reputation", tool, target, state=state, tracked=False))]
     return []  # screenshots and anything new: nothing to compare
 

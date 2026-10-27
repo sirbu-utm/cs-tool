@@ -9,7 +9,9 @@ from pathlib import Path
 
 import pytest
 
-from cyberfw.pipeline.engine import Node
+from cyberfw.cli.views import _record_table
+from cyberfw.live_view import TopologyView
+from cyberfw.pipeline.engine import Node, NodeResult, PipelineResult
 from cyberfw.plugin import (
     BaseTool,
     Finding,
@@ -20,6 +22,11 @@ from cyberfw.plugin import (
     ToolRecord,
     ToolSpec,
 )
+from cyberfw.report.csv_report import to_csv
+from cyberfw.report.diff import compare
+from cyberfw.report.html_report import generate_html_report
+from cyberfw.report.json_report import report_payload
+from cyberfw.report.sarif import to_sarif
 from cyberfw.tools import adapter_for
 from cyberfw.tools.manifest import parse_manifest
 from cyberfw.tools.manifest_tool import ManifestTool, compile_manifest
@@ -203,3 +210,58 @@ async def test_a_manifest_tool_takes_the_seed_and_a_previous_stage_s_hosts(tmp_p
     assert alone.succeeded() and after.succeeded()
     assert [(record.target, record.kind) for record in alone.records] == [("https://seed.example.com/", "http")]
     assert [record.target for record in after.records if record.tool == "probe"] == ["https://sub.example.com/"]
+
+
+def _odd(kind: str, target: str, line: str) -> ToolRecord:
+    """A record of a manifest tool of ``kind``, made from ``line`` as it is."""
+    manifest = parse_manifest(
+        "contract: 1\n"
+        "install: {source: local}\n"
+        'target: ["-u", "{target}"]\n'
+        'list: ["-l", "{input_file}"]\n'
+        f"record: {{kind: {kind}, target: {target}}}\n",
+        where="odd.yaml",
+    )
+    return compile_manifest("odd", manifest).record.from_json("odd", line, 1)
+
+
+#: Lines holding what no built-in tool's typed schema would let through.
+ODD_LINES = [
+    ("http", "url", '{"url": "https://a.example.com/", "status_code": "N/A", "info": "probed"}'),
+    ("http", "url", '{"url": "https://b.example.com/", "status_code": [301, 200]}'),
+    ("reputation", "host", '{"host": "a.example.com", "malicious": "yes", "suspicious": [1], "harmless": {"n": 1}}'),
+    ("host", "host", '{"host": "c.example.com", "info": "resolved via 1.1.1.1"}'),
+    ("secret", "file", '{"file": "a.env", "rule_id": "aws", "info": "line 3"}'),
+    ("screenshot", "url", '{"url": "https://a.example.com/", "filename": "a.png", "status_code": "OK"}'),
+    ("scan", "host", '{"host": "d.example.com", "ports_list": 8080}'),
+]
+
+
+def test_reports_read_a_manifest_record_whatever_its_fields_hold(tmp_path: Path) -> None:
+    # A built-in tool's schema types its fields; a manifest record keeps what the tool
+    # printed. One odd line must cost no report, export, comparison or view.
+    records = [_odd(kind, target, line) for kind, target, line in ODD_LINES]
+    result = PipelineResult(nodes=[NodeResult(node=Node(tool="odd", stage="odd"), count=len(records))], records=records)
+    payload = report_payload(result)
+    view = TopologyView([Node(tool="odd", stage="odd")], seed="a.example.com", animate=False)
+
+    for record in records:
+        view.on_record(record)
+    assert generate_html_report(result, tmp_path / "report.html").is_file()
+    assert to_csv(payload).count("\n") == len(records) + 1
+    assert to_sarif(payload)["version"] == "2.1.0"
+    assert compare(payload, payload).new_findings_at_least("low") == 0
+    assert _record_table(records) is not None
+
+
+def test_a_line_cannot_set_what_cyberfw_records_about_it_later() -> None:
+    # Triage marks a finding muted, threat intel rates it, the context store names its
+    # stage. A tool's own keys of those names must not pre-empt them, whatever its kind:
+    # a secret printed with "muted": true would otherwise be hidden from triage and the diff.
+    secret = _odd("secret", "file", '{"file": "a.env", "rule_id": "aws", "muted": true, "intel": {"kev": true}, "stage": "x"}')
+    finding = _compiled("nuclei").record.from_json(
+        "nuclei", '{"template-id": "x", "matched-at": "https://a.example.com/", "intel": {"kev": true}}', 1
+    )
+
+    assert {"muted", "intel", "stage"}.isdisjoint(secret.as_dict())
+    assert "intel" not in finding.as_dict() and finding.as_dict()["muted"] is None

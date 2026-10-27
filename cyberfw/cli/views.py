@@ -94,7 +94,7 @@ def _record_table(records: list[ToolRecord], *, tool: str | None = None, target:
         ports_list = getattr(record, "ports_list", "")
         if ports_list:
             state = getattr(record, "port_state", "open")
-            rows += [(record, f"{record.target}:{port}", "port", state) for port in _sorted_ports(ports_list)]
+            rows += [(record, f"{record.target}:{port}", "port", state) for port in _sorted_ports(str(ports_list))]
         else:
             rows.append((record, record.target, record.kind, _finding_detail(record)))
     severities = [str(getattr(record, "severity", "") or "").lower() for record, *_rest in rows]

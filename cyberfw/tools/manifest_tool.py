@@ -10,7 +10,8 @@ A record keeps every field of the line it comes from, so ``report.json`` and the
 CSV export carry the tool's own data. Its own fields — ``tool``, ``line_number``,
 ``raw``, ``target``, ``kind``, and a finding's ``template_id``, ``matched_at``,
 ``info`` and ``muted`` — are cyberfw's: they come from the manifest's mapping,
-never from a key of the line that happens to share the name.
+never from a key of the line that happens to share the name. Nor do the keys
+cyberfw sets on any record later (:data:`CYBERFW_KEYS`).
 """
 
 from __future__ import annotations
@@ -32,7 +33,12 @@ from cyberfw.plugin import (
 from cyberfw.tools.manifest import PLACEHOLDER, Manifest, RecordSpec
 from cyberfw.tools.targets import hostname_of
 
-__all__ = ["ManifestFinding", "ManifestRecord", "ManifestTool", "compile_manifest"]
+__all__ = ["CYBERFW_KEYS", "ManifestFinding", "ManifestRecord", "ManifestTool", "compile_manifest"]
+
+#: Keys cyberfw sets on a record once it is made — triage's ``muted`` mark, threat
+#: intel's rating, the context store's ``stage`` — so a line never sets them, whatever
+#: its kind: a secret printed with ``"muted": true`` would be hidden from triage.
+CYBERFW_KEYS = frozenset({"muted", "intel", "stage"})
 
 
 def _value(data: dict[str, Any], path: str) -> Any:
@@ -83,7 +89,7 @@ def _from_line(cls: type[ManifestRecord] | type[ManifestFinding], tool: str, tex
         raise ParseError(f"[{tool}:{lineno}] invalid JSON: {exc}") from exc
     if not isinstance(data, dict):
         raise ParseError(f"[{tool}:{lineno}] expected a JSON object")
-    theirs = {key: value for key, value in data.items() if key not in cls.model_fields}
+    theirs = {key: value for key, value in data.items() if key not in cls.model_fields and key not in CYBERFW_KEYS}
     try:
         return cls(**theirs, **_mapped(cls.mapping, data), tool=tool, line_number=lineno, raw=text)
     except ValidationError as exc:

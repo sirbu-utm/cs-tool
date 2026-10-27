@@ -12,6 +12,7 @@ from __future__ import annotations
 from typing import Any
 
 from cyberfw import __version__
+from cyberfw.pipeline.schemas import as_mapping
 
 __all__ = ["to_sarif"]
 
@@ -25,7 +26,7 @@ _LEVEL = {"critical": "error", "high": "error", "medium": "warning", "low": "not
 def _result(record: dict[str, Any]) -> dict[str, Any] | None:
     """One SARIF result for a finding record, or ``None`` when it is not a finding."""
     kind = record.get("kind")
-    info = record.get("info") or {}
+    info = as_mapping(record.get("info"))
     if kind == "vuln":
         rule_id = str(record.get("template_id") or "unknown")
         level = _LEVEL.get(str(info.get("severity") or "").lower(), "note")
@@ -47,7 +48,7 @@ def _result(record: dict[str, Any]) -> dict[str, Any] | None:
 
 
 def _rule_name(record: dict[str, Any]) -> str:
-    info = record.get("info") or {}
+    info = as_mapping(record.get("info"))
     return str(info.get("name") or record.get("description") or "")
 
 

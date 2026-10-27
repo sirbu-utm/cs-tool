@@ -10,13 +10,15 @@ import csv
 import io
 from typing import Any
 
+from cyberfw.pipeline.schemas import as_mapping
+
 __all__ = ["to_csv", "COLUMNS"]
 
 COLUMNS = ["tool", "kind", "severity", "target", "detail", "muted"]
 
 
 def _row(record: dict[str, Any]) -> dict[str, str]:
-    info = record.get("info") or {}
+    info = as_mapping(record.get("info"))
     severity = info.get("severity") or record.get("severity") or ""
     detail = info.get("name") or record.get("description") or record.get("title") or ""
     return {
