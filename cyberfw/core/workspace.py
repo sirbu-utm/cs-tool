@@ -8,7 +8,9 @@ from cyberfw.config import Settings
 from cyberfw.exceptions import CyberfwError, RegistryError
 from cyberfw.manager import ToolManager, load_registry
 from cyberfw.manager.lock import LOCK_NAME
+from cyberfw.manager.plugins import load_plugins
 from cyberfw.resources import packaged_data
+from cyberfw.tools import BUILTIN
 
 
 def registry_candidates() -> list[Path]:
@@ -36,9 +38,14 @@ def registry_path() -> Path:
 
 
 def open_manager(settings: Settings) -> ToolManager:
-    """A :class:`ToolManager` over the registry in use, with ``tools.lock`` next to it."""
+    """A :class:`ToolManager` over the registry in use — with the plugin tools in use,
+    their recipes under its entries of the same name — and ``tools.lock`` next to it."""
     path = registry_path()
-    return ToolManager(settings, load_registry(path), lock_path=path.with_name(LOCK_NAME))
+    plugins = load_plugins(settings)
+    overlays = {name: tool.install for name, tool in plugins.tools.items() if tool.install is not None}
+    skip = plugins.declared() - set(plugins.tools) - set(BUILTIN)
+    registry = load_registry(path, overlays=overlays, skip=skip)
+    return ToolManager(settings, registry, lock_path=path.with_name(LOCK_NAME), plugins=plugins)
 
 
 def is_packaged(path: Path) -> bool:

@@ -40,7 +40,6 @@ from cyberfw.hud import (
 from cyberfw.logging import console, ensure_utf8_stdio
 from cyberfw.manager import ToolManager
 from cyberfw.pipelines import PIPELINES, available_pipelines, build
-from cyberfw.tools import adapter_class
 from cyberfw.ui import (
     TOOL_GUIDES,
     Masthead,
@@ -433,7 +432,11 @@ def _interactive_run(tool: str) -> None:
     so a new tool needs no launcher changes.
     """
     console.print(tool_guide(tool, **_tool_facts(tool)))
-    adapter = adapter_class(tool)
+    _settings, manager = _bootstrap()
+    try:
+        adapter = manager.adapter_class(tool)
+    finally:
+        manager.close()
     target = Prompt.ask(adapter.target_prompt)
     wordlist: str | None = None
     if adapter.extra_input_prompt is not None:

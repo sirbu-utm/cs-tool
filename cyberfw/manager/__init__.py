@@ -11,9 +11,16 @@ from __future__ import annotations
 import json
 import tempfile
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from cyberfw.config import Settings
-from cyberfw.exceptions import CyberfwError, DownloadError, LockError, ToolNotFoundError
+from cyberfw.exceptions import (
+    CyberfwError,
+    DownloadError,
+    LockError,
+    RegistryError,
+    ToolNotFoundError,
+)
 from cyberfw.manager.chromium import ChromiumInstallResult
 from cyberfw.manager.github_client import GitHubClient
 from cyberfw.manager.installer import InstallResult, ToolInstaller
@@ -34,6 +41,10 @@ from cyberfw.manager.lock import (
 from cyberfw.manager.platform_map import Mapping, asset_patterns, get_target
 from cyberfw.manager.registry import ToolRegistry, ToolSpec, load_registry
 from cyberfw.manager.verify import ensure_binary, find_in_path
+
+if TYPE_CHECKING:  # cyberfw.plugin and the tools import this package's registry module
+    from cyberfw.manager.plugins import PluginSet
+    from cyberfw.plugin import BaseTool, ToolPlugin
 
 __all__ = [
     "ToolManager",
@@ -62,9 +73,12 @@ class ToolManager:
         mapping: Mapping | None = None,
         *,
         lock_path: Path | None = None,
+        plugins: PluginSet | None = None,
     ) -> None:
         self.settings = settings
         self.registry = registry
+        #: The plugin tools in use and every declared one's state; ``None`` without plugins.
+        self.plugins = plugins
         self.mapping = mapping or get_target()
         #: The ``tools.lock`` installs come from: next to the registry in use (the
         #: CLI passes that); ``<root_dir>/tools.lock`` when not given.
@@ -90,7 +104,38 @@ class ToolManager:
             self._client = None
 
     def spec(self, name: str) -> ToolSpec:
+        if name not in self.registry:
+            reason = self.unavailable(name)
+            if reason is not None:
+                raise RegistryError(reason)
         return self.registry.require(name)
+
+    # -- the tools in use ---------------------------------------------------------
+    @property
+    def tools(self) -> dict[str, ToolPlugin]:
+        """Every usable tool's description, by name: the built-in ones and the plugins' in use."""
+        from cyberfw.tools import BUILTIN  # the tools import this package's registry module
+
+        return {**BUILTIN, **(self.plugins.tools if self.plugins is not None else {})}
+
+    def unavailable(self, name: str) -> str | None:
+        """Why a plugin tool cannot be used, as a sentence; ``None`` for any other name."""
+        return self.plugins.unavailable(name) if self.plugins is not None else None
+
+    def adapter_class(self, name: str) -> type[BaseTool]:
+        """``name``'s adapter class — for what it knows before a binary exists (prompts,
+        target validation). :class:`RegistryError` when no usable tool has the name."""
+        tool = self.tools.get(name)
+        if tool is None:
+            raise RegistryError(self.unavailable(name) or f"no adapter registered for tool {name!r}")
+        return tool.adapter
+
+    def adapter_for(self, name: str, binary: Path) -> BaseTool:
+        """``name``'s adapter on its recipe and installed ``binary``, reading its lines
+        with the record model its description names."""
+        adapter = self.adapter_class(name)(self.spec(name), binary)
+        adapter._record = self.tools[name].record
+        return adapter
 
     # -- tools.lock -----------------------------------------------------------
     def load_lock(self) -> ToolLock:
@@ -134,7 +179,9 @@ class ToolManager:
         downloadable = [name for name in self.registry.names() if not self.spec(name).is_local]
         changes: list[LockChange] = []
         if names is None:
-            for gone in sorted(set(tools) - set(downloadable)):
+            # A disabled plugin's tool is not gone: its pin stays for when it is enabled again.
+            declared = self.plugins.declared() if self.plugins is not None else frozenset()
+            for gone in sorted(set(tools) - set(downloadable) - declared):
                 changes.append(LockChange(gone, tools.pop(gone).tag, None, "removed"))
         for name in downloadable if names is None else names:
             spec = self.spec(name)

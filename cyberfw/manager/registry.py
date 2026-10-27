@@ -9,7 +9,7 @@ an entry here (plus, when its JSONL schema is novel, a parser in ``tools/``).
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Collection, Iterator, Mapping
 from pathlib import Path
 
 import yaml
@@ -113,8 +113,18 @@ class ToolRegistry:
         return sorted(self._tools)
 
 
-def load_registry(path: Path | str) -> ToolRegistry:
-    """Parse a registry file into a :class:`ToolRegistry`."""
+def load_registry(
+    path: Path | str, *, overlays: Mapping[str, ToolSpec] | None = None, skip: Collection[str] = ()
+) -> ToolRegistry:
+    """Parse a registry file into a :class:`ToolRegistry`.
+
+    ``overlays`` are the install recipes of the plugin tools in use, by name: an
+    entry of the same name in the file is laid over its recipe key by key (to pin
+    a version, or point at a local binary), and a plugin tool the file does not
+    name keeps its recipe as it is. Entries named in ``skip`` — tools of plugins
+    not in use, whose entries may be such partial overlays — are left out.
+    """
+    overlays = overlays or {}
     registry_path = Path(path)
     if not registry_path.exists():
         raise RegistryError(f"registry file not found: {registry_path}")
@@ -129,6 +139,8 @@ def load_registry(path: Path | str) -> ToolRegistry:
 
     tools: dict[str, ToolSpec] = {}
     for name, block in payload.items():
+        if str(name) in skip:
+            continue
         if not isinstance(block, dict):
             raise RegistryError(f"registry entry {name!r} must be a mapping")
         legacy = [key for key in _LEGACY_KEYS if key in block]
@@ -143,8 +155,12 @@ def load_registry(path: Path | str) -> ToolRegistry:
                     " and ".join(f"`{key}`" for key in legacy),
                 )
             block = {key: value for key, value in block.items() if key not in _LEGACY_KEYS}
+        base = overlays.get(str(name))
+        fields = {**base.model_dump(), **block} if base is not None else dict(block)
         try:
-            tools[name] = ToolSpec(**block, name=str(name))
+            tools[name] = ToolSpec(**{**fields, "name": str(name)})
         except Exception as exc:  # pydantic.ValidationError → RegistryError
             raise RegistryError(f"invalid registry entry {name!r}: {exc}") from exc
+    for name, spec in overlays.items():
+        tools.setdefault(name, spec)
     return ToolRegistry(tools)

@@ -31,7 +31,6 @@ from cyberfw.pipeline.engine import (
 from cyberfw.pipeline.schemas import ToolRecord
 from cyberfw.pipelines import build
 from cyberfw.resources import default_wordlist
-from cyberfw.tools import adapter_class
 
 
 class Blocker(NamedTuple):
@@ -133,7 +132,7 @@ def _preflight(
         if state != "ready":
             blocking.append(Blocker(node.stage, node.tool, state))
             continue
-        requirement = adapter_class(node.tool).missing_requirement(tools_dir)
+        requirement = manager.adapter_class(node.tool).missing_requirement(tools_dir)
         if requirement is not None:
             blocking.append(Blocker(node.stage, node.tool, requirement))
         for dep in manager.spec(node.tool).check_deps:
@@ -169,7 +168,7 @@ def prepare_pipeline(
     )
     for node in nodes:
         manager.spec(node.tool)
-        adapter_class(node.tool)
+        manager.adapter_class(node.tool)
     blocking, warnings, states = _preflight(manager, nodes, settings.tools_dir)
     return PreparedPipeline(
         name=name, target=target, nodes=nodes, blocking=blocking, warnings=warnings, states=states,

@@ -123,6 +123,10 @@ class BaseTool(ABC):
     #: Prompt for a secondary input (e.g. a wordlist); ``None`` = nothing to ask.
     extra_input_prompt: ClassVar[str | None] = None
 
+    #: The model this tool's lines validate against — set by the tool manager from the
+    #: tool's description; without one, the model is looked up by the tool's name.
+    _record: type[ToolRecord] | None = None
+
     def __init__(self, spec: ToolSpec, binary: Path) -> None:
         self.spec: ToolSpec = spec
         self.binary: Path = binary
@@ -176,7 +180,9 @@ class BaseTool(ABC):
         """Return the full argv (including the binary path) to run this tool."""
 
     def parse_line(self, line: str, lineno: int) -> ToolRecord:
-        """Validate one JSONL stdout line for this tool."""
+        """Validate one JSONL stdout line for this tool, with its record model."""
+        if self._record is not None:
+            return self._record.from_json(self.name, line, lineno)
         return validate_record(self.name, line, lineno)
 
     def parse_output(self, text: str) -> list[ToolRecord]:

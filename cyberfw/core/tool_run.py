@@ -19,7 +19,6 @@ from cyberfw.pipeline.context import SessionContext
 from cyberfw.pipeline.engine import Node, NodeResult, PipelineEngine, PipelineResult
 from cyberfw.pipeline.schemas import ToolRecord
 from cyberfw.plugin import ToolContext
-from cyberfw.tools import adapter_class
 
 
 def check_tool(manager: ToolManager, tool: str, target: str | None) -> None:
@@ -28,7 +27,7 @@ def check_tool(manager: ToolManager, tool: str, target: str | None) -> None:
     registered tool with an adapter (else :class:`RegistryError`), and its binary
     (else :class:`ToolNotFoundError`)."""
     if target is not None:
-        adapter_class(tool).validate_target(target)
+        manager.adapter_class(tool).validate_target(target)
     manager.binary_path(tool)
 
 

@@ -111,7 +111,9 @@ def init_cmd(
     settings, manager = _bootstrap(verbose=verbose)
     if token:
         settings = settings.model_copy(update={"github_token": token})
-        manager = ToolManager(settings, manager.registry, manager.mapping, lock_path=manager.lock_path)
+        manager = ToolManager(
+            settings, manager.registry, manager.mapping, lock_path=manager.lock_path, plugins=manager.plugins
+        )
 
     requested = tools or manager.registry.names()
     # A local tool (source: local) is the user's to install — never downloaded.
@@ -245,7 +247,9 @@ def lock_cmd(
     settings, manager = _bootstrap(verbose=verbose)
     if token:
         settings = settings.model_copy(update={"github_token": token})
-        manager = ToolManager(settings, manager.registry, manager.mapping, lock_path=manager.lock_path)
+        manager = ToolManager(
+            settings, manager.registry, manager.mapping, lock_path=manager.lock_path, plugins=manager.plugins
+        )
     for name in tools or []:
         if name not in manager.registry:
             console.print(f"[err]Unknown tool {escape(repr(name))}.[/err] Known: {', '.join(manager.registry.names())}")

@@ -202,8 +202,6 @@ class PipelineEngine:
         self._on_stdout_raw = callback
 
     def build_tool(self, name: str) -> BaseTool:
-        from cyberfw.tools import adapter_for
-
         spec = self.tool_manager.spec(name)
         for dep in spec.check_deps if self.report_missing_deps else ():
             if shutil.which(dep) is None:
@@ -214,7 +212,7 @@ class PipelineEngine:
                     dependency_hint(dep),
                 )
         binary = self.tool_manager.binary_path(name)
-        return adapter_for(spec, binary)
+        return self.tool_manager.adapter_for(name, binary)
 
     async def run(
         self, nodes: list[Node], seed: str | None, *, extra_input: str | None = None
