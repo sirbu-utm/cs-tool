@@ -56,6 +56,7 @@ from cyberfw.exceptions import (
     ReportError,
     ToolNotFoundError,
 )
+from cyberfw.manager.plugins import PluginInfo, load_plugins
 from cyberfw.pipeline.engine import NodeResult, PipelineResult, StageEvent
 from cyberfw.pipeline.schemas import ToolRecord
 from cyberfw.report import diff as rundiff
@@ -75,6 +76,7 @@ __all__ = [
     "PipelineResult",
     "Plan",
     "PlanStage",
+    "PluginInfo",
     "PreflightError",
     "RegistryError",
     "ReportError",
@@ -97,6 +99,7 @@ __all__ = [
     "compare_runs",
     "export_csv",
     "export_sarif",
+    "list_plugins",
     "load_run",
     "plan_pipeline",
     "run_pipeline",
@@ -412,3 +415,12 @@ def export_sarif(run: SavedRun) -> dict[str, Any]:
 def export_csv(run: SavedRun) -> str:
     """Every record of the run as CSV (for triage in a spreadsheet)."""
     return to_csv(run.payload)
+
+
+def list_plugins(settings: Settings | None = None) -> list[PluginInfo]:
+    """Every plugin tool the installed packages declare — its package, version and
+    kind (``manifest`` / ``code``), its state and why, the extra environment
+    variables it asks for — and each package ``plugins.yaml`` enables that is missing.
+    Reads the packages' metadata; only enabled packages are loaded."""
+    settings = settings if settings is not None else load_settings()
+    return list(load_plugins(settings).infos)

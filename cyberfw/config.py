@@ -51,6 +51,11 @@ class Settings(BaseSettings):
         description="Findings to silence on future scans (false positives / accepted risk); "
         "managed with `cyberfw mute` / `unmute` / `mutes`.",
     )
+    plugins_file: Path = Field(
+        default=Path("plugins.yaml"),
+        description="The plugin packages enabled — and, of those, the code packages allowed to run "
+        "Python inside cyberfw; managed with `cyberfw plugins enable` / `disable`.",
+    )
     cache_dir: Path = Field(default=Path.home() / ".cache" / "cyberfw")
     # Remote behaviour.
     github_token: str | None = Field(default=None, exclude=True)
@@ -138,7 +143,7 @@ class Settings(BaseSettings):
     @model_validator(mode="after")
     def _make_dirs_absolute(self) -> Settings:
         """Resolve relative paths against ``root_dir`` (the CWD)."""
-        for name in ("tools_dir", "reports_dir", "logs_dir", "pipelines_dir", "triage_file"):
+        for name in ("tools_dir", "reports_dir", "logs_dir", "pipelines_dir", "triage_file", "plugins_file"):
             value: Path = getattr(self, name)
             if not value.is_absolute():
                 setattr(self, name, (self.root_dir / value).resolve())

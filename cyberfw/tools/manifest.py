@@ -160,7 +160,7 @@ def parse_manifest(text: str, *, where: str) -> Manifest:
         raise ManifestError(f"{where}: contract: required — the plugin contract version it is written for, a number")
     if contract not in SUPPORTED_CONTRACTS:
         loads = ", ".join(str(version) for version in sorted(SUPPORTED_CONTRACTS))
-        raise ContractError(f"{where}: written for plugin contract {contract}; this cyberfw loads {loads}")
+        raise ContractError(f"{where}: written for plugin contract {contract}; this cyberfw loads {loads}", contract=contract)
     try:
         return Manifest.model_validate(data)
     except ValidationError as exc:

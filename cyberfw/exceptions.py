@@ -119,3 +119,12 @@ class ManifestError(CyberfwError):
 
 class ContractError(CyberfwError):
     """A plugin is written for a plugin contract this cyberfw does not load (``incompatible``)."""
+
+    def __init__(self, message: str, *, contract: int) -> None:
+        #: The contract version the plugin is written for.
+        self.contract = contract
+        super().__init__(message)
+
+
+class PluginError(CyberfwError):
+    """``plugins.yaml`` cannot be read or written, or names a package that is not installed."""
