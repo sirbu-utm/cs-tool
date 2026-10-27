@@ -133,3 +133,17 @@ def keyboard() -> Callable[..., str]:
                 feeder.join()
 
     return type_into
+
+
+@pytest.fixture
+def site(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Path]:
+    """A directory on ``sys.path`` for test plugin packages (``tests/unit/_dists.py``
+    installs them); the modules they import leave with it."""
+    directory = tmp_path / "site"
+    directory.mkdir()
+    monkeypatch.syspath_prepend(str(directory))
+    before = set(sys.modules)
+    yield directory
+    for name in set(sys.modules) - before:
+        if name.startswith("cyberfw_"):
+            del sys.modules[name]
