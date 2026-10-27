@@ -52,6 +52,11 @@ class ToolSpec(BaseModel):
         default_factory=dict,
         description="Static CLI flags injected by the tool adapter (e.g. JSON output).",
     )
+    env: list[str] = Field(
+        default_factory=list,
+        description="Environment variables the tool's process is given beyond the fixed set any "
+        "program needs (e.g. an API key of its own); cyberfw's own secrets are never passed otherwise.",
+    )
 
     @model_validator(mode="after")
     def _check_source(self) -> ToolSpec:

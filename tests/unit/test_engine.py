@@ -1181,3 +1181,44 @@ class TestParallelStages:
         assert by_stage["a"].ok is False and by_stage["a"].skipped is False
         assert by_stage["b"].ok is True, "sibling reads root, not the failed stage"
         assert by_stage["c"].skipped is True, "dependent of the failed stage is skipped"
+
+
+class TestToolProcessEnvironment:
+    """A stage runs with the environment its recipe allows — as one process or one per target."""
+
+    async def test_a_stage_gets_its_recipe_s_env_and_never_cyberfw_s_secrets(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from cyberfw.tools.nmap import NmapTool
+        from cyberfw.tools.subfinder import SubfinderTool
+
+        monkeypatch.setenv("CYBERFW_GITHUB_TOKEN", "ghp_secret")
+        monkeypatch.setenv("FOO_API_KEY", "foo")
+        registry_path = tmp_path / "registry.yaml"
+        registry_path.write_text(
+            "subfinder:\n  repo: org/subfinder\n  asset_patterns: []\n  env: [FOO_API_KEY]\n"
+            "nmap:\n  source: local\n  env: [FOO_API_KEY]\n",
+            encoding="utf-8",
+        )
+        engine = _make_engine(tmp_path, registry_path)
+        manager = engine.tool_manager
+        seen: list[dict[str, str]] = []
+
+        async def fake_run_stage(command, **kwargs):
+            seen.append(kwargs["env"])
+            return []
+
+        monkeypatch.setattr("cyberfw.pipeline.engine.run_stage", fake_run_stage)
+        await engine._dispatch(
+            SubfinderTool(manager.spec("subfinder"), tmp_path / "subfinder"),
+            ToolContext(target="example.com"),
+            Node(tool="subfinder", stage="subdomains"),
+        )
+        await engine._dispatch(
+            NmapTool(manager.spec("nmap"), tmp_path / "nmap"),
+            ToolContext(inputs=["a.example.com:22"]),
+            Node(tool="nmap", stage="services"),
+        )
+
+        assert len(seen) == 2, "one process per path: the single run and the fan-out"
+        assert all(env.get("FOO_API_KEY") == "foo" and "CYBERFW_GITHUB_TOKEN" not in env for env in seen)

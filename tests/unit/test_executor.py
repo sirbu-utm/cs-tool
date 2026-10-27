@@ -10,7 +10,7 @@ from pathlib import Path, PureWindowsPath
 import pytest
 
 from cyberfw.exceptions import ExecutionError
-from cyberfw.pipeline.executor import run_stage
+from cyberfw.pipeline.executor import run_stage, tool_environment
 from cyberfw.pipeline.schemas import ToolRecord
 
 
@@ -641,3 +641,55 @@ async def test_a_shebang_tool_runs_under_git_bin_bash(tmp_path: Path, monkeypatc
     records = await run_stage([str(script)], tool="subfinder", stage="s", context=None)
 
     assert [r.target for r in records] == ["a.example.com"]
+
+
+class TestToolEnvironment:
+    """A tool process gets what any program needs to run — never cyberfw's secrets."""
+
+    def test_only_the_fixed_set_and_the_recipe_s_names_are_passed(self) -> None:
+        environ = {
+            "PATH": "/usr/bin",
+            "HOME": "/home/scan",
+            "https_proxy": "http://proxy:3128",
+            "LC_ALL": "C.UTF-8",
+            "CYBERFW_GITHUB_TOKEN": "ghp_secret",
+            "VT_API_KEY": "vt-secret",
+            "AWS_SECRET_ACCESS_KEY": "aws-secret",
+            "FOO_API_KEY": "foo",
+        }
+
+        assert tool_environment(["FOO_API_KEY"], environ=environ) == {
+            "PATH": "/usr/bin",
+            "HOME": "/home/scan",
+            "https_proxy": "http://proxy:3128",
+            "LC_ALL": "C.UTF-8",
+            "FOO_API_KEY": "foo",
+        }
+
+    def test_names_match_whatever_their_case(self) -> None:
+        # Windows spells them as it likes (Path, SystemRoot), and so may a recipe.
+        environ = {"Path": r"C:\Windows", "SystemRoot": r"C:\Windows", "Foo_Api_Key": "foo"}
+
+        assert tool_environment(["FOO_API_KEY"], environ=environ) == environ
+
+    async def test_a_tool_process_never_sees_cyberfw_s_secrets(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("CYBERFW_GITHUB_TOKEN", "ghp_secret")
+        monkeypatch.setenv("VT_API_KEY", "vt-secret")
+        monkeypatch.setenv("FOO_API_KEY", "foo")
+        script = _write_script(
+            tmp_path,
+            "import os\n"
+            "for name in ('CYBERFW_GITHUB_TOKEN', 'VT_API_KEY', 'FOO_API_KEY'):\n"
+            "    print(os.environ.get(name, '-'))\n",
+        )
+        command = [sys.executable, str(script)]
+
+        plain = await run_stage(command, tool="foo", stage="foo", context=None, parse=False)
+        allowed = await run_stage(
+            command, tool="foo", stage="foo", context=None, parse=False, env=tool_environment(["FOO_API_KEY"])
+        )
+
+        assert [record.raw for record in plain] == ["-", "-", "-"]
+        assert [record.raw for record in allowed] == ["-", "-", "foo"]

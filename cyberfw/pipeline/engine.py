@@ -32,7 +32,7 @@ from cyberfw.exceptions import ExecutionError, ToolNotFoundError
 from cyberfw.logging import get_logger
 from cyberfw.manager import ToolManager
 from cyberfw.pipeline.context import SessionContext
-from cyberfw.pipeline.executor import run_stage
+from cyberfw.pipeline.executor import run_stage, tool_environment
 from cyberfw.pipeline.schemas import ToolRecord
 from cyberfw.plugin import BaseTool, ScanControls, ToolContext
 from cyberfw.tools.targets import hostname_of, in_scope
@@ -483,6 +483,7 @@ class PipelineEngine:
                     parse_buffer=adapter.parse_output if adapter.buffered else None,
                     parse=parse,
                     timeout=self.settings.stage_timeout,
+                    env=tool_environment(adapter.spec.env),
                 )
         finally:
             # A session keeps its .input next to the stage's JSONL; without one
@@ -507,6 +508,7 @@ class PipelineEngine:
             )
 
         output_dir = self._output_dir()
+        env = tool_environment(adapter.spec.env)
 
         async def run_target(target: str) -> list[ToolRecord]:
             async with semaphore:
@@ -528,6 +530,7 @@ class PipelineEngine:
                         parse_buffer=adapter.parse_output if adapter.buffered else None,
                         parse=parse,
                         timeout=self.settings.stage_timeout,
+                        env=env,
                     )
                 except ExecutionError as exc:
                     # One unreachable host must not throw away every other

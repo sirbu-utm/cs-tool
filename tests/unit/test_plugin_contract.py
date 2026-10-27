@@ -167,7 +167,8 @@ CONTRACT_1: dict[str, object] = {
             "path: str | None = None",
             "version: <class 'str'> = 'latest'",
             "check_deps: list[str] = <factory list>",
-            "interactive_input: dict[str, str] = <factory dict>"
+            "interactive_input: dict[str, str] = <factory dict>",
+            "env: list[str] = <factory list>"
         ],
         "config": {},
         "abstract": [],

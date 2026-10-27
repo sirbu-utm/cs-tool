@@ -16,7 +16,7 @@ import collections
 import os
 import signal
 import subprocess
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Iterable, Mapping
 from pathlib import Path
 
 from cyberfw.exceptions import ExecutionError, ParseError
@@ -189,6 +189,37 @@ def _to_posix_path(path: Path, bash: str) -> str:
     return posix_path
 
 
+#: What any program needs to run, whatever it is: the search path, the home, the
+#: temporary, per-user and Windows system directories, proxy and certificate
+#: settings, the locale and the terminal (plus every ``LC_*``). Nothing else in
+#: cyberfw's environment — its own secrets least of all — reaches a tool process
+#: unless the tool's recipe names it under ``env:``.
+TOOL_ENV = frozenset(
+    {
+        "PATH", "PATHEXT", "HOME", "USER", "LOGNAME", "USERNAME", "SHELL",
+        "TMP", "TEMP", "TMPDIR",
+        "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME", "XDG_RUNTIME_DIR",
+        "USERPROFILE", "HOMEDRIVE", "HOMEPATH", "APPDATA", "LOCALAPPDATA",
+        "SYSTEMROOT", "WINDIR", "SYSTEMDRIVE", "COMSPEC", "PROGRAMDATA", "ALLUSERSPROFILE", "PUBLIC",
+        "PROGRAMFILES", "PROGRAMFILES(X86)", "PROGRAMW6432",
+        "COMMONPROGRAMFILES", "COMMONPROGRAMFILES(X86)", "COMMONPROGRAMW6432",
+        "OS", "PROCESSOR_ARCHITECTURE", "PROCESSOR_IDENTIFIER", "PROCESSOR_LEVEL", "PROCESSOR_REVISION",
+        "NUMBER_OF_PROCESSORS", "COMPUTERNAME", "USERDOMAIN",
+        "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "ALL_PROXY", "SSL_CERT_FILE", "SSL_CERT_DIR",
+        "LANG", "LANGUAGE", "TZ", "TERM", "COLORTERM", "NO_COLOR",
+    }
+)
+
+
+def tool_environment(extra: Iterable[str] = (), *, environ: Mapping[str, str] | None = None) -> dict[str, str]:
+    """The environment a tool process runs with: the variables of :data:`TOOL_ENV`
+    and those its recipe names (``extra``), as cyberfw has them. Names match in
+    any case — Windows spells them as it likes, and so may a recipe."""
+    source = os.environ if environ is None else environ
+    wanted = TOOL_ENV | {name.upper() for name in extra}
+    return {name: value for name, value in source.items() if name.upper() in wanted or name.upper().startswith("LC_")}
+
+
 async def run_stage(
     cmd: list[str],
     *,
@@ -202,6 +233,7 @@ async def run_stage(
     parse_line: Callable[[str, int], ToolRecord] | None = None,
     parse_buffer: Callable[[str], list[ToolRecord]] | None = None,
     timeout: float | None = None,
+    env: Mapping[str, str] | None = None,
 ) -> list[ToolRecord]:
     """Run ``cmd``, streaming + validating its stdout records.
 
@@ -216,6 +248,8 @@ async def run_stage(
     ``parse_line`` may adapt a tool's non-JSON output format. ``parse_buffer``
     is for tools that emit a single JSON document (not JSONL, e.g. gitleaks):
     the whole stdout is collected and parsed once after the process exits.
+    The process runs with ``env``, else with :func:`tool_environment` — never
+    with cyberfw's whole environment.
     """
     logger = LOG
     cmd = _prepare_cmd(cmd)
@@ -226,6 +260,7 @@ async def run_stage(
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             limit=_STREAM_LIMIT,
+            env=dict(env) if env is not None else tool_environment(),
         )
     except OSError as exc:
         raise ExecutionError(
