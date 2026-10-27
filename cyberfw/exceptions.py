@@ -111,3 +111,11 @@ class PreflightError(CyberfwError):
         #: ``(stage, tool, reason)`` for each stage that cannot run.
         self.blocking = list(blocking)
         super().__init__("; ".join(f"{tool} ({stage}): {reason}" for stage, tool, reason in self.blocking))
+
+
+class ManifestError(CyberfwError):
+    """A manifest plugin's manifest is not valid: the tool cannot be used (``broken``)."""
+
+
+class ContractError(CyberfwError):
+    """A plugin is written for a plugin contract this cyberfw does not load (``incompatible``)."""
