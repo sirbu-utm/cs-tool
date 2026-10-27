@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from cyberfw.pipeline.schemas import HttpxResult
-from cyberfw.plugin import CONTRACT, BaseTool, ToolContext, ToolPlugin
+from cyberfw.plugin import BaseTool, ToolContext, ToolPlugin
 
 
 class HttpxTool(BaseTool):
@@ -25,4 +25,4 @@ class HttpxTool(BaseTool):
         return cmd
 
 
-PLUGIN = ToolPlugin(contract=CONTRACT, adapter=HttpxTool, record=HttpxResult)
+PLUGIN = ToolPlugin(contract=1, adapter=HttpxTool, record=HttpxResult)

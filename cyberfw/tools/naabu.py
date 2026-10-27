@@ -8,7 +8,7 @@ targets (httpx's live URLs) are therefore reduced to a bare hostname.
 from __future__ import annotations
 
 from cyberfw.pipeline.schemas import NaabuResult
-from cyberfw.plugin import CONTRACT, BaseTool, ToolContext, ToolPlugin
+from cyberfw.plugin import BaseTool, ToolContext, ToolPlugin
 from cyberfw.tools.targets import hostname_of
 
 
@@ -32,4 +32,4 @@ class NaabuTool(BaseTool):
         return cmd
 
 
-PLUGIN = ToolPlugin(contract=CONTRACT, adapter=NaabuTool, record=NaabuResult)
+PLUGIN = ToolPlugin(contract=1, adapter=NaabuTool, record=NaabuResult)

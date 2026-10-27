@@ -11,7 +11,7 @@ import re
 
 from cyberfw.exceptions import ToolNotFoundError
 from cyberfw.pipeline.schemas import RustscanResult
-from cyberfw.plugin import CONTRACT, BaseTool, ParseError, ToolContext, ToolPlugin
+from cyberfw.plugin import BaseTool, ParseError, ToolContext, ToolPlugin
 from cyberfw.tools.targets import hostname_of
 
 
@@ -71,4 +71,4 @@ class RustscanTool(BaseTool):
         )
 
 
-PLUGIN = ToolPlugin(contract=CONTRACT, adapter=RustscanTool, record=RustscanResult)
+PLUGIN = ToolPlugin(contract=1, adapter=RustscanTool, record=RustscanResult)

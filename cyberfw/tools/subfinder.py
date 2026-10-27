@@ -5,7 +5,7 @@ from __future__ import annotations
 from urllib.parse import urlsplit
 
 from cyberfw.pipeline.schemas import SubfinderResult
-from cyberfw.plugin import CONTRACT, BaseTool, ToolContext, ToolPlugin
+from cyberfw.plugin import BaseTool, ToolContext, ToolPlugin
 
 
 class SubfinderTool(BaseTool):
@@ -31,4 +31,4 @@ def _apex(target: str) -> str:
     return host or target.strip("/")
 
 
-PLUGIN = ToolPlugin(contract=CONTRACT, adapter=SubfinderTool, record=SubfinderResult)
+PLUGIN = ToolPlugin(contract=1, adapter=SubfinderTool, record=SubfinderResult)

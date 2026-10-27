@@ -13,7 +13,7 @@ from pathlib import Path
 
 from cyberfw.exceptions import ToolNotFoundError
 from cyberfw.pipeline.schemas import FfufResult
-from cyberfw.plugin import CONTRACT, BaseTool, ToolContext, ToolPlugin
+from cyberfw.plugin import BaseTool, ToolContext, ToolPlugin
 from cyberfw.resources import default_wordlist
 
 
@@ -59,4 +59,4 @@ class FfufTool(BaseTool):
         return None
 
 
-PLUGIN = ToolPlugin(contract=CONTRACT, adapter=FfufTool, record=FfufResult)
+PLUGIN = ToolPlugin(contract=1, adapter=FfufTool, record=FfufResult)

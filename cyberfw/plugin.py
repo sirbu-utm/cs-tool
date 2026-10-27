@@ -220,7 +220,9 @@ class ToolPlugin:
     """One tool as cyberfw sees it: what a plugin's entry point points at, and how
     cyberfw describes each of its own tools."""
 
-    #: The contract version the tool is written for (:data:`CONTRACT`).
+    #: The contract version the tool is written for, as the number itself (``1``) —
+    #: never :data:`CONTRACT`, which is whatever version the running cyberfw writes
+    #: for and so would pass any check.
     contract: int
     #: How to build the command and read the output.
     adapter: type[BaseTool]

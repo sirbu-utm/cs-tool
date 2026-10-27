@@ -20,7 +20,7 @@ from pathlib import Path
 
 from cyberfw.exceptions import ToolNotFoundError
 from cyberfw.pipeline.schemas import GowitnessResult
-from cyberfw.plugin import CONTRACT, BaseTool, ToolContext, ToolPlugin
+from cyberfw.plugin import BaseTool, ToolContext, ToolPlugin
 
 #: Executable names gowitness / chromedp look for on PATH.
 _CHROME_NAMES = ("google-chrome", "google-chrome-stable", "chromium", "chromium-browser", "chrome")
@@ -115,4 +115,4 @@ class GowitnessTool(BaseTool):
         return None
 
 
-PLUGIN = ToolPlugin(contract=CONTRACT, adapter=GowitnessTool, record=GowitnessResult)
+PLUGIN = ToolPlugin(contract=1, adapter=GowitnessTool, record=GowitnessResult)

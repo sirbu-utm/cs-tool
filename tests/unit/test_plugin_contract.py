@@ -8,9 +8,12 @@ import inspect
 import os
 import subprocess
 import sys
+from abc import abstractmethod
 from pathlib import Path
 
 import pytest
+from pydantic import ConfigDict, Field
+from pydantic.fields import FieldInfo
 
 import cyberfw
 from cyberfw import plugin
@@ -42,6 +45,10 @@ CONTRACT_1: dict[str, object] = {
     ],
     "BaseTool": {
         "fields": [],
+        "config": {},
+        "abstract": [
+            "build_cmd"
+        ],
         "members": {
             "__init__": "def(self, spec: 'ToolSpec', binary: 'Path') -> 'None'",
             "buffered": "False",
@@ -70,6 +77,8 @@ CONTRACT_1: dict[str, object] = {
             "output_dir: Path | None",
             "controls: ScanControls"
         ],
+        "config": {},
+        "abstract": [],
         "members": {
             "__init__": "def(self, target: 'str | None' = None, inputs: 'list[str]' = <factory>, input_file: 'Path | None' = None, extra_input: 'str | None' = None, output_dir: 'Path | None' = None, controls: 'ScanControls' = <factory>) -> None",
             "extra_input": "None",
@@ -84,6 +93,8 @@ CONTRACT_1: dict[str, object] = {
             "severity: str",
             "tags: str"
         ],
+        "config": {},
+        "abstract": [],
         "members": {
             "__init__": "def(self, rate_limit: 'int | None' = None, severity: 'str' = '', tags: 'str' = '') -> None",
             "rate_limit": "None",
@@ -98,6 +109,8 @@ CONTRACT_1: dict[str, object] = {
             "record: type[ToolRecord]",
             "install: ToolSpec | None"
         ],
+        "config": {},
+        "abstract": [],
         "members": {
             "__init__": "def(self, contract: 'int', adapter: 'type[BaseTool]', record: 'type[ToolRecord]', install: 'ToolSpec | None' = None) -> None",
             "install": "None"
@@ -105,12 +118,17 @@ CONTRACT_1: dict[str, object] = {
     },
     "ToolRecord": {
         "fields": [
-            "tool",
-            "line_number",
-            "raw",
-            "target",
-            "kind"
+            "tool: <class 'str'> = <required>",
+            "line_number: <class 'int'> = -1",
+            "raw: <class 'str'> = ''",
+            "target: <class 'str'> = ''",
+            "kind: <class 'str'> = 'finding'"
         ],
+        "config": {
+            "extra": "ignore",
+            "populate_by_name": True
+        },
+        "abstract": [],
         "members": {
             "as_dict": "def(self) -> 'dict[str, Any]'",
             "from_json": "classmethod(cls, tool: 'str', text: 'str', lineno: 'int') -> 'ToolRecord'"
@@ -118,16 +136,21 @@ CONTRACT_1: dict[str, object] = {
     },
     "Finding": {
         "fields": [
-            "tool",
-            "line_number",
-            "raw",
-            "target",
-            "kind",
-            "template_id",
-            "matched_at",
-            "info",
-            "muted"
+            "tool: <class 'str'> = <required>",
+            "line_number: <class 'int'> = -1",
+            "raw: <class 'str'> = ''",
+            "target: <class 'str'> = ''",
+            "kind: <class 'str'> = 'vuln'",
+            "template_id: <class 'str'> = ''",
+            "matched_at: <class 'str'> = ''",
+            "info: dict[str, typing.Any] = <factory dict>",
+            "muted: dict[str, typing.Any] | None = None"
         ],
+        "config": {
+            "extra": "ignore",
+            "populate_by_name": True
+        },
+        "abstract": [],
         "members": {
             "name": "property",
             "severity": "property"
@@ -135,17 +158,19 @@ CONTRACT_1: dict[str, object] = {
     },
     "ToolSpec": {
         "fields": [
-            "name",
-            "source",
-            "repo",
-            "asset_patterns",
-            "archive",
-            "binary",
-            "path",
-            "version",
-            "check_deps",
-            "interactive_input"
+            "name: <class 'str'> = ''",
+            "source: <class 'str'> = 'github'",
+            "repo: <class 'str'> = ''",
+            "asset_patterns: list[str] = <factory list>",
+            "archive: <class 'str'> = 'auto'",
+            "binary: str | None = None",
+            "path: str | None = None",
+            "version: <class 'str'> = 'latest'",
+            "check_deps: list[str] = <factory list>",
+            "interactive_input: dict[str, str] = <factory dict>"
         ],
+        "config": {},
+        "abstract": [],
         "members": {
             "is_local": "property",
             "pinned_version": "property",
@@ -175,11 +200,37 @@ def _members(cls: type) -> dict[str, str]:
     return out
 
 
+def _default(info: FieldInfo) -> str:
+    if info.default_factory is not None:
+        return f"<factory {getattr(info.default_factory, '__name__', info.default_factory)}>"
+    return "<required>" if info.is_required() else repr(info.default)
+
+
 def _fields(cls: type) -> list[str]:
-    """A dataclass's fields with their types, a pydantic model's field names; none for a plain class."""
+    """Each field with its type — and, for a pydantic model, its default and any alias."""
     if dataclasses.is_dataclass(cls):
         return [f"{item.name}: {item.type}" for item in dataclasses.fields(cls)]
-    return list(getattr(cls, "model_fields", {}))
+    fields: dict[str, FieldInfo] = getattr(cls, "model_fields", {})
+    return [
+        f"{name}: {info.annotation!r} = {_default(info)}" + (f" (alias {info.validation_alias!r})" if info.validation_alias else "")
+        for name, info in fields.items()
+    ]
+
+
+#: The config keys that change what a record or a recipe accepts. Only these: pydantic
+#: adds keys of its own from version to version (``validate_by_name`` in 2.11).
+CONFIG_KEYS = ("extra", "frozen", "populate_by_name", "strict", "validate_assignment")
+
+
+def _config(cls: type) -> dict[str, object]:
+    """A pydantic model's config as it bears on a plugin: unknown keys, aliases, assignment."""
+    config = dict(getattr(cls, "model_config", {}))
+    return {key: config[key] for key in CONFIG_KEYS if key in config}
+
+
+def _abstract(cls: type) -> list[str]:
+    """What a subclass must implement."""
+    return sorted(getattr(cls, "__abstractmethods__", ()))
 
 
 def _surface() -> dict[str, object]:
@@ -188,7 +239,15 @@ def _surface() -> dict[str, object]:
         "__all__": list(plugin.__all__),
         "CONTRACT": plugin.CONTRACT,
         "SUPPORTED_CONTRACTS": sorted(plugin.SUPPORTED_CONTRACTS),
-        **{name: {"fields": _fields(getattr(plugin, name)), "members": _members(getattr(plugin, name))} for name in types},
+        **{
+            name: {
+                "fields": _fields(cls),
+                "config": _config(cls),
+                "abstract": _abstract(cls),
+                "members": _members(cls),
+            }
+            for name, cls in ((name, getattr(plugin, name)) for name in types)
+        },
     }
 
 
@@ -293,3 +352,40 @@ def test_records_validate_against_the_model_each_tool_s_description_names() -> N
         "virustotal": "VirusTotalResult",
     }
     assert all(MODELS[name] is tool.record for name, tool in BUILTIN.items())
+
+
+def test_the_pin_sees_a_model_s_types_defaults_and_config() -> None:
+    # The pin holds only what it records: a model's retyped field, changed default or
+    # different config, and a new abstract hook, all change what a plugin must do.
+    class Redefaulted(plugin.ToolRecord):
+        line_number: int = 0
+
+    class Retyped(plugin.Finding):
+        info: list[str] = Field(default_factory=list)  # type: ignore[assignment]
+
+    class Reconfigured(plugin.ToolRecord):
+        model_config = ConfigDict(extra="forbid", populate_by_name=True)
+
+    class MoreAbstract(plugin.BaseTool):
+        @abstractmethod
+        def describe(self) -> str: ...
+
+    assert _fields(Redefaulted) != _fields(plugin.ToolRecord)
+    assert _fields(Retyped) != _fields(plugin.Finding)
+    assert _config(Reconfigured) != _config(plugin.ToolRecord)
+    assert _abstract(MoreAbstract) != _abstract(plugin.BaseTool)
+
+
+def test_the_built_in_tools_state_the_contract_they_are_written_for() -> None:
+    # Plugin authors copy the built-in tools. `contract=CONTRACT` claims whatever
+    # version loads the plugin and so defeats the version check: the number it is.
+    written: dict[str, object] = {}
+    for path in sorted((PACKAGE / "tools").glob("*.py")):
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "ToolPlugin":
+                (contract,) = (keyword.value for keyword in node.keywords if keyword.arg == "contract")
+                written[path.stem] = contract.value if isinstance(contract, ast.Constant) else ast.unparse(contract)
+
+    assert written == dict.fromkeys(
+        ("ffuf", "gitleaks", "gowitness", "httpx_tool", "naabu", "nmap", "nuclei", "rustscan", "subfinder"), 1
+    )

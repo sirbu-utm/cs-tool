@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from cyberfw.pipeline.schemas import NucleiResult
-from cyberfw.plugin import CONTRACT, BaseTool, ToolContext, ToolPlugin
+from cyberfw.plugin import BaseTool, ToolContext, ToolPlugin
 
 
 class NucleiTool(BaseTool):
@@ -25,4 +25,4 @@ class NucleiTool(BaseTool):
         return cmd
 
 
-PLUGIN = ToolPlugin(contract=CONTRACT, adapter=NucleiTool, record=NucleiResult)
+PLUGIN = ToolPlugin(contract=1, adapter=NucleiTool, record=NucleiResult)

@@ -17,7 +17,7 @@ import json
 from pathlib import Path
 
 from cyberfw.pipeline.schemas import GitleaksResult
-from cyberfw.plugin import CONTRACT, BaseTool, ParseError, ToolContext, ToolPlugin, ToolRecord
+from cyberfw.plugin import BaseTool, ParseError, ToolContext, ToolPlugin, ToolRecord
 
 
 class GitleaksTool(BaseTool):
@@ -67,4 +67,4 @@ class GitleaksTool(BaseTool):
         return None
 
 
-PLUGIN = ToolPlugin(contract=CONTRACT, adapter=GitleaksTool, record=GitleaksResult)
+PLUGIN = ToolPlugin(contract=1, adapter=GitleaksTool, record=GitleaksResult)
