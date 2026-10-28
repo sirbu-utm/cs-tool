@@ -247,7 +247,9 @@ async def run_stage(
     passthrough), independently of the bounded tail kept for error reporting.
     ``parse_line`` may adapt a tool's non-JSON output format. ``parse_buffer``
     is for tools that emit a single JSON document (not JSONL, e.g. gitleaks):
-    the whole stdout is collected and parsed once after the process exits.
+    the whole stdout is collected and parsed once after the process exits or
+    is stopped. A usable document survives a failed exit or timeout; an invalid
+    one is diagnosed without replacing the original process error.
     The process runs with ``env``, else with :func:`tool_environment` — never
     with cyberfw's whole environment.
     """
@@ -345,20 +347,49 @@ async def run_stage(
                 if context is not None:
                     context.append(stage, rec)
 
+    async def _drain_and_wait() -> int:
+        # EOF does not mean the tool exited: it can close both pipes and keep
+        # running. Both operations belong to the same timeout and cancellation.
+        await asyncio.gather(_drain_stdout(), _drain_stderr())
+        return await proc.wait()
+
+    async def _parse_stdout_buffer(*, failed: bool) -> None:
+        if not buffered or parse_buffer is None:
+            return
+        try:
+            parsed = parse_buffer("\n".join(buffer_lines))
+        except Exception as exc:
+            if not failed:
+                raise
+            logger.warning(
+                "%s: could not parse buffered output after process failure: %s: %s",
+                tool, type(exc).__name__, exc,
+            )
+            return
+        # Only parser failures are tolerated above. Observer/store failures
+        # still propagate, as they do for streaming records.
+        for rec in parsed:
+            records.append(rec)
+            if on_record is not None:
+                await on_record(rec)
+            if context is not None:
+                context.append(stage, rec)
+
     try:
         try:
-            await asyncio.wait_for(asyncio.gather(_drain_stdout(), _drain_stderr()), timeout)
+            exit_code = await asyncio.wait_for(_drain_and_wait(), timeout)
         except asyncio.CancelledError:
             await _stop(proc)
             raise
         except asyncio.TimeoutError:
             await _stop(proc)
+            await _parse_stdout_buffer(failed=True)
             raise ExecutionError(
                 f"{tool} timed out after {timeout:g}s",
                 stderr_tail=list(stderr_tail),
                 partial_records=records,
             ) from None
-        exit_code = await proc.wait()
+        await _parse_stdout_buffer(failed=exit_code != 0)
         if exit_code != 0:
             raise ExecutionError(
                 f"{tool} {_describe_crash(exit_code)}",
@@ -366,13 +397,6 @@ async def run_stage(
                 stderr_tail=list(stderr_tail),
                 partial_records=records,
             )
-        if buffered and parse_buffer is not None:
-            for rec in parse_buffer("\n".join(buffer_lines)):
-                records.append(rec)
-                if on_record is not None:
-                    await on_record(rec)
-                if context is not None:
-                    context.append(stage, rec)
         if unparsed:
             # One summary, not one line per failure: a tool whose JSON shape
             # drifted would otherwise lose every finding with only DEBUG noise.
