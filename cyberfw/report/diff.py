@@ -254,13 +254,19 @@ def _index(doc: dict[str, Any]) -> dict[tuple[str, str], _Item]:
 
 
 def coverage(doc: dict[str, Any]) -> set[str]:
-    """Tools whose results in ``doc`` are complete enough to trust an absence."""
+    """Tools whose every recorded stage finished, so an absence can be trusted."""
     raw_stages = doc.get("stages")
     stages: list[Any] = raw_stages if isinstance(raw_stages, list) else []
     tools = {
         str(s.get("tool")) for s in stages
         if isinstance(s, dict) and s.get("ok") and not s.get("skipped")
     }
+    # A tool may run in several stages (e.g. nuclei with different tags). One
+    # successful stage cannot vouch for results missing from a failed sibling.
+    tools.difference_update(
+        str(s.get("tool")) for s in stages
+        if isinstance(s, dict) and (not s.get("ok") or s.get("skipped"))
+    )
     records = _records(doc)
     # The post-scan checks are not stages; they count where they evidently ran.
     if "httpx" in tools and any(isinstance(r.get("tls"), dict) for r in records if r.get("kind") == "http"):
