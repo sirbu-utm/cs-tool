@@ -34,6 +34,8 @@ class GitleaksTool(BaseTool):
             )
 
     def build_cmd(self, ctx: ToolContext) -> list[str]:
+        if ctx.inputs:
+            raise ValueError("gitleaks does not support --list / inputs; use --target with one local directory.")
         cmd: list[str] = [str(self.binary), "dir"]
         if ctx.target:
             cmd.append(ctx.target)
