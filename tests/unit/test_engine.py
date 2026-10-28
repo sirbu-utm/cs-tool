@@ -1222,3 +1222,95 @@ class TestToolProcessEnvironment:
 
         assert len(seen) == 2, "one process per path: the single run and the fan-out"
         assert all(env.get("FOO_API_KEY") == "foo" and "CYBERFW_GITHUB_TOKEN" not in env for env in seen)
+
+
+class TestADependentStageNeverRunsOnTheSeed:
+    """A stage scans what the stage it reads found. When that is nothing — it found
+    nothing, or every host it found is out of scope — the stage has nothing to scan:
+    its tool does not run, least of all on the seed."""
+
+    @staticmethod
+    def _engine(tmp_path: Path, launched: list[tuple[str, str | None]], *, finds: bool = True) -> PipelineEngine:
+        """httpx and nuclei (one process per target) record each process they would
+        launch; subfinder finds ``sub.example.com`` — or, without ``finds``, nothing."""
+        registry_path = tmp_path / "registry.yaml"
+        registry_path.write_text(
+            "".join(f"{tool}:\n  repo: org/{tool}\n  asset_patterns: []\n" for tool in ("subfinder", "httpx", "nuclei")),
+            encoding="utf-8",
+        )
+        engine = _make_engine(tmp_path, registry_path)
+
+        class Launching(BaseTool):
+            """Records each process its stage would launch, then launches a no-op."""
+
+            def build_cmd(self, ctx: ToolContext) -> list[str]:
+                launched.append((self.name, ctx.target))
+                return [sys.executable, "-c", "pass"]
+
+        class LaunchingPerTarget(Launching):
+            per_target = True
+
+        source = tmp_path / "source.py"
+        source.write_text(
+            "print('{\"host\": \"sub.example.com\", \"source\": \"stub\"}')\n" if finds else "pass\n",
+            encoding="utf-8",
+        )
+        tools = {
+            "httpx": lambda spec: Launching(spec, tmp_path / "httpx"),
+            "nuclei": lambda spec: LaunchingPerTarget(spec, tmp_path / "nuclei"),
+        }
+        engine.build_tool = lambda name: (  # type: ignore[method-assign]
+            tools[name](engine.tool_manager.spec(name)) if name in tools
+            else _StubTool(engine.tool_manager.spec(name), source)
+        )
+        return engine
+
+    _NODES = [
+        Node(tool="subfinder", stage="subdomains"),
+        Node(tool="httpx", stage="live_http", input_from="subdomains"),
+        Node(tool="nuclei", stage="vulns", input_from="subdomains"),
+    ]
+
+    async def test_a_source_that_found_nothing_runs_nothing_after_it(self, tmp_path: Path) -> None:
+        launched: list[tuple[str, str | None]] = []
+        engine = self._engine(tmp_path, launched, finds=False)
+
+        result = await engine.run(self._NODES, seed="example.com")
+
+        assert launched == []
+        # Nothing to scan is no failure: each stage ran, found nothing, and is no
+        # reason to skip what reads it.
+        assert [(node.ok, node.skipped, node.count) for node in result.nodes] == [(True, False, 0)] * 3
+
+    async def test_a_stage_reading_the_previous_one_by_default_follows_the_same_rule(self, tmp_path: Path) -> None:
+        # Without ``input_from`` a stage reads the stage before it: a chain where the
+        # first finds nothing runs nothing at all after it.
+        launched: list[tuple[str, str | None]] = []
+        engine = self._engine(tmp_path, launched, finds=False)
+        chain = [
+            Node(tool="subfinder", stage="subdomains"),
+            Node(tool="httpx", stage="live_http"),
+            Node(tool="nuclei", stage="vulns"),
+        ]
+
+        await engine.run(chain, seed="example.com")
+
+        assert launched == []
+
+    async def test_a_source_whose_every_host_is_out_of_scope_runs_nothing_after_it(self, tmp_path: Path) -> None:
+        launched: list[tuple[str, str | None]] = []
+        engine = self._engine(tmp_path, launched)
+        engine.settings.exclude = ["*.example.com"]
+
+        result = await engine.run(self._NODES, seed="example.com")
+
+        assert launched == []
+        assert result.excluded and all(node.ok for node in result.nodes)
+
+    async def test_a_source_that_found_hosts_hands_over_those_and_not_the_seed(self, tmp_path: Path) -> None:
+        launched: list[tuple[str, str | None]] = []
+        engine = self._engine(tmp_path, launched)
+
+        await engine.run(self._NODES, seed="example.com")
+
+        assert sorted(launched) == [("httpx", None), ("nuclei", "sub.example.com")]

@@ -331,10 +331,13 @@ class PipelineEngine:
         seed: str | None,
         extra_input: str | None,
     ) -> tuple[Node, tuple[NodeResult, list[ToolRecord]]]:
-        """Run one node against its upstream stage's in-scope targets (or the seed)."""
+        """Run one node against its upstream stage's in-scope targets — or, for a node
+        that reads no stage, the seed. A node whose source found nothing in scope has
+        nothing to scan: it gets no seed instead, so its tool does not run."""
         source = deps[node.stage]
-        inputs = outputs.get(source, []) if source is not None else []
-        return node, await self._run_node(node, seed, inputs, extra_input=extra_input)
+        if source is None:
+            return node, await self._run_node(node, seed, [], extra_input=extra_input)
+        return node, await self._run_node(node, None, outputs.get(source, []), extra_input=extra_input)
 
     async def run_single(
         self, node: Node, ctx: ToolContext, *, parse: bool = True
