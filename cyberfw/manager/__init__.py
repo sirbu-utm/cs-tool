@@ -237,14 +237,18 @@ class ToolManager:
         """Return the binary path for ``name`` or raise ``ToolNotFoundError``.
 
         A ``source: local`` tool is resolved from its configured ``path`` or
-        from PATH (it is never downloaded); a github tool from ``tools_dir``."""
+        from PATH (it is never downloaded); a github tool from ``tools_dir``.
+        A relative configured ``path`` is resolved against ``settings.root_dir``.
+        """
         spec = self.spec(name)
         if spec.is_local:
             if spec.path:
                 candidate = Path(spec.path)
+                if not candidate.is_absolute():
+                    candidate = (self.settings.root_dir / candidate).resolve()
                 if candidate.is_file():
                     return candidate
-                raise ToolNotFoundError(f"{name}: configured path does not exist: {spec.path}")
+                raise ToolNotFoundError(f"{name}: configured path does not exist: {candidate}")
             found = find_in_path(spec.binary or name)
             if found:
                 return Path(found)
