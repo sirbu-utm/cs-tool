@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import functools
 import json
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -34,6 +34,7 @@ from cyberfw.pipeline.schemas import validate_record
 from cyberfw.posture import mail as mailcheck
 from cyberfw.posture import takeover as takeovercheck
 from cyberfw.posture import tls as tlscheck
+from cyberfw.tools.targets import in_scope
 
 #: The most subdomains the takeover check looks at in one run.
 _TAKEOVER_LIMIT = 300
@@ -89,9 +90,9 @@ def check_mail(result: PipelineResult, seed: str, observer: RunObserver) -> None
         observer.on_step(StepEvent("done", "mail", summary=summary))
 
 
-def check_takeover(result: PipelineResult, observer: RunObserver) -> None:
-    """Flag subdomains with a dangling CNAME to an unclaimed third-party service."""
-    hosts = takeovercheck.candidates(result.records)
+def check_takeover(result: PipelineResult, observer: RunObserver, exclude: Sequence[str] = ()) -> None:
+    """Check in-scope subdomains for a dangling CNAME to an unclaimed service."""
+    hosts = [host for host in takeovercheck.candidates(result.records) if in_scope(host, exclude)]
     if not hosts:
         return
     total = min(len(hosts), _TAKEOVER_LIMIT)
@@ -168,7 +169,7 @@ def post_scan(
     if mail:
         check_mail(result, seed, observer)
     if takeover:
-        check_takeover(result, observer)
+        check_takeover(result, observer, settings.exclude)
     if intel:
         rate_cves(result, settings.cache_dir, observer)
     if vt_key:
