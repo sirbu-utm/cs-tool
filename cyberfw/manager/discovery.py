@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from importlib.metadata import Distribution, entry_points
+from importlib.metadata import Distribution, distributions
 from typing import Literal
 
 __all__ = ["CODE_GROUP", "MANIFEST_GROUP", "Declared", "Kind", "discover", "normalize", "package_kind"]
@@ -60,21 +60,32 @@ def package_kind(dist: Distribution) -> Kind:
 
 
 def discover() -> list[Declared]:
-    """Every tool the installed packages declare, by package, then tool."""
+    """Every tool the installed packages declare, by package, then tool.
+
+    A distribution whose metadata cannot be read declares nothing — any installed
+    package may be broken, and none may stop the rest being found. Of two with one
+    name on ``sys.path`` the first wins, as for ``importlib.metadata.entry_points``.
+    """
     found: list[Declared] = []
-    kinds: dict[str, Kind] = {}
-    for group in (MANIFEST_GROUP, CODE_GROUP):
-        for point in entry_points(group=group):
-            dist = point.dist
-            if dist is None:
+    seen: set[str] = set()
+    for dist in distributions():
+        try:
+            # Not dist.name: without metadata it warns now and will raise.
+            name = dist.metadata["Name"] if "Name" in dist.metadata else None
+            if not name:
                 continue
-            package = normalize(dist.name)
-            if package not in kinds:
-                kinds[package] = package_kind(dist)
-            found.append(
-                Declared(
-                    tool=point.name, package=package, version=dist.version, group=group, value=point.value,
-                    kind=kinds[package],
-                )
-            )
+            package = normalize(name)
+            if package in seen:
+                continue
+            seen.add(package)
+            points = [point for point in dist.entry_points if point.group in (MANIFEST_GROUP, CODE_GROUP)]
+            if not points:
+                continue
+            version, kind = dist.version, package_kind(dist)
+        except Exception:  # unreadable metadata: no name, a malformed entry_points.txt, …
+            continue
+        found.extend(
+            Declared(tool=point.name, package=package, version=version, group=point.group, value=point.value, kind=kind)
+            for point in points
+        )
     return sorted(found, key=lambda declared: (declared.package, declared.tool, declared.group))

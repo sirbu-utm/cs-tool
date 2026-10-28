@@ -169,8 +169,14 @@ def _load(path: Path) -> PluginSet:
     except PluginError as exc:
         _warn("plugins.yaml", "", f"{exc} — no plugin is enabled until it is fixed")
         chosen = PluginsFile()
-    declared = discover()
-    packages = Counter(point.tool for point in {(d.package, d.tool): d for d in declared}.values())
+    try:
+        declared = discover()
+    except Exception as exc:  # the installed packages' metadata itself
+        _warn("packages", "", f"cannot be read: {type(exc).__name__}: {exc} — no plugin is loaded")
+        declared = []
+    # Rivals for a name are the enabled packages declaring it: one never enabled
+    # cannot take a tool from one that is — disabling it would fix nothing.
+    packages = Counter(tool for package, tool in {(d.package, d.tool) for d in declared} if package in chosen.enabled)
     twice = Counter((d.package, d.tool) for d in declared)
     result = PluginSet()
     for point in declared:
@@ -208,8 +214,8 @@ def _state(
         return "conflict", f"{point.tool} is a built-in tool", (), None
     if point.tool in RESERVED:
         return "conflict", f"{point.tool} names records cyberfw makes itself", (), None
-    if packages[point.tool] > 1:
-        return "conflict", f"another installed package declares {point.tool} too: disable one of them", (), None
+    if point.package in chosen.enabled and packages[point.tool] > 1:
+        return "conflict", f"another enabled package declares {point.tool} too: disable one of them", (), None
     env = _manifest_env(point) if point.group != CODE_GROUP else ()
     if point.package not in chosen.enabled:
         return "disabled", f"enable it with `cyberfw plugins enable {point.package}`", env, None
@@ -228,7 +234,7 @@ def _state(
         return "incompatible", f"written for plugin contract {exc.contract}; this cyberfw loads {loads} — update cyberfw", env, None
     except (ManifestError, ValueError) as exc:
         return "broken", str(exc), env, None
-    except Exception as exc:  # whatever a plugin's own import raises
+    except (Exception, SystemExit) as exc:  # whatever a plugin's own import raises — an exit too
         return "broken", f"{type(exc).__name__}: {exc}", env, None
     assert plugin.install is not None
     return "enabled", "", tuple(plugin.install.env), plugin

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
 import pytest
@@ -158,3 +159,33 @@ def test_the_lock_keeps_a_disabled_plugin_tool_s_pin(workspace: Path, monkeypatc
 
     lock = read_lock(workspace / "tools.lock")
     assert lock is not None and set(lock.tools) == {"sample"}
+
+
+def test_a_pin_for_a_plugin_that_is_not_installed_leaves_the_registry_working(
+    workspace: Path, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # CI forgot the plugin package, or it was uninstalled: its one-line pin is no recipe.
+    monkeypatch.setattr(logging.getLogger("cyberfw"), "propagate", True)
+    _enable(workspace, "cyberfw-gone")
+    with (workspace / "registry.yaml").open("a", encoding="utf-8") as registry:
+        registry.write("\ngone:\n  version: v0.3.1\n")
+
+    manager = open_manager(load_settings())
+    try:
+        assert manager.spec("subfinder").repo == "org/subfinder" and "gone" not in manager.registry
+    finally:
+        manager.close()
+    assert any("gone" in record.getMessage() and "left out" in record.getMessage() for record in caplog.records)
+
+
+def test_a_user_s_own_recipe_stays_when_a_disabled_plugin_declares_its_name(workspace: Path) -> None:
+    with (workspace / "registry.yaml").open("a", encoding="utf-8") as registry:
+        registry.write("\nsample:\n  repo: me/sample\n  asset_patterns: []\n  binary: sample\n")
+
+    manager = open_manager(load_settings())
+    try:
+        assert manager.spec("sample").repo == "me/sample"
+        with pytest.raises(RegistryError, match="^sample is not available: plugin cyberfw-sample 1.0 is disabled"):
+            manager.adapter_class("sample")
+    finally:
+        manager.close()

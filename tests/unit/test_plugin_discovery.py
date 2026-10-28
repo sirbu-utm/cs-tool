@@ -62,3 +62,17 @@ def test_package_names_are_compared_normalised(site: Path) -> None:
 
     assert normalize("CyberFW_Sample.Extra") == "cyberfw-sample-extra"
     assert [declared.package for declared in _ours(discover())] == ["cyberfw-sample-extra"]
+
+
+def test_a_distribution_whose_metadata_cannot_be_read_is_passed_over(site: Path) -> None:
+    # Any installed distribution may be broken; none of them may stop cyberfw finding the rest.
+    install(site, "cyberfw-sample", manifests={"sample": "cyberfw_sample"}, files={"cyberfw_sample/sample.yaml": MANIFEST})
+    broken_points = site / "unrelated-1.0.dist-info"
+    broken_points.mkdir()
+    (broken_points / "METADATA").write_text("Metadata-Version: 2.1\nName: unrelated\nVersion: 1.0\n", encoding="utf-8")
+    (broken_points / "entry_points.txt").write_text("[console_scripts]\nthis line has no equals sign\n", encoding="utf-8")
+    nameless = site / "nameless-1.0.dist-info"
+    nameless.mkdir()
+    (nameless / "entry_points.txt").write_text("[cyberfw.tools]\nghost = ghost:PLUGIN\n", encoding="utf-8")
+
+    assert [declared.tool for declared in _ours(discover())] == ["sample"]

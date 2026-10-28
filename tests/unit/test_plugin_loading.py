@@ -260,3 +260,40 @@ def test_the_api_lists_the_plugins(site: Path, tmp_path: Path) -> None:
     settings = _settings(tmp_path, enabled=("cyberfw-sample",))
 
     assert api.list_plugins(settings) == load_plugins(settings).infos
+
+
+def test_a_package_nobody_enabled_cannot_take_a_tool_from_one_that_is(site: Path, tmp_path: Path) -> None:
+    # Two installed packages declare one name; the user enabled one of them. Only an
+    # enabled rival is a conflict: disabling cannot fix a package that was never on.
+    _sample(site, package="cyberfw-one", tool="dup")
+    install(site, "cyberfw-two", manifests={"dup": "cyberfw_two"}, files={"cyberfw_two/dup.yaml": SAMPLE})
+
+    loaded = load_plugins(_settings(tmp_path, enabled=("cyberfw-one",)))
+
+    assert {(info.package, info.state) for info in loaded.infos if info.tool == "dup"} == {
+        ("cyberfw-one", "enabled"), ("cyberfw-two", "disabled"),
+    }
+    assert "dup" in loaded.tools
+
+
+def test_a_code_plugin_that_exits_on_import_is_broken_not_fatal(site: Path, tmp_path: Path) -> None:
+    # A module that runs its own main() on import: its exit must not end cyberfw.
+    _bar(site, body="raise SystemExit(2)\n")
+
+    info = _info(_settings(tmp_path, enabled=("cyberfw-bar",), allow_code=("cyberfw-bar",)), "bar")
+
+    assert (info.state, info.reason) == ("broken", "SystemExit: 2")
+
+
+def test_installed_packages_that_cannot_be_read_load_nothing_and_say_so(
+    site: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, warned: Callable[[], list[str]]
+) -> None:
+    def unreadable() -> list[object]:
+        raise RuntimeError("metadata gone")
+
+    monkeypatch.setattr(plugins, "discover", unreadable)
+
+    loaded = load_plugins(_settings(tmp_path))
+
+    assert (loaded.infos, loaded.tools) == ([], {})
+    assert warned() == ["plugin packages: cannot be read: RuntimeError: metadata gone — no plugin is loaded"]

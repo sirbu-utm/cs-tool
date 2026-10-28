@@ -24,6 +24,8 @@ LOG = get_logger("manager.registry")
 
 #: 1.x integrity keys that ``tools.lock`` replaced: still accepted, but ignored.
 _LEGACY_KEYS = ("sha256", "needs_checksum")
+#: The keys an entry may hold when it only adjusts a plugin's recipe — never a recipe of its own.
+_OVERLAY_KEYS = frozenset({"version", "env", "interactive_input", "check_deps"})
 #: (registry file, tool) pairs already warned about — the launcher reloads the
 #: registry for every frame, and one warning per tool per process is enough.
 _LEGACY_WARNED: set[tuple[str, str]] = set()
@@ -113,16 +115,36 @@ class ToolRegistry:
         return sorted(self._tools)
 
 
+#: Overlay-only entries already warned about, per registry file.
+_OVERLAYS_WARNED: set[tuple[str, str]] = set()
+
+
+def _warn_overlay_only(registry_path: Path, name: str) -> None:
+    key = (str(registry_path.resolve()), name)
+    if key not in _OVERLAYS_WARNED:
+        _OVERLAYS_WARNED.add(key)
+        LOG.warning(
+            "registry entry %s has no repo or source: it only overlays a plugin's recipe, "
+            "and no installed plugin declares %s — left out",
+            name,
+            name,
+        )
+
+
 def load_registry(
-    path: Path | str, *, overlays: Mapping[str, ToolSpec] | None = None, skip: Collection[str] = ()
+    path: Path | str, *, overlays: Mapping[str, ToolSpec] | None = None, plugin_tools: Collection[str] = ()
 ) -> ToolRegistry:
     """Parse a registry file into a :class:`ToolRegistry`.
 
     ``overlays`` are the install recipes of the plugin tools in use, by name: an
     entry of the same name in the file is laid over its recipe key by key (to pin
     a version, or point at a local binary), and a plugin tool the file does not
-    name keeps its recipe as it is. Entries named in ``skip`` — tools of plugins
-    not in use, whose entries may be such partial overlays — are left out.
+    name keeps its recipe as it is. An entry that only overlays — nothing but
+    ``version``, ``env``, ``interactive_input`` or ``check_deps``: a version pin,
+    say — is no recipe without its plugin, so it is left out when no plugin in use
+    provides the tool: quietly for a tool of an installed plugin (``plugin_tools``)
+    that is merely not in use, with a warning otherwise. An entry with recipe keys
+    is checked as a recipe, as before: a mistake in one stays an error.
     """
     overlays = overlays or {}
     registry_path = Path(path)
@@ -139,8 +161,6 @@ def load_registry(
 
     tools: dict[str, ToolSpec] = {}
     for name, block in payload.items():
-        if str(name) in skip:
-            continue
         if not isinstance(block, dict):
             raise RegistryError(f"registry entry {name!r} must be a mapping")
         legacy = [key for key in _LEGACY_KEYS if key in block]
@@ -156,6 +176,10 @@ def load_registry(
                 )
             block = {key: value for key, value in block.items() if key not in _LEGACY_KEYS}
         base = overlays.get(str(name))
+        if base is None and block and set(block) <= _OVERLAY_KEYS:
+            if str(name) not in plugin_tools:
+                _warn_overlay_only(registry_path, str(name))
+            continue
         fields = {**base.model_dump(), **block} if base is not None else dict(block)
         try:
             tools[name] = ToolSpec(**{**fields, "name": str(name)})

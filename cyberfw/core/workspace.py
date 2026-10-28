@@ -10,7 +10,6 @@ from cyberfw.manager import ToolManager, load_registry
 from cyberfw.manager.lock import LOCK_NAME
 from cyberfw.manager.plugins import load_plugins
 from cyberfw.resources import packaged_data
-from cyberfw.tools import BUILTIN
 
 
 def registry_candidates() -> list[Path]:
@@ -43,8 +42,7 @@ def open_manager(settings: Settings) -> ToolManager:
     path = registry_path()
     plugins = load_plugins(settings)
     overlays = {name: tool.install for name, tool in plugins.tools.items() if tool.install is not None}
-    skip = plugins.declared() - set(plugins.tools) - set(BUILTIN)
-    registry = load_registry(path, overlays=overlays, skip=skip)
+    registry = load_registry(path, overlays=overlays, plugin_tools=plugins.declared())
     return ToolManager(settings, registry, lock_path=path.with_name(LOCK_NAME), plugins=plugins)
 
 
