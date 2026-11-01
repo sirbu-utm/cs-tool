@@ -21,6 +21,7 @@ one warning per problem per process on the ``cyberfw`` logger.
 from __future__ import annotations
 
 import importlib.util
+import os
 import re
 import sys
 from collections import Counter
@@ -40,7 +41,16 @@ from cyberfw.tools import BUILTIN
 from cyberfw.tools.manifest import parse_manifest
 from cyberfw.tools.manifest_tool import compile_manifest
 
-__all__ = ["RESERVED", "PluginInfo", "PluginSet", "PluginsFile", "State", "load_plugins", "read_plugins_file"]
+__all__ = [
+    "RESERVED",
+    "PluginInfo",
+    "PluginSet",
+    "PluginsFile",
+    "State",
+    "load_plugins",
+    "read_plugins_file",
+    "write_plugins_file",
+]
 
 LOG = get_logger("plugins")
 
@@ -99,6 +109,20 @@ def read_plugins_file(path: Path) -> PluginsFile:
             raise PluginError(f"{path}: {key}: a list of package names")
         lists[key] = frozenset(normalize(name) for name in names)
     return PluginsFile(enabled=lists["enabled"], allow_code=lists["allow_code"])
+
+
+def write_plugins_file(path: Path, chosen: PluginsFile) -> None:
+    """Write ``chosen`` to ``plugins.yaml`` at ``path`` whole or not at all — a temp
+    file, then ``os.replace``. Raises :class:`PluginError` when it cannot be written."""
+    document = {"enabled": sorted(chosen.enabled), "allow_code": sorted(chosen.allow_code)}
+    text = "# managed by `cyberfw plugins enable/disable`\n" + yaml.safe_dump(document, sort_keys=False)
+    tmp = path.with_name(path.name + ".tmp")
+    try:
+        tmp.write_text(text, encoding="utf-8", newline="\n")
+        os.replace(tmp, path)
+    except OSError as exc:
+        tmp.unlink(missing_ok=True)
+        raise PluginError(f"{path}: cannot be written: {exc}") from exc
 
 
 @dataclass
