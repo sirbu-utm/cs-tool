@@ -8,9 +8,10 @@ import pytest
 import yaml
 from typer.testing import Result
 
-from cyberfw.cli import app
+from cyberfw.cli import app, launcher
 from cyberfw.config import load_settings
 from cyberfw.core import plugins as enabling
+from cyberfw.core.workspace import open_manager
 from cyberfw.exceptions import PluginError
 from cyberfw.manager import plugins
 
@@ -263,3 +264,45 @@ def test_help_lists_one_new_command_plugins_with_enable_and_disable_under_it() -
     listed = [line.strip("│| ").split()[0] for line in top.stdout.splitlines() if line.strip("│| ")[:1].isalpha()]
     assert listed.count("plugins") == 1
     assert {"enable", "disable"} <= set(_text(own).split())
+
+
+# -- where a tool comes from: status and the launcher ----------------------------------------
+def _row(result: Result, tool: str) -> str:
+    """The inventory row of ``tool`` without the panel's borders, whitespace squeezed."""
+    (line,) = [line for line in result.stdout.splitlines() if line.strip("║│| ").split()[:1] == [tool]]
+    return " ".join(line.strip("║│| ").split())
+
+
+def test_status_says_where_each_tool_comes_from_and_counts_the_plugins() -> None:
+    _plugins("enable", "cyberfw-sample")
+
+    result = base.runner.invoke(app, ["status"])
+
+    assert result.exit_code == 0, result.stdout
+    assert _row(result, "sample").endswith("cyberfw-sample 1.0")
+    assert _row(result, "subfinder").endswith("built-in")
+    assert "plugins 1 enabled, 1 disabled" in _text(result)
+
+
+def test_with_no_plugin_installed_status_says_so(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(plugins, "discover", lambda: [])
+
+    result = base.runner.invoke(app, ["status"])
+
+    assert "plugins none installed" in _text(result)
+
+
+def test_the_launcher_offers_an_enabled_plugin_tool_and_no_other() -> None:
+    def offered() -> list[str]:
+        manager = open_manager(load_settings())
+        try:
+            return [option.name for option in launcher._menu_options(manager.registry.names())]
+        finally:
+            manager.close()
+
+    before = offered()
+    _plugins("enable", "cyberfw-sample")
+    after = offered()
+
+    assert "sample" not in before and "bar" not in before
+    assert "sample" in after and "bar" not in after

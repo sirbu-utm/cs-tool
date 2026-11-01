@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import shutil
+from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
+from typing import get_args
 
 from rich.cells import cell_len
 from rich.console import Group, RenderableType
@@ -37,6 +39,7 @@ from cyberfw.hud import (
 )
 from cyberfw.logging import console
 from cyberfw.manager import ToolManager
+from cyberfw.manager.plugins import PluginSet, State
 from cyberfw.pipeline.engine import (
     NodeResult,
     PipelineResult,
@@ -455,6 +458,8 @@ class _ToolRow:
     version: str
     state: str
     repo: str
+    #: ``built-in``, or the plugin package it comes from: ``cyberfw-foo 0.3``.
+    origin: str = "built-in"
 
 
 def _tool_rows(manager: ToolManager, tools_dir: Path, states: list[str] | None = None) -> list[_ToolRow]:
@@ -464,13 +469,19 @@ def _tool_rows(manager: ToolManager, tools_dir: Path, states: list[str] | None =
     if states is None or len(states) != len(names):
         states = _tool_states(manager, tools_dir)
     return [
-        _ToolRow(name, _tool_version(manager, name), state, manager.spec(name).repo or "local")
+        _ToolRow(
+            name,
+            _tool_version(manager, name),
+            state,
+            manager.spec(name).repo or "local",
+            (manager.plugins.origin(name) if manager.plugins is not None else None) or "built-in",
+        )
         for name, state in zip(names, states, strict=True)
     ]
 
 
 def _tools_table(rows: list[_ToolRow], *, numbered: bool, capability: bool, reveal: float = 1.0) -> Table:
-    """The tool inventory: number, tool, what it does, version, state, source.
+    """The tool inventory: number, tool, what it does, version, state, source, origin.
 
     A tool that cannot run is greyed out with ``muted``: a real grey, not
     ``dim``, which the classic Windows console ignores, and not bright black,
@@ -489,6 +500,7 @@ def _tools_table(rows: list[_ToolRow], *, numbered: bool, capability: bool, reve
     table.add_column("version", style="muted", no_wrap=True)
     table.add_column("state", no_wrap=True)
     table.add_column("source", style="muted", no_wrap=True, overflow="ellipsis")
+    table.add_column("origin", style="muted", no_wrap=True)
     shown = len(rows) if reveal >= 1 else int(len(rows) * max(reveal, 0.0))
     for index, row in enumerate(rows, start=1):
         ready = row.state == "ready"
@@ -499,7 +511,12 @@ def _tools_table(rows: list[_ToolRow], *, numbered: bool, capability: bool, reve
         cells.append(Text(row.name, style="bold bright_white" if fresh else ("tool" if ready else "muted")))
         if capability:
             cells.append(Text(TOOL_GUIDES.get(row.name, ("",))[0], style="white" if ready else "muted"))
-        cells += [Text(row.version or "—"), pip_word(row.state, state_style(row.state)), Text(row.repo)]
+        cells += [
+            Text(row.version or "—"),
+            pip_word(row.state, state_style(row.state)),
+            Text(row.repo),
+            Text(row.origin),
+        ]
         if index > shown:
             cells = [Text(" " * cell.cell_len) for cell in cells]
         table.add_row(*cells)
@@ -526,13 +543,24 @@ def _dep_row(label: str, found: str | None, needed_by: str) -> tuple[str, Text, 
     return (label, pip_word("missing", "warn"), Text(f"needed by {needed_by}", style="muted"))
 
 
-def _status_view(rows: list[_ToolRow], settings: Settings, *, chrome: str | None) -> HudFrame:
-    """``status`` as one panel: the tools (and where they are looked for), the
-    external dependencies, the effective settings."""
+def _plugins_line(plugins: PluginSet | None) -> str:
+    """``1 enabled, 2 disabled`` — the plugin tools by state; ``none installed`` without any."""
+    counts = Counter(info.state for info in (plugins.infos if plugins is not None else []))
+    if not counts:
+        return "none installed"
+    return ", ".join(f"{counts[state]} {state}" for state in get_args(State) if counts[state])
+
+
+def _status_view(
+    rows: list[_ToolRow], settings: Settings, *, chrome: str | None, plugins: PluginSet | None = None
+) -> HudFrame:
+    """``status`` as one panel: the tools (where they are looked for, and the plugins
+    by state), the external dependencies, the effective settings."""
     tools_dir = Table.grid(padding=(0, 1), pad_edge=True, expand=True)
     tools_dir.add_column(style="muted", no_wrap=True)
     tools_dir.add_column(ratio=1)
     tools_dir.add_row("tools dir", PathText(settings.tools_dir))
+    tools_dir.add_row("plugins", Text(_plugins_line(plugins)))
     tools = ByWidth(lambda width: Group(_tools_table(rows, numbered=False, capability=width >= 100), tools_dir))
 
     deps = hud_table()

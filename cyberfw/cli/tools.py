@@ -402,6 +402,8 @@ def status_cmd(verbose: VerboseOption = False) -> None:
             duration=0.8,
             animate=settings.animations,
         )
-        console.print(_status_view(rows, settings, chrome=_find_chrome(settings.tools_dir)))
+        console.print(
+            _status_view(rows, settings, chrome=_find_chrome(settings.tools_dir), plugins=manager.plugins)
+        )
     finally:
         manager.close()
