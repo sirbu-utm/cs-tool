@@ -31,7 +31,12 @@ from cyberfw.config import Settings
 from cyberfw.exceptions import ExecutionError, ToolNotFoundError
 from cyberfw.logging import get_logger
 from cyberfw.manager import ToolManager
-from cyberfw.pipeline.context import SessionContext
+from cyberfw.pipeline.context import (
+    SessionContext,
+    check_stage_files,
+    check_stage_name,
+    stage_file_name,
+)
 from cyberfw.pipeline.executor import run_stage, tool_environment
 from cyberfw.pipeline.schemas import ToolRecord
 from cyberfw.plugin import BaseTool, ScanControls, ToolContext
@@ -365,7 +370,12 @@ class PipelineEngine:
 
     @staticmethod
     def _validate_wiring(nodes: list[Node]) -> None:
-        """Fail fast on a pipeline whose ``input_from`` names a missing/later stage."""
+        """Fail fast — before anything is written — on a pipeline with a stage name
+        that is no plain name, two stages that would share one file, or an
+        ``input_from`` that names a missing/later stage."""
+        for node in nodes:
+            check_stage_name(node.stage)
+        check_stage_files([node.stage for node in nodes])
         seen: set[str] = set()
         for node in nodes:
             if node.input_from is not None and node.input_from not in seen:
@@ -567,10 +577,11 @@ class PipelineEngine:
         without ``--save`` has no session, so fall back to the system temp dir
         rather than refusing to run the tool (:meth:`_dispatch` removes it again).
         """
+        name = stage_file_name(stage_id)  # one segment, whatever the stage is called
         if self.context is not None:
-            path = self.context.session_dir / f"{stage_id}.input"
+            path = self.context.session_dir / f"{name}.input"
         else:
-            path = Path(tempfile.gettempdir()) / f"cyberfw-{os.getpid()}-{stage_id}.input"
+            path = Path(tempfile.gettempdir()) / f"cyberfw-{os.getpid()}-{name}.input"
         path.write_text("\n".join(self._uniq(inputs)) + "\n", encoding="utf-8")
         return path
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -177,3 +178,29 @@ class TestPackagedPipelines:
         _write(tmp_path, "dup", "nodes:\n  - tool: nuclei\n    stage: mine\n")
 
         assert [n.tool for n in build("dup", pipelines_dir=tmp_path / "pipelines")] == ["nuclei"]
+
+
+class TestStageNamesStayInTheSession:
+    """A stage's name names its files in the session (``<stage>.jsonl``, ``<stage>.input``):
+    one that is no plain name, or one that two stages would share as a file name, is
+    rejected when the file is read — before anything is written."""
+
+    @pytest.mark.parametrize(
+        "stage", ["../outside", "/etc/outside", "C:\\outside", "C:outside", "a\\b", "a/b", ".", ".."]
+    )
+    def test_a_stage_name_that_is_no_plain_name_is_rejected(self, tmp_path: Path, stage: str) -> None:
+        text = f"nodes:\n  - tool: subfinder\n    stage: {json.dumps(stage)}\n"
+
+        with pytest.raises(RegistryError, match=r"broken\.yaml: stage .* is not a plain name"):
+            load_pipeline_file(_write(tmp_path, "broken", text))
+
+    def test_two_stages_that_would_share_one_file_are_rejected(self, tmp_path: Path) -> None:
+        text = "nodes:\n  - tool: subfinder\n    stage: live http\n  - tool: httpx\n    stage: live_http\n"
+
+        with pytest.raises(RegistryError, match="'live http' and 'live_http' would share one file"):
+            load_pipeline_file(_write(tmp_path, "twins", text))
+
+    def test_dots_and_spaces_inside_a_name_are_fine(self, tmp_path: Path) -> None:
+        text = "nodes:\n  - tool: subfinder\n    stage: sub domains.v2\n"
+
+        assert [node.stage for node in load_pipeline_file(_write(tmp_path, "dotted", text))] == ["sub domains.v2"]

@@ -14,7 +14,33 @@ from typing import IO, Any
 from cyberfw.exceptions import ContextStoreError
 from cyberfw.pipeline.schemas import ToolRecord
 
-__all__ = ["SessionContext"]
+__all__ = ["SessionContext", "check_stage_files", "check_stage_name", "stage_file_name"]
+
+
+def stage_file_name(stage: str) -> str:
+    """The one path segment a stage's files in the session are named by: letters,
+    digits, ``-`` and ``_`` as they are, anything else as ``_``."""
+    return "".join(ch if ch.isalnum() or ch in "-_" else "_" for ch in stage) or "stage"
+
+
+def check_stage_name(stage: str) -> None:
+    """Raise :class:`ValueError` unless ``stage`` is one plain name: not empty, ``.``
+    or ``..``, and with no path separator, drive colon or control character — it
+    names the stage's files in the session."""
+    if stage.strip() in {"", ".", ".."} or any(ch in "/\\:" or not ch.isprintable() for ch in stage):
+        raise ValueError(
+            f"stage {stage!r} is not a plain name: it names the stage's files in the session, "
+            "so it may hold no '/', '\\' or ':' and may not be '.' or '..'"
+        )
+
+
+def check_stage_files(stages: list[str]) -> None:
+    """Raise :class:`ValueError` when two of ``stages`` would share one file name."""
+    named: dict[str, str] = {}
+    for stage in stages:
+        other = named.setdefault(stage_file_name(stage), stage)
+        if other != stage:
+            raise ValueError(f"stages {other!r} and {stage!r} would share one file in the session: rename one")
 
 
 class SessionContext:
@@ -115,7 +141,4 @@ class SessionContext:
 
     # -- helpers --------------------------------------------------------------
     def _stage_path(self, stage: str) -> Path:
-        # sanitise arbitrary stage names to a single path segment
-        safe = "".join(ch if ch.isalnum() or ch in "-_" else "_" for ch in stage) or "stage"
-        path = self.session_dir / f"{safe}.jsonl"
-        return path
+        return self.session_dir / f"{stage_file_name(stage)}.jsonl"

@@ -23,8 +23,11 @@ controls (``--severity`` / ``--tags`` / ``--rate-limit`` / settings) for that
 stage; a stage that omits one falls back to the run-wide value.
 
 The engine is already data-driven, so this is only a validated loader: unknown
-keys, an ``input_from`` that does not name an earlier stage and duplicate stage
-names are rejected up front with the file named, as :class:`RegistryError`.
+keys, an ``input_from`` that does not name an earlier stage, duplicate stage
+names, a stage name that is no plain name (it names the stage's files in the
+session: no ``/``, ``\\`` or ``:``, not ``.`` or ``..``) and two stages whose
+file names would collide are rejected up front with the file named, as
+:class:`RegistryError`.
 Whether each ``tool`` is registered is the caller's check (it needs the registry).
 """
 
@@ -36,6 +39,7 @@ import yaml
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from cyberfw.exceptions import RegistryError
+from cyberfw.pipeline.context import check_stage_files, check_stage_name
 from cyberfw.pipeline.engine import Node
 
 __all__ = ["NodeSpec", "PipelineSpec", "load_pipeline_file", "discover_pipelines"]
@@ -81,6 +85,13 @@ def load_pipeline_file(path: Path) -> list[Node]:
             f"{'.'.join(str(part) for part in err['loc']) or '<root>'}: {err['msg']}" for err in exc.errors()
         )
         raise RegistryError(f"pipeline {path.name}: {problems}") from exc
+
+    try:
+        for node in spec.nodes:
+            check_stage_name(node.stage)
+        check_stage_files(list(dict.fromkeys(node.stage for node in spec.nodes)))
+    except ValueError as exc:
+        raise RegistryError(f"pipeline {path.name}: {exc}") from exc
 
     seen: set[str] = set()
     for node in spec.nodes:

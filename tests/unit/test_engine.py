@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import sys
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -1314,3 +1315,46 @@ class TestADependentStageNeverRunsOnTheSeed:
         await engine.run(self._NODES, seed="example.com")
 
         assert sorted(launched) == [("httpx", None), ("nuclei", "sub.example.com")]
+
+
+class TestStageFilesStayInTheSession:
+    """Nothing a stage writes lands outside the session, whatever the stage is called."""
+
+    @staticmethod
+    def _engine(tmp_path: Path, *, session: bool = True) -> PipelineEngine:
+        registry_path = tmp_path / "registry.yaml"
+        registry_path.write_text("subfinder:\n  repo: org/subfinder\n  asset_patterns: []\n", encoding="utf-8")
+        engine = _make_engine(tmp_path, registry_path)
+        if not session:
+            engine.context = None
+        return engine
+
+    async def test_a_stage_name_that_is_no_plain_name_is_refused_before_anything_runs(self, tmp_path: Path) -> None:
+        engine = self._engine(tmp_path)
+
+        with pytest.raises(ValueError, match="'../outside' is not a plain name"):
+            await engine.run([Node(tool="subfinder", stage="../outside")], seed="example.com")
+
+        assert not list(tmp_path.rglob("*outside*"))
+
+    async def test_two_stages_that_would_share_one_file_are_refused(self, tmp_path: Path) -> None:
+        engine = self._engine(tmp_path)
+        nodes = [Node(tool="subfinder", stage="live http"), Node(tool="subfinder", stage="live_http")]
+
+        with pytest.raises(ValueError, match="would share one file"):
+            await engine.run(nodes, seed="example.com")
+
+    @pytest.mark.parametrize("session", [True, False], ids=["session", "no-session"])
+    def test_a_list_input_lands_in_its_directory_whatever_the_stage_is_called(
+        self, tmp_path: Path, session: bool
+    ) -> None:
+        # ``cyberfw run <tool> --list`` names its one stage after the tool, unchecked.
+        engine = self._engine(tmp_path, session=session)
+
+        path = engine._materialize("../../outside", ["a.example.com"])
+        try:
+            expected = engine.context.session_dir if engine.context is not None else Path(tempfile.gettempdir())
+            assert path.parent == expected
+            assert ".." not in path.name and path.read_text(encoding="utf-8") == "a.example.com\n"
+        finally:
+            path.unlink(missing_ok=True)
