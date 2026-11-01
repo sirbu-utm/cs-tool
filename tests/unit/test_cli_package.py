@@ -14,7 +14,11 @@ import cyberfw
 
 PACKAGE = Path(cyberfw.__file__).resolve().parent / "cli"
 #: Each module may import only from modules in a lower layer — no import cycles.
-LAYER = {"app": 0, "common": 1, "views": 2, "tools": 3, "reports": 3, "triage": 3, "scan": 3, "schedule": 3, "launcher": 4}
+LAYER = {
+    "app": 0, "common": 1, "views": 2,
+    "tools": 3, "plugins": 3, "reports": 3, "triage": 3, "scan": 3, "schedule": 3,
+    "launcher": 4,
+}
 
 
 def test_the_cli_is_a_package_of_the_planned_modules() -> None:
@@ -37,7 +41,7 @@ def test_the_commands_keep_their_order() -> None:
     group = typer.main.get_command(app)
     assert group.list_commands(None) == [  # type: ignore[arg-type]
         "prepare", "init", "lock", "doctor", "status", "vt", "diff", "export",
-        "mute", "unmute", "mutes", "run", "pipeline", "schedule",
+        "mute", "unmute", "mutes", "run", "pipeline", "schedule", "plugins",
     ]
 
 

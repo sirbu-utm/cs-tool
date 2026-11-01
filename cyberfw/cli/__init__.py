@@ -22,7 +22,7 @@ from cyberfw.cli.app import app
 # Importing the command modules registers their commands on `app` in this
 # order — the order `cyberfw --help` lists them. The launcher comes last: it
 # adds the callback that opens the menu when no command is given.
-for _module in ('tools', 'reports', 'triage', 'scan', 'schedule', 'launcher'):
+for _module in ('tools', 'plugins', 'reports', 'triage', 'scan', 'schedule', 'launcher'):
     importlib.import_module(f"cyberfw.cli.{_module}")
 
 __all__ = ["app"]

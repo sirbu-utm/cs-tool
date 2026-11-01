@@ -6,7 +6,9 @@ from pathlib import Path
 
 import pytest
 import yaml
+from typer.testing import Result
 
+from cyberfw.cli import app
 from cyberfw.config import load_settings
 from cyberfw.core import plugins as enabling
 from cyberfw.exceptions import PluginError
@@ -140,3 +142,124 @@ def test_plugins_yaml_is_written_whole_and_reads_back(tmp_path: Path) -> None:
 def test_a_plugins_yaml_that_cannot_be_written_is_a_plugin_error(tmp_path: Path) -> None:
     with pytest.raises(PluginError, match="cannot be written"):
         plugins.write_plugins_file(tmp_path / "missing-dir" / "plugins.yaml", plugins.PluginsFile())
+
+
+# -- the plugins command ---------------------------------------------------------------------
+#: A manifest tool whose recipe asks for a variable of its own.
+KEYED = (
+    "contract: 1\n"
+    "install: {repo: acme/keyed, asset_patterns: [], binary: keyed, env: [KEYED_TOKEN]}\n"
+    "target: ['-u', '{target}']\n"
+    "list: ['-l', '{input_file}']\n"
+    "record: {kind: http, target: url}\n"
+)
+
+
+def _plugins(*args: str) -> Result:
+    return base.runner.invoke(app, ["plugins", *args])
+
+
+def _text(result: Result) -> str:
+    """The output with Rich's line folding and padding undone."""
+    return " ".join(result.stdout.split())
+
+
+def _squashed(result: Result) -> str:
+    """The output without any whitespace: a table cell folds mid-word on a narrow console."""
+    return "".join(result.stdout.split())
+
+
+def test_plugins_lists_each_tool_with_its_package_kind_env_state_and_reason(site: Path) -> None:
+    install(site, "cyberfw-keyed", manifests={"keyed": "cyberfw_keyed"}, files={"cyberfw_keyed/keyed.yaml": KEYED})
+
+    result = _plugins()
+
+    assert result.exit_code == 0, result.stdout
+    rows = {line.split()[0]: line.split() for line in result.stdout.splitlines() if line.startswith("cyberfw-")}
+    assert rows["cyberfw-sample"][:6] == ["cyberfw-sample", "1.0", "manifest", "sample", "—", "disabled"]
+    assert rows["cyberfw-bar"][:6] == ["cyberfw-bar", "1.0", "code", "bar", "—", "disabled"]
+    # A disabled manifest's env: is read from its YAML — reading runs nothing.
+    assert rows["cyberfw-keyed"][:6] == ["cyberfw-keyed", "1.0", "manifest", "keyed", "KEYED_TOKEN", "disabled"]
+    assert "enableitwith`cyberfwpluginsenablecyberfw-sample`" in _squashed(result)
+
+
+def test_with_no_plugin_installed_plugins_says_how_to_add_one(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(plugins, "discover", lambda: [])
+
+    result = _plugins()
+
+    assert result.exit_code == 0
+    assert "`uv tool install cyberfw --with cyberfw-foo`, or `pip install cyberfw-foo`" in _text(result)
+
+
+def test_enable_loads_the_package_and_shows_its_tools(workspace: Path) -> None:
+    result = _plugins("enable", "cyberfw-sample")
+
+    assert result.exit_code == 0, result.stdout
+    assert _text(result).startswith("Enabled cyberfw-sample. kind tool env state reason manifest sample — enabled")
+    assert _file(workspace).enabled == {"cyberfw-sample"}
+
+
+def test_enabling_again_says_already_enabled_and_exits_0() -> None:
+    _plugins("enable", "cyberfw-sample")
+
+    result = _plugins("enable", "cyberfw-sample")
+
+    assert result.exit_code == 0
+    assert _text(result).startswith("cyberfw-sample: already enabled")
+
+
+def test_a_code_package_without_allow_code_exits_2_and_says_what_it_would_reach(workspace: Path) -> None:
+    refused = _plugins("enable", "cyberfw-bar")
+    allowed = _plugins("enable", "cyberfw-bar", "--allow-code")
+
+    assert refused.exit_code == 2
+    assert "ships Python that would run inside cyberfw, with access to everything cyberfw can reach" in _text(refused)
+    assert "`cyberfw plugins enable cyberfw-bar --allow-code`" in _text(refused)
+    assert allowed.exit_code == 0, allowed.stdout
+    assert _file(workspace).allow_code == {"cyberfw-bar"}
+
+
+def test_an_unknown_package_exits_2_and_names_those_that_declare_tools() -> None:
+    result = _plugins("enable", "cyberfw-nope")
+
+    assert result.exit_code == 2
+    assert "those that do: cyberfw-bar, cyberfw-sample" in _text(result)
+
+
+def test_a_broken_package_exits_1_and_stays_enabled(workspace: Path, site: Path) -> None:
+    install(site, "cyberfw-broken", manifests={"broken": "cyberfw_broken"}, files={"cyberfw_broken/broken.yaml": BROKEN})
+
+    result = _plugins("enable", "cyberfw-broken")
+
+    assert result.exit_code == 1
+    assert " broken " in _text(result)
+    assert _file(workspace).enabled == {"cyberfw-broken"}
+
+
+def test_disable_says_what_it_did_and_can_be_repeated(workspace: Path) -> None:
+    _plugins("enable", "cyberfw-sample")
+
+    first, again = _plugins("disable", "cyberfw-sample"), _plugins("disable", "cyberfw-sample")
+
+    assert (first.exit_code, _text(first)) == (0, "Disabled cyberfw-sample.")
+    assert (again.exit_code, _text(again)) == (0, "cyberfw-sample was not enabled.")
+    assert _file(workspace) == plugins.PluginsFile()
+
+
+def test_a_plugins_yaml_that_cannot_be_read_exits_2(workspace: Path) -> None:
+    (workspace / "plugins.yaml").write_text("enabled: [unclosed\n", encoding="utf-8")
+
+    for command in (("enable", "cyberfw-sample"), ("disable", "cyberfw-sample")):
+        result = _plugins(*command)
+        assert result.exit_code == 2
+        assert "not valid YAML" in _text(result)
+
+
+def test_help_lists_one_new_command_plugins_with_enable_and_disable_under_it() -> None:
+    top = base.runner.invoke(app, ["--help"])
+    own = _plugins("--help")
+
+    listed = [line.strip("│| ").split()[0] for line in top.stdout.splitlines() if line.strip("│| ")[:1].isalpha()]
+    assert listed.count("plugins") == 1
+    assert {"enable", "disable"} <= set(_text(own).split())
