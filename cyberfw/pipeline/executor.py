@@ -2,8 +2,9 @@
 
 Spawns an external tool without a TTY, parses its stdout as JSONL line-by-line
 and its stderr separately (kept as a bounded tail for diagnostics), and on
-cancellation (Ctrl+C / SIGTERM) asks the child to exit (SIGTERM), waits a short
-grace period and only then SIGKILLs it, so a long scan never orphans a process
+cancellation (Ctrl+C / SIGTERM) asks the tool to exit (SIGTERM), waits a short
+grace period and only then SIGKILLs it — the tool and every process it started
+(:mod:`cyberfw.pipeline.processes`) — so a long scan never orphans a process
 yet a tool that flushes on SIGTERM gets to. A non-zero exit (including SIGSEGV /
 OOM kill by the OS) is surfaced as :class:`ExecutionError` carrying the last
 stderr lines; the pipeline engine catches it and does not crash the parent.
@@ -22,6 +23,7 @@ from pathlib import Path
 from cyberfw.exceptions import ExecutionError, ParseError
 from cyberfw.logging import get_logger
 from cyberfw.pipeline.context import SessionContext
+from cyberfw.pipeline.processes import ProcessGroup
 from cyberfw.pipeline.schemas import ToolRecord, validate_record
 
 LOG = get_logger("executor")
@@ -255,6 +257,7 @@ async def run_stage(
     """
     logger = LOG
     cmd = _prepare_cmd(cmd)
+    group = ProcessGroup()
     try:
         proc = await asyncio.create_subprocess_exec(
             *cmd,
@@ -263,10 +266,22 @@ async def run_stage(
             stderr=asyncio.subprocess.PIPE,
             limit=_STREAM_LIMIT,
             env=dict(env) if env is not None else tool_environment(),
+            **group.spawn_options(),
         )
     except OSError as exc:
         raise ExecutionError(
             f"{tool} could not start: {exc}. The installed binary may target another OS or architecture.",
+            stderr_tail=[str(exc)],
+        ) from exc
+    try:
+        group.adopt(proc.pid)
+    except OSError as exc:
+        # Never a tool cyberfw could not stop as a whole — nor one left suspended.
+        _kill_if_running(proc)
+        await proc.wait()
+        _close_transport(proc)
+        raise ExecutionError(
+            f"{tool} could not start: its process could not be given a group of its own ({exc})",
             stderr_tail=[str(exc)],
         ) from exc
     stderr_tail: collections.deque[str] = collections.deque(maxlen=_STDERR_KEEP)
@@ -379,10 +394,10 @@ async def run_stage(
         try:
             exit_code = await asyncio.wait_for(_drain_and_wait(), timeout)
         except asyncio.CancelledError:
-            await _stop(proc)
+            await _stop(proc, group)
             raise
         except asyncio.TimeoutError:
-            await _stop(proc)
+            await _stop(proc, group)
             await _parse_stdout_buffer(failed=True)
             raise ExecutionError(
                 f"{tool} timed out after {timeout:g}s",
@@ -410,9 +425,11 @@ async def run_stage(
     finally:
         # Leaving this block with a live child — a callback or Context Store
         # error mid-stream, or a second cancellation during the grace period —
-        # must never orphan a scanner. (transport.close() below also kills,
-        # but via a private attribute.)
+        # must never orphan a scanner, nor anything it started: the group goes
+        # too, with whatever a finished tool left running. (transport.close()
+        # below also kills, but via a private attribute.)
         _kill_if_running(proc)
+        group.close()
         # Release pipe transports while the loop is still alive, so their
         # __del__ doesn't fire noisy ResourceWarnings at interpreter shutdown.
         _close_transport(proc)
@@ -445,25 +462,29 @@ def _kill_if_running(proc: asyncio.subprocess.Process) -> None:
         pass
 
 
-async def _stop(proc: asyncio.subprocess.Process, grace: float = _TERM_GRACE) -> None:
-    """Ask the child to exit, wait up to ``grace`` seconds, then hard-kill it.
+async def _stop(proc: asyncio.subprocess.Process, group: ProcessGroup, grace: float = _TERM_GRACE) -> None:
+    """Ask the tool to exit, wait up to ``grace`` seconds, then hard-kill it — the
+    tool and every process in its ``group``.
 
-    ``terminate()`` is SIGTERM on POSIX (which well-behaved scanners handle by
-    flushing and exiting) and ``TerminateProcess`` on Windows (immediate, so the
-    wait returns at once). Awaiting here — instead of scheduling the kill on a
-    detached task — means nothing outlives ``run_stage``.
+    ``terminate()`` is SIGTERM to the tool's whole process group on POSIX (which
+    well-behaved scanners handle by flushing and exiting) and the end of its Job
+    Object on Windows (immediate, so the wait returns at once). Whatever is still
+    in the group once the tool's own process has exited is killed. Awaiting here —
+    instead of scheduling the kill on a detached task — means nothing outlives
+    ``run_stage``.
     """
-    if proc.returncode is not None:
-        return
-    try:
-        proc.terminate()
-    except ProcessLookupError:  # pragma: no cover - already gone
-        return
-    try:
-        await asyncio.wait_for(proc.wait(), grace)
-    except asyncio.TimeoutError:
-        _kill_if_running(proc)
-        await proc.wait()
+    if proc.returncode is None:
+        group.terminate()
+        try:
+            proc.terminate()
+        except ProcessLookupError:  # pragma: no cover - already gone
+            pass
+        try:
+            await asyncio.wait_for(proc.wait(), grace)
+        except asyncio.TimeoutError:
+            _kill_if_running(proc)
+            await proc.wait()
+    group.kill()
 
 
 #: NTSTATUS codes Windows reports as a process exit code when it dies.

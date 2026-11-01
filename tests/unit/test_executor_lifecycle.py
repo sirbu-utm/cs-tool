@@ -28,6 +28,7 @@ class ClosedPipesChild:
         self.killed = False
         self.reaped = False
         self.exit_delay: float | None = None
+        self.pid = 0  # no process: its group is a _NoGroup
 
     def close_pipes(self) -> None:
         self.stdout.feed_eof()
@@ -60,6 +61,26 @@ class ClosedPipesChild:
         self.finish(-9)
 
 
+class _NoGroup:
+    """The process group of a fake child: there is no process tree to stop."""
+
+    @staticmethod
+    def spawn_options() -> dict[str, Any]:
+        return {}
+
+    def adopt(self, pid: int) -> None:
+        pass
+
+    def terminate(self) -> None:
+        pass
+
+    def kill(self) -> None:
+        pass
+
+    def close(self) -> None:
+        pass
+
+
 @pytest.fixture
 async def child(monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[ClosedPipesChild]:
     process = ClosedPipesChild()
@@ -68,6 +89,7 @@ async def child(monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[ClosedPipesChi
         return process
 
     monkeypatch.setattr("cyberfw.pipeline.executor.asyncio.create_subprocess_exec", spawn)
+    monkeypatch.setattr("cyberfw.pipeline.executor.ProcessGroup", _NoGroup)
     yield process
     process.finish(0)
 
