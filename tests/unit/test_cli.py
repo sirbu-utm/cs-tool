@@ -1214,7 +1214,7 @@ class TestRegistryLookup:
         packaged = tmp_path / "site" / "registry.yaml"
         packaged.parent.mkdir()
         packaged.write_text("{}\n", encoding="utf-8")
-        patch_cli(monkeypatch, "registry_candidates", lambda: [tmp_path / "missing.yaml", packaged])
+        patch_cli(monkeypatch, "registry_candidates", lambda *_: [tmp_path / "missing.yaml", packaged])
 
         assert _registry_path() == packaged
 
@@ -1222,7 +1222,7 @@ class TestRegistryLookup:
         _registry_path = cli.registry_path
         from cyberfw.exceptions import RegistryError
 
-        patch_cli(monkeypatch, "registry_candidates", lambda: [tmp_path / "missing.yaml"])
+        patch_cli(monkeypatch, "registry_candidates", lambda *_: [tmp_path / "missing.yaml"])
 
         with pytest.raises(RegistryError, match="registry.yaml"):
             _registry_path()
@@ -2827,7 +2827,7 @@ class TestLockCommand:
         (checkout / "registry.yaml").write_text(
             (tmp_path / "registry.yaml").read_text(encoding="utf-8"), encoding="utf-8"
         )
-        patch_cli(monkeypatch, "registry_path", lambda: checkout / "registry.yaml")
+        patch_cli(monkeypatch, "registry_path", lambda *_: checkout / "registry.yaml")
 
         result = runner.invoke(app, ["lock", "pinme", "--token", "t0ken"])
 
@@ -3006,7 +3006,7 @@ class TestInitLockMessages:
         site = tmp_path / "site" / "cyberfw" / "data"
         site.mkdir(parents=True)
         (site / "registry.yaml").write_text((tmp_path / "registry.yaml").read_text(encoding="utf-8"), encoding="utf-8")
-        patch_cli(monkeypatch, "registry_path", lambda: site / "registry.yaml")
+        patch_cli(monkeypatch, "registry_path", lambda *_: site / "registry.yaml")
         patch_cli(monkeypatch, "packaged_data", lambda *parts: site.joinpath(*parts))
 
         result = runner.invoke(app, ["init", "pinme"])

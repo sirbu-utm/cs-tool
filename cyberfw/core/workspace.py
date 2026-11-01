@@ -12,23 +12,29 @@ from cyberfw.manager.plugins import load_plugins
 from cyberfw.resources import packaged_data
 
 
-def registry_candidates() -> list[Path]:
+def registry_candidates(root_dir: Path | None = None) -> list[Path]:
     """Where ``registry.yaml`` may live, most specific first.
 
-    The current directory (a workspace the user may have edited), then the
-    checkout root next to the package (running from a clone elsewhere), then
-    the copy the wheel ships as ``cyberfw/data/registry.yaml``.
+    The workspace in use — ``root_dir``, the one the settings name
+    (``Settings.root_dir``: ``CYBERFW_ROOT_DIR``, ``load_settings(root_dir=...)``, the
+    current directory when it is a workspace), else the current directory — then
+    the checkout root next to the package (running from a clone elsewhere), then the
+    copy the wheel ships as ``cyberfw/data/registry.yaml``. A workspace with no
+    registry of its own thus runs on the one cyberfw ships, never on the current
+    directory's when the settings name another.
     """
-    candidates = [Path.cwd() / "registry.yaml", Path(__file__).resolve().parents[2] / "registry.yaml"]
+    workspace = root_dir if root_dir is not None else Path.cwd()
+    candidates = [workspace / "registry.yaml", Path(__file__).resolve().parents[2] / "registry.yaml"]
     packaged = packaged_data("registry.yaml")
     if packaged is not None:
         candidates.append(packaged)
     return candidates
 
 
-def registry_path() -> Path:
-    """Locate ``registry.yaml`` or raise a :class:`RegistryError` naming the places tried."""
-    candidates = registry_candidates()
+def registry_path(root_dir: Path | None = None) -> Path:
+    """Locate the ``registry.yaml`` of the workspace ``root_dir`` (see
+    :func:`registry_candidates`) or raise a :class:`RegistryError` naming the places tried."""
+    candidates = registry_candidates(root_dir)
     for candidate in candidates:
         if candidate.is_file():
             return candidate
@@ -37,9 +43,11 @@ def registry_path() -> Path:
 
 
 def open_manager(settings: Settings) -> ToolManager:
-    """A :class:`ToolManager` over the registry in use — with the plugin tools in use,
-    their recipes under its entries of the same name — and ``tools.lock`` next to it."""
-    path = registry_path()
+    """A :class:`ToolManager` over the registry of the workspace ``settings`` name —
+    with the plugin tools in use, their recipes under its entries of the same name —
+    and ``tools.lock`` next to it. With no registry of the workspace's own, that is
+    the one cyberfw ships, and the lock beside it (in site-packages, for a wheel)."""
+    path = registry_path(settings.root_dir)
     plugins = load_plugins(settings)
     overlays = {name: tool.install for name, tool in plugins.tools.items() if tool.install is not None}
     registry = load_registry(path, overlays=overlays, plugin_tools=plugins.declared())
