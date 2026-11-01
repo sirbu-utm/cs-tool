@@ -37,13 +37,17 @@ def apply_triage(result: PipelineResult, triage_file: Path, observer: RunObserve
 
 
 def run_info(manager: ToolManager, *, name: str, seed: str | None, session_id: str, tools: set[str]) -> RunInfo:
-    """The facts a report records about its run: what ran, against what, where, with which versions."""
+    """The facts a report records about its run: what ran, against what, where, with which
+    versions — and which plugin package each plugin tool came from."""
+    plugins = manager.plugins
+    origins = {tool: plugins.origin(tool) for tool in sorted(tools)} if plugins is not None else {}
     return RunInfo(
         pipeline=name,
         seed=seed,
         session_id=session_id,
         platform=manager.mapping.label,
         tool_versions={tool: (manager.install_state(tool) or {}).get("version") for tool in sorted(tools)},
+        tool_plugins={tool: origin for tool, origin in origins.items() if origin is not None},
     )
 
 

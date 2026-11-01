@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -17,7 +18,7 @@ from cyberfw.manager import plugins
 
 from . import test_cli as base
 from ._dists import install
-from .test_plugin_tools import BAR, SAMPLE
+from .test_plugin_tools import BAR, PROBE, SAMPLE
 
 #: A manifest the loader refuses: no install recipe.
 BROKEN = "contract: 1\ntarget: ['-u', '{target}']\nrecord: {kind: http, target: url}\n"
@@ -306,3 +307,36 @@ def test_the_launcher_offers_an_enabled_plugin_tool_and_no_other() -> None:
 
     assert "sample" not in before and "bar" not in before
     assert "sample" in after and "bar" not in after
+
+
+# -- where a run's plugin tools came from, in report.json -------------------------------------
+def _run_block(workspace: Path, session: str) -> dict[str, object]:
+    report = json.loads((workspace / "reports" / session / "report.json").read_text(encoding="utf-8"))
+    return dict(report["run"])
+
+
+def test_a_saved_run_of_a_plugin_tool_records_its_package(workspace: Path) -> None:
+    _plugins("enable", "cyberfw-sample")
+
+    result = base.runner.invoke(app, ["run", "sample", "-t", "https://sample.example.com/", "--save", "--session", "s1"])
+
+    assert result.exit_code == 0, result.stdout
+    assert _run_block(workspace, "s1")["tool_plugins"] == {"sample": "cyberfw-sample 1.0"}
+
+
+def test_a_saved_pipeline_records_the_package_of_each_plugin_tool_it_ran(workspace: Path) -> None:
+    (workspace / "pipelines").mkdir()
+    (workspace / "pipelines" / "probe.yaml").write_text(PROBE, encoding="utf-8")
+    _plugins("enable", "cyberfw-sample")
+
+    result = base.runner.invoke(app, ["pipeline", "probe", "-t", "example.com", "--session", "p1", "--no-mail"])
+
+    assert result.exit_code == 0, result.stdout
+    assert _run_block(workspace, "p1")["tool_plugins"] == {"sample": "cyberfw-sample 1.0"}
+
+
+def test_a_run_of_built_in_tools_records_no_plugins(workspace: Path) -> None:
+    result = base.runner.invoke(app, ["run", "subfinder", "-t", "example.com", "--save", "--session", "s2"])
+
+    assert result.exit_code == 0, result.stdout
+    assert "tool_plugins" not in _run_block(workspace, "s2")

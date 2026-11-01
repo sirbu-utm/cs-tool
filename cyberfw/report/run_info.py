@@ -27,9 +27,12 @@ class RunInfo:
     platform: str | None = None
     #: Installed version per tool used by the run; ``None`` when unrecorded.
     tool_versions: dict[str, str | None] = field(default_factory=dict)
+    #: The plugin package each plugin tool of the run came from: ``{"foo": "cyberfw-foo 0.3"}``.
+    tool_plugins: dict[str, str] = field(default_factory=dict)
 
     def as_dict(self, result: PipelineResult) -> dict[str, Any]:
-        """The ``run`` block of ``report.json`` (timestamps ISO-8601, UTC)."""
+        """The ``run`` block of ``report.json`` (timestamps ISO-8601, UTC). ``tool_plugins``
+        is there only for a run that used a plugin tool: reports without it read as before."""
         return {
             "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
             "cyberfw_version": __version__,
@@ -41,6 +44,7 @@ class RunInfo:
             "finished_at": _iso(result.finished_at),
             "duration_s": result.duration_s,
             "tool_versions": dict(self.tool_versions),
+            **({"tool_plugins": dict(self.tool_plugins)} if self.tool_plugins else {}),
         }
 
 
