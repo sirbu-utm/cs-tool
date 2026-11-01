@@ -237,3 +237,50 @@ def test_post_scan_runs_the_steps_in_order_and_skips_what_is_off(
 
     assert run() == ["tls", "mail", "takeover", "intel", "vt"]
     assert run(mail=False, intel=False, vt_key=None) == ["tls", "takeover"]
+
+
+def test_virustotal_is_never_sent_an_excluded_host(seen: Recorder, monkeypatch: pytest.MonkeyPatch) -> None:
+    # --exclude keeps a host out of scope for the checks after the scan too: it
+    # stays among the discovery results, but is not sent to a third party.
+    looked_up: list[list[str]] = []
+
+    async def fake_enrich(targets: list[str], api_key: str, limit: int = 20, **_kw: object) -> list[vt.Reputation]:
+        looked_up.append(list(targets))
+        return []
+
+    monkeypatch.setattr(vt, "enrich", fake_enrich)
+    private = _record("subfinder", {"host": "private.example.com", "source": "stub"})
+    probed = _record("httpx", {"url": "https://private.example.com/login", "status_code": 200})
+    result = PipelineResult(records=[private, _host(), probed])
+
+    steps.enrich_vt(result, "key", 20, seen, ["*.private.example.com", "private.example.com"])
+
+    assert looked_up == [["sub.example.com"]]
+    assert [record.target for record in result.records] == [
+        "private.example.com", "sub.example.com", "https://private.example.com/login",
+    ]
+
+
+def test_with_every_host_excluded_virustotal_is_not_called(seen: Recorder, monkeypatch: pytest.MonkeyPatch) -> None:
+    async def never(*_a: object, **_kw: object) -> list[vt.Reputation]:
+        raise AssertionError("VirusTotal was called")
+
+    monkeypatch.setattr(vt, "enrich", never)
+
+    steps.enrich_vt(PipelineResult(records=[_host()]), "key", 20, seen, ["*.example.com"])
+
+    assert seen.steps == []
+
+
+def test_post_scan_hands_the_exclusions_to_virustotal(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    passed: list[list[str]] = []
+    monkeypatch.setattr(steps, "check_tls", lambda *_a: None)
+    monkeypatch.setattr(steps, "enrich_vt", lambda _r, _k, _l, _o, exclude=(): passed.append(list(exclude)))
+    settings = Settings(root_dir=tmp_path, exclude=["*.internal.example.com"])
+
+    steps.post_scan(
+        PipelineResult(), seed="example.com", settings=settings, mail=False, takeover=False, intel=False,
+        vt_key="key", vt_limit=20, observer=RunObserver(),
+    )
+
+    assert passed == [["*.internal.example.com"]]

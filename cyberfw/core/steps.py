@@ -130,9 +130,12 @@ def rate_cves(result: PipelineResult, cache_dir: Path, observer: RunObserver) ->
         observer.on_step(StepEvent("done", "intel", summary=summary))
 
 
-def enrich_vt(result: PipelineResult, api_key: str, limit: int, observer: RunObserver) -> None:
-    """Append VirusTotal reputation records for the run's discovered targets."""
-    targets = vt.enrichment_targets(result.records)
+def enrich_vt(
+    result: PipelineResult, api_key: str, limit: int, observer: RunObserver, exclude: Sequence[str] = ()
+) -> None:
+    """Append VirusTotal reputation records for the run's in-scope discovered targets:
+    a host ``exclude`` keeps out of scope is never sent to VirusTotal."""
+    targets = [target for target in vt.enrichment_targets(result.records) if in_scope(target, exclude)]
     if not targets:
         return
     count = min(len(targets), limit)
@@ -164,7 +167,8 @@ def post_scan(
     observer: RunObserver,
 ) -> None:
     """The checks after the scan, in order: TLS always, the others when asked for
-    (VirusTotal only with a key). Each adds its records to ``result``."""
+    (VirusTotal only with a key). Each adds its records to ``result``; those that
+    reach out to a host or a third party keep ``settings.exclude`` out of scope."""
     check_tls(result, observer)
     if mail:
         check_mail(result, seed, observer)
@@ -173,4 +177,4 @@ def post_scan(
     if intel:
         rate_cves(result, settings.cache_dir, observer)
     if vt_key:
-        enrich_vt(result, vt_key, vt_limit, observer)
+        enrich_vt(result, vt_key, vt_limit, observer, settings.exclude)
