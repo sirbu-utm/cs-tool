@@ -435,8 +435,38 @@ def _run_block(path: Path) -> dict[str, Any] | None:
     return run if isinstance(run, dict) else None
 
 
-def _seed_key(seed: str) -> str:
-    return hostname_of(seed.strip()).lower().rstrip(".")
+#: Built-in tools that scan only the host (or domain) of their target: for a pipeline
+#: that starts with one, seeds naming one host are one scan.
+_HOST_SCOPED = frozenset({"subfinder", "naabu", "rustscan"})
+#: Ports a URL leaves unsaid.
+_DEFAULT_PORTS = {"http": 80, "https": 443}
+
+
+def _scan_scope(seed: str, root_tool: str | None) -> str:
+    """What ``seed`` makes a pipeline that starts with ``root_tool`` scan, as a key:
+    two seeds with one key are one scan.
+
+    A host-scanning root tool (subfinder, naabu, rustscan) scans the host; nmap the
+    host and a port the seed names; any other — a URL scanner, a plugin, a tool not
+    known here — its target whole: scheme, host, port, path and query, with the
+    host's case, a default port and a trailing slash not counting.
+    """
+    text = seed.strip()
+    try:
+        parts = urlsplit(text if "://" in text else f"//{text}")
+        port = parts.port
+    except ValueError:  # not a URL or a host[:port] — compare it as written
+        return text.lower()
+    host = (parts.hostname or "").rstrip(".")
+    if root_tool in _HOST_SCOPED:
+        return host
+    if root_tool == "nmap":
+        return f"{host}:{port}" if port else host
+    scheme = parts.scheme.lower()
+    netloc = host if port in (None, _DEFAULT_PORTS.get(scheme)) else f"{host}:{port}"
+    query = f"?{parts.query}" if parts.query else ""
+    target = f"{netloc}{parts.path.rstrip('/')}{query}"
+    return f"{scheme}://{target}" if scheme else target
 
 
 def _mtime(path: Path) -> float:
@@ -447,16 +477,30 @@ def _mtime(path: Path) -> float:
 
 
 def find_baseline(
-    reports_dir: Path, *, seed: str | None, pipeline: str | None, before: datetime | None
+    reports_dir: Path,
+    *,
+    seed: str | None,
+    pipeline: str | None,
+    before: datetime | None,
+    root_tool: str | None = None,
 ) -> Path | None:
-    """The newest earlier ``report.json`` of the same pipeline and seed target, or ``None``."""
+    """The newest earlier ``report.json`` of the same pipeline that scanned what
+    ``seed`` makes it scan, or ``None``. ``root_tool`` is the pipeline's first
+    stage's tool: it says which parts of the seed count (:func:`_scan_scope`) — the
+    host alone for a pipeline that starts with subfinder, the whole URL for one
+    that starts with nuclei. Not known, the whole target counts.
+    """
     if not seed or not pipeline or not reports_dir.is_dir():
         return None
-    want = _seed_key(seed)
+    want = _scan_scope(seed, root_tool)
     reports = sorted(reports_dir.glob("*/report.json"), key=_mtime, reverse=True)
     for path in reports:
         run = _run_block(path)
-        if run is None or run.get("pipeline") != pipeline or _seed_key(str(run.get("seed") or "")) != want:
+        if (
+            run is None
+            or run.get("pipeline") != pipeline
+            or _scan_scope(str(run.get("seed") or ""), root_tool) != want
+        ):
             continue
         started = _parse_time(run.get("started_at"))
         if before is not None and (started is None or started >= before):

@@ -221,16 +221,21 @@ def test_find_baseline_picks_the_newest_earlier_run_of_the_same_scan(tmp_path: P
     _save(tmp_path, "current", _doc(started="2026-10-09T10:00:00+00:00"), 4_000)
 
     now = diff._parse_time("2026-10-09T10:00:00+00:00")
-    assert diff.find_baseline(tmp_path, seed="example.com", pipeline="recon-to-vuln", before=now) == wanted
-    assert diff.find_baseline(tmp_path, seed="nobody.com", pipeline="recon-to-vuln", before=now) is None
-    assert diff.find_baseline(tmp_path / "missing", seed="example.com", pipeline="recon-to-vuln", before=now) is None
+    def baseline(reports: Path, seed: str) -> Path | None:
+        # recon-to-vuln starts with subfinder, which scans the domain alone.
+        return diff.find_baseline(reports, seed=seed, pipeline="recon-to-vuln", before=now, root_tool="subfinder")
+
+    assert baseline(tmp_path, "example.com") == wanted
+    assert baseline(tmp_path, "nobody.com") is None
+    assert baseline(tmp_path / "missing", "example.com") is None
 
 
 def test_find_baseline_reads_a_run_block_beyond_the_file_head(tmp_path: Path) -> None:
     doc = {"padding": "x" * 40_000, **_doc(started="2026-10-01T10:00:00+00:00")}  # run is past the 16 KiB head
     path = _save(tmp_path, "big", doc, 1_000)
     later = diff._parse_time("2026-10-02T00:00:00+00:00")
-    assert diff.find_baseline(tmp_path, seed="example.com", pipeline="recon-to-vuln", before=later) == path
+    assert diff.find_baseline(tmp_path, seed="example.com", pipeline="recon-to-vuln", before=later,
+                              root_tool="subfinder") == path
 
 
 def test_resolve_report_accepts_a_session_a_directory_or_a_file(tmp_path: Path) -> None:
@@ -259,3 +264,48 @@ def test_as_dict_is_the_report_json_block() -> None:
                                  "started_at": "2026-10-01T10:00:00+00:00"}
     assert block["summary"] == ["1 new subdomain"]
     assert block["changes"][0]["label"] == "new subdomain" and block["not_compared"] == []
+
+
+def test_a_url_pipeline_never_takes_a_run_of_another_port_or_path_as_its_baseline(tmp_path: Path) -> None:
+    # A pipeline that starts with nuclei scans the URL it is given, port and path and all.
+    admin = _save(tmp_path, "admin", _doc(started="2026-10-01T10:00:00+00:00", seed="https://example.com:8443/admin",
+                                          pipeline="web"), 1_000)
+    _save(tmp_path, "other", _doc(started="2026-10-02T10:00:00+00:00", seed="http://example.com:8080/other",
+                                  pipeline="web"), 2_000)
+    now = diff._parse_time("2026-10-09T10:00:00+00:00")
+
+    def baseline(seed: str) -> Path | None:
+        return diff.find_baseline(tmp_path, seed=seed, pipeline="web", before=now, root_tool="nuclei")
+
+    assert baseline("https://EXAMPLE.com:8443/admin/") == admin
+    assert baseline("https://example.com:9443/admin") is None
+    assert baseline("https://example.com:8443/other") is None
+    assert baseline("http://example.com:8443/admin") is None
+
+
+def test_a_url_s_default_port_is_the_same_scan(tmp_path: Path) -> None:
+    plain = _save(tmp_path, "plain", _doc(started="2026-10-01T10:00:00+00:00", seed="https://example.com",
+                                          pipeline="web"), 1_000)
+    now = diff._parse_time("2026-10-09T10:00:00+00:00")
+
+    assert diff.find_baseline(tmp_path, seed="https://example.com:443/", pipeline="web", before=now,
+                              root_tool="httpx") == plain
+
+
+def test_a_pipeline_of_an_unknown_root_tool_compares_whole_targets(tmp_path: Path) -> None:
+    _save(tmp_path, "admin", _doc(started="2026-10-01T10:00:00+00:00", seed="https://example.com/admin",
+                                  pipeline="custom"), 1_000)
+    now = diff._parse_time("2026-10-09T10:00:00+00:00")
+
+    for root_tool in (None, "my-plugin-scanner"):
+        assert diff.find_baseline(tmp_path, seed="https://example.com/login", pipeline="custom", before=now,
+                                  root_tool=root_tool) is None
+
+
+def test_a_host_scanning_pipeline_still_matches_one_host_however_it_is_written(tmp_path: Path) -> None:
+    ports = _save(tmp_path, "ports", _doc(started="2026-10-01T10:00:00+00:00", seed="https://Example.com:8443/x",
+                                          pipeline="ports-to-vuln"), 1_000)
+    now = diff._parse_time("2026-10-09T10:00:00+00:00")
+
+    assert diff.find_baseline(tmp_path, seed="example.com.", pipeline="ports-to-vuln", before=now,
+                              root_tool="naabu") == ports

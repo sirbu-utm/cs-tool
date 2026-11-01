@@ -51,13 +51,20 @@ def compare_with_earlier(
     result: PipelineResult, run: RunInfo, reports_dir: Path, explicit: str | None, observer: RunObserver
 ) -> RunDiff | None:
     """Compare this run with an earlier one — the one named, else the newest
-    earlier run of the same pipeline and seed. A first scan has nothing to compare
+    earlier run of the same pipeline that scanned the same target (its first
+    stage's tool says which parts of the seed count). A first scan has nothing to compare
     with and sends no events; the changes go out with the ``compare`` step's ``done``."""
     try:
         if explicit:
             path: Path | None = rundiff.resolve_report(explicit, reports_dir)
         else:
-            path = rundiff.find_baseline(reports_dir, seed=run.seed, pipeline=run.pipeline, before=result.started_at)
+            path = rundiff.find_baseline(
+                reports_dir,
+                seed=run.seed,
+                pipeline=run.pipeline,
+                before=result.started_at,
+                root_tool=result.nodes[0].node.tool if result.nodes else None,
+            )
     except (FileNotFoundError, ValueError) as exc:
         observer.on_note(Note("warn", f"Not compared with an earlier run: {exc}"))
         return None

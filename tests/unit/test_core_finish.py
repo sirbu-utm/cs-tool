@@ -179,3 +179,22 @@ def test_opening_a_session_refuses_a_name_that_is_not_plain(tmp_path: Path, name
         open_session(reports, kind="pipeline", name="scan", session=name, stream=True)
 
     assert not (tmp_path / "outside").exists() and not reports.exists()
+
+
+def test_a_url_scan_is_compared_only_with_a_run_of_the_same_url(settings: Settings, manager: ToolManager) -> None:
+    """report.json records the seed; a run of another port or path of the same host
+    is another scan, and is never its baseline."""
+
+    def finish(seed: str, minutes_ago: int, seen: RunObserver) -> Finished:
+        run_session = open_session(settings.reports_dir, kind="pipeline", name="web", session=None, stream=True)
+        return finalize(
+            _scan(minutes_ago, ("xss", "medium")), manager=manager, settings=settings, name="web", seed=seed,
+            tools={"nuclei"}, session=run_session, compare=True, baseline=None, save=True, observer=seen,
+        )
+
+    finish("https://example.com:8443/admin", 10, Recorder())
+    other, same = Recorder(), Recorder()
+
+    assert finish("https://example.com:8080/other", 5, other).changes is None
+    assert finish("https://example.com:8443/admin/", 1, same).changes is not None
+    assert other.events == [] and same.events == ["compare:start", "compare:done"]
