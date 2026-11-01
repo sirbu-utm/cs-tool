@@ -66,12 +66,13 @@ def enable_plugin(settings: Settings, package: str, *, allow_code: bool = False)
         known = ", ".join(sorted({point.package for point in declared})) or "none is installed"
         raise UnknownPackage(f"no installed package {package!r} declares cyberfw tools (those that do: {known})")
     code = any(point.kind == "code" for point in own)
-    if code and not allow_code:
+    current = read_plugins_file(settings.plugins_file)
+    allowed = name in current.enabled and name in current.allow_code  # the decision was made before
+    if code and not (allow_code or allowed):
         raise CodeNotAllowed(
             f"{name} ships Python that would run inside cyberfw, with access to everything cyberfw can "
             f"reach — your files, tokens and network. If you trust it: `cyberfw plugins enable {name} --allow-code`"
         )
-    current = read_plugins_file(settings.plugins_file)
     wanted = PluginsFile(
         enabled=current.enabled | {name},
         allow_code=current.allow_code | ({name} if code else frozenset()),

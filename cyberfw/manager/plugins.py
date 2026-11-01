@@ -113,11 +113,14 @@ def read_plugins_file(path: Path) -> PluginsFile:
 
 def write_plugins_file(path: Path, chosen: PluginsFile) -> None:
     """Write ``chosen`` to ``plugins.yaml`` at ``path`` whole or not at all — a temp
-    file, then ``os.replace``. Raises :class:`PluginError` when it cannot be written."""
+    file, then ``os.replace`` — making its directory first (a wheel install's
+    per-user workspace may not exist yet). Raises :class:`PluginError` when it
+    cannot be written."""
     document = {"enabled": sorted(chosen.enabled), "allow_code": sorted(chosen.allow_code)}
     text = "# managed by `cyberfw plugins enable/disable`\n" + yaml.safe_dump(document, sort_keys=False)
     tmp = path.with_name(path.name + ".tmp")
     try:
+        path.parent.mkdir(parents=True, exist_ok=True)
         tmp.write_text(text, encoding="utf-8", newline="\n")
         os.replace(tmp, path)
     except OSError as exc:

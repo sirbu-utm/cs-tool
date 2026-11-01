@@ -2,18 +2,21 @@
 
 from __future__ import annotations
 
+import io
 import json
 from pathlib import Path
 
 import pytest
 import yaml
+from rich.console import Console
 from typer.testing import Result
 
-from cyberfw.cli import app, launcher
-from cyberfw.config import load_settings
+from cyberfw.cli import app, launcher, views
+from cyberfw.config import Settings, load_settings
 from cyberfw.core import plugins as enabling
 from cyberfw.core.workspace import open_manager
 from cyberfw.exceptions import PluginError
+from cyberfw.logging import THEME
 from cyberfw.manager import plugins
 
 from . import test_cli as base
@@ -142,8 +145,10 @@ def test_plugins_yaml_is_written_whole_and_reads_back(tmp_path: Path) -> None:
 
 
 def test_a_plugins_yaml_that_cannot_be_written_is_a_plugin_error(tmp_path: Path) -> None:
+    (tmp_path / "a-file").write_text("", encoding="utf-8")
+
     with pytest.raises(PluginError, match="cannot be written"):
-        plugins.write_plugins_file(tmp_path / "missing-dir" / "plugins.yaml", plugins.PluginsFile())
+        plugins.write_plugins_file(tmp_path / "a-file" / "plugins.yaml", plugins.PluginsFile())
 
 
 # -- the plugins command ---------------------------------------------------------------------
@@ -178,11 +183,13 @@ def test_plugins_lists_each_tool_with_its_package_kind_env_state_and_reason(site
 
     assert result.exit_code == 0, result.stdout
     rows = {line.split()[0]: line.split() for line in result.stdout.splitlines() if line.startswith("cyberfw-")}
-    assert rows["cyberfw-sample"][:6] == ["cyberfw-sample", "1.0", "manifest", "sample", "—", "disabled"]
-    assert rows["cyberfw-bar"][:6] == ["cyberfw-bar", "1.0", "code", "bar", "—", "disabled"]
-    # A disabled manifest's env: is read from its YAML — reading runs nothing.
-    assert rows["cyberfw-keyed"][:6] == ["cyberfw-keyed", "1.0", "manifest", "keyed", "KEYED_TOKEN", "disabled"]
-    assert "enableitwith`cyberfwpluginsenablecyberfw-sample`" in _squashed(result)
+    assert rows["cyberfw-sample"][:5] == ["cyberfw-sample", "1.0", "manifest", "sample", "disabled"]
+    assert rows["cyberfw-bar"][:5] == ["cyberfw-bar", "1.0", "code", "bar", "disabled"]
+    assert rows["cyberfw-keyed"][:5] == ["cyberfw-keyed", "1.0", "manifest", "keyed", "disabled"]
+    # Under the table, a line per tool: its env: (a disabled manifest's is read from
+    # its YAML — reading runs nothing) and why it is not in use.
+    assert "keyed: env KEYED_TOKEN — enable it with `cyberfw plugins enable cyberfw-keyed`" in _text(result)
+    assert "sample: enable it with `cyberfw plugins enable cyberfw-sample`" in _text(result)
 
 
 def test_with_no_plugin_installed_plugins_says_how_to_add_one(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -198,7 +205,7 @@ def test_enable_loads_the_package_and_shows_its_tools(workspace: Path) -> None:
     result = _plugins("enable", "cyberfw-sample")
 
     assert result.exit_code == 0, result.stdout
-    assert _text(result).startswith("Enabled cyberfw-sample. kind tool env state reason manifest sample — enabled")
+    assert _text(result).startswith("Enabled cyberfw-sample. kind tool state manifest sample enabled")
     assert _file(workspace).enabled == {"cyberfw-sample"}
 
 
@@ -340,3 +347,101 @@ def test_a_run_of_built_in_tools_records_no_plugins(workspace: Path) -> None:
 
     assert result.exit_code == 0, result.stdout
     assert "tool_plugins" not in _run_block(workspace, "s2")
+
+
+# -- final review: narrow terminals, a fresh install, a broken plugins.yaml, re-enabling -----
+#: A manifest package with a realistic, long name and a variable of its own.
+WAPPALYZER = KEYED.replace("acme/keyed", "acme/wappalyzer").replace("keyed", "wappalyzer").replace(
+    "KEYED_TOKEN", "WAPPALYZER_API_KEY"
+)
+
+
+def test_on_80_columns_the_plugin_table_keeps_names_and_states_whole(workspace: Path, site: Path) -> None:
+    install(site, "cyberfw-wappalyzer", version="2.4.1", manifests={"wappalyzer": "cyberfw_wappalyzer"},
+            files={"cyberfw_wappalyzer/wappalyzer.yaml": WAPPALYZER})
+    # cyberfw-bar enabled by hand, without its code allowed: the longest state there is.
+    (workspace / "plugins.yaml").write_text("enabled: [cyberfw-bar]\n", encoding="utf-8")
+
+    result = _plugins()
+
+    assert result.exit_code == 0, result.stdout
+    words = _text(result).split()
+    assert {"cyberfw-wappalyzer", "2.4.1", "code-not-allowed", "disabled"} <= set(words)
+    # An env: and a reason are a line of their own: a variable or a command can be copied whole.
+    assert "wappalyzer: env WAPPALYZER_API_KEY — enable it with `cyberfw plugins enable cyberfw-wappalyzer`" in _text(
+        result
+    )
+    assert "`cyberfw plugins enable cyberfw-bar --allow-code`" in _text(result)
+
+
+def test_without_plugin_tools_the_tool_inventory_has_no_origin_column() -> None:
+    def headers() -> list[str]:
+        manager = open_manager(load_settings())
+        try:
+            rows = views._tool_rows(manager, manager.settings.tools_dir)
+        finally:
+            manager.close()
+        return [str(column.header) for column in views._tools_table(rows, numbered=False, capability=False).columns]
+
+    without = headers()
+    _plugins("enable", "cyberfw-sample")
+
+    assert "origin" not in without
+    assert "origin" in headers()
+
+
+def test_the_launcher_without_plugins_shows_every_cell_whole_at_100_columns(workspace: Path) -> None:
+    manager = open_manager(load_settings())
+    try:
+        rows = views._tool_rows(manager, manager.settings.tools_dir)
+    finally:
+        manager.close()
+    screen = Console(width=100, record=True, file=io.StringIO(), force_terminal=False, theme=THEME)
+
+    screen.print(launcher._LauncherView(rows, load_settings()))
+
+    assert "…" not in screen.export_text()
+
+
+def test_status_on_80_columns_keeps_tool_names_and_states_whole_beside_a_long_plugin_name(
+    workspace: Path, site: Path
+) -> None:
+    katana = SAMPLE.replace("acme/sample", "acme/katana").replace("binary: sample", "binary: katana")
+    install(site, "cyberfw-projectdiscovery-katana", version="1.12.0", manifests={"katana": "cyberfw_katana"},
+            files={"cyberfw_katana/katana.yaml": katana})
+    base.TestBaselineComparison._tool_prints(workspace, "katana", {"url": "https://k.example.com/", "status_code": 200})
+    _plugins("enable", "cyberfw-projectdiscovery-katana")
+
+    result = base.runner.invoke(app, ["status"])
+
+    assert result.exit_code == 0, result.stdout
+    for tool in ("subfinder", "katana"):  # _row finds a tool by its whole name
+        assert "■ ready" in _row(result, tool), _row(result, tool)
+
+
+def test_enabling_creates_the_workspace_directory_when_it_is_not_there_yet(tmp_path: Path) -> None:
+    # A wheel install's workspace is a per-user directory nothing has made yet.
+    fresh = tmp_path / "fresh" / "cyberfw"
+
+    result = enabling.enable_plugin(Settings(root_dir=fresh), "cyberfw-sample")
+
+    assert result.working
+    assert plugins.read_plugins_file(fresh / "plugins.yaml").enabled == {"cyberfw-sample"}
+
+
+def test_plugins_says_when_plugins_yaml_cannot_be_read_and_exits_2(workspace: Path) -> None:
+    (workspace / "plugins.yaml").write_text("enabled: [cyberfw-sample\n", encoding="utf-8")
+
+    result = _plugins()
+
+    assert result.exit_code == 2
+    assert "not valid YAML" in _text(result)
+
+
+def test_enabling_an_allowed_code_package_again_needs_no_flag() -> None:
+    _plugins("enable", "cyberfw-bar", "--allow-code")
+
+    again = _plugins("enable", "cyberfw-bar")
+
+    assert again.exit_code == 0, again.stdout
+    assert _text(again).startswith("cyberfw-bar: already enabled")

@@ -24,7 +24,7 @@ from cyberfw.cli.common import (
 )
 from cyberfw.cli.scan import pipeline_cmd, run_cmd
 from cyberfw.cli.tools import _ensure_tools
-from cyberfw.cli.views import _tool_rows, _ToolRow, _tools_table
+from cyberfw.cli.views import _origin_width, _tool_rows, _ToolRow, _tools_table
 from cyberfw.config import Settings, load_settings
 from cyberfw.core.workspace import tool_state
 from cyberfw.exceptions import (
@@ -378,7 +378,7 @@ class _LauncherView:
 
     def __rich_console__(self, console: Console, options: ConsoleOptions) -> RenderResult:
         names = [row.name for row in self.rows]
-        wide = options.max_width >= 100
+        wide = options.max_width >= 100 + _origin_width(self.rows)  # room for capability, beside an origin too
         key_items = [
             keycap(_tool_range(names), "select tool"),
             keycap(_PIPELINE_KEY, "run pipeline"),

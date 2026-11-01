@@ -480,10 +480,29 @@ def _tool_rows(manager: ToolManager, tools_dir: Path, states: list[str] | None =
     ]
 
 
-def _tools_table(rows: list[_ToolRow], *, numbered: bool, capability: bool, reveal: float = 1.0) -> Table:
-    """The tool inventory: number, tool, what it does, version, state, source, origin.
+#: The widest origin the inventory shows whole; a longer one ends in an ellipsis.
+_ORIGIN_MAX = 28
 
-    A tool that cannot run is greyed out with ``muted``: a real grey, not
+
+def _origin_shown(rows: list[_ToolRow]) -> bool:
+    """The inventory has an origin column only when a plugin tool is in it: for
+    built-in tools alone it would say ``built-in`` on every row."""
+    return any(row.origin != "built-in" for row in rows)
+
+
+def _origin_width(rows: list[_ToolRow]) -> int:
+    """The cells the origin column adds to the inventory's width — none without a plugin tool."""
+    if not _origin_shown(rows):
+        return 0
+    return min(_ORIGIN_MAX, max(len(row.origin) for row in rows)) + 3
+
+
+def _tools_table(rows: list[_ToolRow], *, numbered: bool, capability: bool, reveal: float = 1.0) -> Table:
+    """The tool inventory: number, tool, what it does, version, state, source — and,
+    with a plugin tool among them, where each tool comes from.
+
+    Beside an origin, the names and states keep their width on a narrow terminal and
+    the origin gives way first. A tool that cannot run is greyed out with ``muted``: a real grey, not
     ``dim``, which the classic Windows console ignores, and not bright black,
     which Solarized Dark draws in its background colour. On the classic
     console Rich lowers the grey to bright black itself. ``reveal`` below 1 is a
@@ -491,16 +510,18 @@ def _tools_table(rows: list[_ToolRow], *, numbered: bool, capability: bool, reve
     newest one lit; a row not in yet is blank but as wide as it will be, so the
     columns stand still.
     """
+    origin = _origin_shown(rows)
     table = hud_table()
     if numbered:
         table.add_column("#", justify="right", no_wrap=True, width=2)
-    table.add_column("tool", no_wrap=True)
+    table.add_column("tool", no_wrap=True, min_width=max(len(row.name) for row in rows) if origin else None)
     if capability:
         table.add_column("capability", no_wrap=True, overflow="ellipsis")
     table.add_column("version", style="muted", no_wrap=True)
-    table.add_column("state", no_wrap=True)
+    table.add_column("state", no_wrap=True, min_width=max(len(row.state) + 2 for row in rows) if origin else None)
     table.add_column("source", style="muted", no_wrap=True, overflow="ellipsis")
-    table.add_column("origin", style="muted", no_wrap=True)
+    if origin:
+        table.add_column("origin", style="muted", no_wrap=True, overflow="ellipsis", max_width=_ORIGIN_MAX)
     shown = len(rows) if reveal >= 1 else int(len(rows) * max(reveal, 0.0))
     for index, row in enumerate(rows, start=1):
         ready = row.state == "ready"
@@ -515,7 +536,7 @@ def _tools_table(rows: list[_ToolRow], *, numbered: bool, capability: bool, reve
             Text(row.version or "—"),
             pip_word(row.state, state_style(row.state)),
             Text(row.repo),
-            Text(row.origin),
+            *([Text(row.origin)] if origin else []),
         ]
         if index > shown:
             cells = [Text(" " * cell.cell_len) for cell in cells]
@@ -561,7 +582,8 @@ def _status_view(
     tools_dir.add_column(ratio=1)
     tools_dir.add_row("tools dir", PathText(settings.tools_dir))
     tools_dir.add_row("plugins", Text(_plugins_line(plugins)))
-    tools = ByWidth(lambda width: Group(_tools_table(rows, numbered=False, capability=width >= 100), tools_dir))
+    roomy = 100 + _origin_width(rows)  # the capability column's room, beside an origin column too
+    tools = ByWidth(lambda width: Group(_tools_table(rows, numbered=False, capability=width >= roomy), tools_dir))
 
     deps = hud_table()
     deps.add_column("dependency", style="tool", no_wrap=True)
