@@ -252,8 +252,10 @@ class ToolInstaller:
 
     def _swap_in(self, staging: Path, tool_dir: Path) -> None:
         """Put the unpacked new version in ``tool_dir``'s place: the installed one moves
-        aside first and is removed after, and a swap that fails puts it back. (Windows
-        renames a directory even while a tool inside it runs.)"""
+        aside first and is removed after, and a swap that fails — or is interrupted —
+        puts it back. If even that fails, it stays aside, and the next install puts it
+        back first (:meth:`_clear_leftovers`). (Windows renames a directory even while
+        a tool inside it runs.)"""
         previous: Path | None = None
         if tool_dir.exists():
             previous = tool_dir.with_name(f".{tool_dir.name}.previous-{uuid.uuid4().hex[:8]}")
@@ -265,18 +267,34 @@ class ToolInstaller:
                 ) from exc
         try:
             staging.rename(tool_dir)
-        except OSError as exc:
+        except BaseException as exc:
             if previous is not None:
-                previous.rename(tool_dir)
-            raise DownloadError(f"could not put the new {tool_dir.name} in place: {exc}") from exc
+                try:
+                    previous.rename(tool_dir)
+                except OSError as undo:
+                    LOG.warning(
+                        "%s: the installed version stays in %s (%s)", tool_dir.name, previous.name, undo
+                    )
+            if isinstance(exc, OSError):
+                raise DownloadError(
+                    f"could not put the new {tool_dir.name} in place: {exc}"
+                ) from exc
+            raise
         if previous is not None:
             self._remove_tree(previous)
 
     def _clear_leftovers(self, spec: ToolSpec) -> None:
-        """Remove what an interrupted earlier install of this tool left beside it."""
-        for pattern in (f".{spec.name}.staging-*", f".{spec.name}.previous-*"):
-            for path in list(self.tools_dir.glob(pattern)):
+        """Undo what an interrupted earlier install of this tool left beside it: an
+        installed version it had moved aside goes back in place when nothing took
+        that place; anything else is removed."""
+        tool_dir = self.tools_dir / spec.name
+        for path in sorted(self.tools_dir.glob(f".{spec.name}.previous-*")):
+            if not tool_dir.exists():
+                path.rename(tool_dir)
+            else:
                 self._remove_tree(path)
+        for path in list(self.tools_dir.glob(f".{spec.name}.staging-*")):
+            self._remove_tree(path)
 
     def _remove_tree(self, path: Path) -> None:
         """Remove ``path``: a file, or a directory and everything in it.

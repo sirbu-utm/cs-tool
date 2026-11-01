@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import io
+import os
 import struct
 import tarfile
 import zipfile
@@ -11,6 +12,7 @@ from pathlib import Path
 
 import pytest
 
+from cyberfw.core.workspace import binary_on_disk
 from cyberfw.exceptions import ChecksumError, DownloadError, ToolNotFoundError
 from cyberfw.manager.github_client import GitHubRelease, ReleaseAsset
 from cyberfw.manager.installer import InstallResult, ToolInstaller, select_asset
@@ -580,3 +582,89 @@ class TestAFailedUpdateKeepsTheInstalledVersion:
         assert result.binary == running.resolve()
         assert result.binary.read_bytes() == b"#!/bin/sh\necho new\n"
         assert ensure_binary(installer.tools_dir, "naabu", "naabu") == running
+
+    def test_an_interrupted_swap_puts_the_installed_version_back(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        archive = _zip_bytes({"subfinder": b"#!/bin/sh\necho new\n"})
+        installer = _installer(tmp_path, _FakeClient(archive))
+        tool_dir = self._installed(installer)
+        real_rename = Path.rename
+
+        def interrupted(self: Path, target: str | Path) -> Path:
+            if self.name.startswith(".subfinder.staging-"):
+                raise KeyboardInterrupt
+            return real_rename(self, target)
+
+        monkeypatch.setattr(Path, "rename", interrupted)
+
+        with pytest.raises(KeyboardInterrupt):
+            _install(installer, _spec(), archive, _SUBFINDER_ZIP)
+
+        self._assert_untouched(installer, tool_dir)
+
+    def test_a_swap_that_cannot_be_undone_reports_why_it_failed_and_keeps_the_old_copy(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        archive = _zip_bytes({"subfinder": b"#!/bin/sh\necho new\n"})
+        installer = _installer(tmp_path, _FakeClient(archive))
+        self._installed(installer)
+        real_rename = Path.rename
+
+        def stuck(self: Path, target: str | Path) -> Path:
+            if self.name.startswith((".subfinder.staging-", ".subfinder.previous-")):
+                raise PermissionError(13, "Permission denied")
+            return real_rename(self, target)
+
+        monkeypatch.setattr(Path, "rename", stuck)
+
+        with pytest.raises(DownloadError, match="could not put the new subfinder in place"):
+            _install(installer, _spec(), archive, _SUBFINDER_ZIP)
+
+        aside = list(installer.tools_dir.glob(".subfinder.previous-*"))
+        assert len(aside) == 1 and (aside[0] / "subfinder").read_bytes() == self._OLD
+
+    def test_an_installed_version_left_aside_by_a_cut_short_install_is_put_back_not_deleted(
+        self, tmp_path: Path
+    ) -> None:
+        # An install killed between its two renames leaves the installed version in
+        # ``.<tool>.previous-*`` and no ``<tool>/``: the next install puts it back first,
+        # so even if that one fails too, the tool is there.
+        archive = b"PK\x03\x04 definitely not a zip"
+        installer = _installer(tmp_path, _FakeClient(archive))
+        tool_dir = self._installed(installer)
+        tool_dir.rename(installer.tools_dir / ".subfinder.previous-0badc0de")
+
+        with pytest.raises(DownloadError):
+            _install(installer, _spec(), archive, _SUBFINDER_ZIP)
+
+        self._assert_untouched(installer, tool_dir)
+
+
+class TestInstallLeftoversAreNeverTheTool:
+    """A ``.<tool>.staging-*`` or ``.<tool>.previous-*`` directory holds a copy of the
+    binary while an install runs, or after one was cut short: it is never the tool."""
+
+    @staticmethod
+    def _binary(directory: Path) -> Path:
+        directory.mkdir(parents=True)
+        path = directory / ("naabu.exe" if os.name == "nt" else "naabu")
+        path.write_bytes(b"#!/bin/sh\necho hi\n")
+        path.chmod(0o755)
+        return path
+
+    def test_the_installed_binary_wins_over_install_leftovers(self, tmp_path: Path) -> None:
+        tools = tmp_path / "tools_bin"
+        self._binary(tools / ".naabu.staging-1a2b3c4d")
+        self._binary(tools / ".naabu.previous-5e6f7a8b")
+        installed = self._binary(tools / "naabu")
+
+        assert ensure_binary(tools, "naabu", "naabu") == installed
+
+    def test_leftovers_alone_are_no_installed_tool(self, tmp_path: Path) -> None:
+        tools = tmp_path / "tools_bin"
+        self._binary(tools / ".naabu.staging-1a2b3c4d")
+
+        with pytest.raises(ToolNotFoundError):
+            ensure_binary(tools, "naabu", "naabu")
+        assert not binary_on_disk(tools, "naabu", "naabu")

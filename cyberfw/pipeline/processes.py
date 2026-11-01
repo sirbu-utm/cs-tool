@@ -5,13 +5,20 @@ workers — and stopping only the process cyberfw launched leaves the rest runni
 still scanning. So each tool runs in a group of its own — a new session (its own
 process group) on POSIX, a Job Object on Windows — and stopping the tool stops
 the group.
+
+On POSIX a tool in a session of its own is out of the terminal's reach: a closed
+terminal, ``kill``, ``timeout`` or Ctrl+Z reaches cyberfw alone. A run therefore
+takes those signals over (:func:`stopping_tools_on_signals`) and passes them on.
 """
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import os
 import signal
 import sys
+from collections.abc import Iterator
 from typing import Any
 
 from cyberfw.logging import get_logger
@@ -21,6 +28,10 @@ LOG = get_logger("executor")
 #: CreateProcess flag: the process starts with its main thread suspended, so it is in
 #: its job before it runs a single instruction — let alone starts a child.
 _CREATE_SUSPENDED = 0x00000004
+
+#: POSIX: the process groups of the tools running now, for the signals a whole run
+#: shares with them (Ctrl+Z pauses them along with cyberfw).
+_LIVE: set[int] = set()
 
 
 class ProcessGroup:
@@ -49,29 +60,62 @@ class ProcessGroup:
             self._job = _adopt_into_job(pid)
         else:
             self._pgid = pid  # start_new_session made it the leader of a group of its own
+            _LIVE.add(pid)
 
-    def terminate(self) -> None:
+    def terminate(self) -> bool:
         """Ask every process in the group to exit: SIGTERM on POSIX. Windows has no
-        such request, so there the whole job is ended at once."""
+        such request, so there the whole job is ended at once. False when there is no
+        group to reach (a tool outside a Job Object): then stop its own process."""
         if sys.platform == "win32":
-            self.kill()
-        elif self._pgid is not None:
+            return self.kill()
+        else:
+            if self._pgid is None:
+                return False
             _signal_group(self._pgid, signal.SIGTERM)
+            return True
 
-    def kill(self) -> None:
-        """End every process still in the group, at once."""
+    def kill(self) -> bool:
+        """End every process still in the group, at once; False when there is no group."""
         if sys.platform == "win32":
-            if self._job is not None:
-                _kernel32.TerminateJobObject(self._job, 1)
-        elif self._pgid is not None:
+            if self._job is None:
+                return False
+            _kernel32.TerminateJobObject(self._job, 1)
+            return True
+        else:
+            if self._pgid is None:
+                return False
             _signal_group(self._pgid, signal.SIGKILL)
+            return True
 
     def close(self) -> None:
-        """End whatever the tool left running and let go of the group."""
+        """End whatever the tool left running and let go of the group: a second
+        ``close`` — or a ``kill`` after it — signals nothing."""
         self.kill()
         if sys.platform == "win32" and self._job is not None:
             _kernel32.CloseHandle(self._job)
+        if self._pgid is not None:
+            _LIVE.discard(self._pgid)
         self._job = self._pgid = None
+
+
+@contextlib.contextmanager
+def stopping_tools_on_signals() -> Iterator[None]:
+    """For the run inside, take over the signals that would end or pause cyberfw.
+
+    SIGTERM, SIGHUP and SIGQUIT (``kill``, ``timeout``, a closed terminal, Ctrl+\\)
+    cancel the running task, as Ctrl+C does — each ``run_stage`` then stops its tool's
+    group — and once that is done the signal is delivered again, to end cyberfw as it
+    would have. Ctrl+Z pauses the tools along with cyberfw, and ``fg`` resumes both.
+
+    POSIX, and the main thread, only: elsewhere it does nothing (on Windows a Job
+    Object ends the tools with cyberfw). A signal cyberfw's caller ignores (``nohup``)
+    or handles itself is left as it is.
+    """
+    if sys.platform == "win32":
+        yield
+    else:
+        with _taking_over_signals():
+            yield
 
 
 if sys.platform == "win32":
@@ -184,3 +228,46 @@ else:
             os.killpg(pgid, signum)
         except (ProcessLookupError, PermissionError):
             pass
+
+    def _signal_live(signum: signal.Signals) -> None:
+        """Send ``signum`` to every tool's group running now."""
+        for pgid in list(_LIVE):
+            _signal_group(pgid, signum)
+
+    @contextlib.contextmanager
+    def _taking_over_signals() -> Iterator[None]:
+        """:func:`stopping_tools_on_signals` on POSIX."""
+        loop = asyncio.get_running_loop()
+        task = asyncio.current_task()
+        received: list[signal.Signals] = []
+        taken: list[signal.Signals] = []
+
+        def end(signum: signal.Signals) -> None:
+            if not received and task is not None:
+                received.append(signum)
+                task.cancel()
+
+        def pause() -> None:
+            _signal_live(signal.SIGSTOP)
+            loop.remove_signal_handler(signal.SIGTSTP)
+            os.kill(os.getpid(), signal.SIGTSTP)  # cyberfw stops here, until SIGCONT
+            loop.add_signal_handler(signal.SIGTSTP, pause)
+            _signal_live(signal.SIGCONT)
+
+        try:
+            for signum in (signal.SIGTERM, signal.SIGHUP, signal.SIGQUIT, signal.SIGTSTP):
+                if signal.getsignal(signum) is signal.SIG_DFL:
+                    if signum == signal.SIGTSTP:
+                        loop.add_signal_handler(signum, pause)
+                    else:
+                        loop.add_signal_handler(signum, end, signum)
+                    taken.append(signum)
+        except (RuntimeError, ValueError):  # not the main thread: nothing to take over
+            pass
+        try:
+            yield
+        finally:
+            for signum in taken:
+                loop.remove_signal_handler(signum)  # back to SIG_DFL, as it was
+            if received:
+                os.kill(os.getpid(), received[0])  # and now it ends cyberfw, as it would have

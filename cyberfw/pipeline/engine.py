@@ -38,6 +38,7 @@ from cyberfw.pipeline.context import (
     stage_file_name,
 )
 from cyberfw.pipeline.executor import run_stage, tool_environment
+from cyberfw.pipeline.processes import stopping_tools_on_signals
 from cyberfw.pipeline.schemas import ToolRecord
 from cyberfw.plugin import BaseTool, ScanControls, ToolContext
 from cyberfw.tools.targets import hostname_of, in_scope
@@ -234,8 +235,15 @@ class PipelineEngine:
         wants it; stages that don't consume it simply ignore it. The aggregate
         keeps the nodes and their records in plan order, so a run reads
         top-to-bottom and reproduces however the stages happen to interleave.
+        A signal that would end cyberfw stops the tools first
+        (:func:`~cyberfw.pipeline.processes.stopping_tools_on_signals`).
         """
         self._validate_wiring(nodes)
+        with stopping_tools_on_signals():
+            return await self._run_graph(nodes, seed, extra_input)
+
+    async def _run_graph(self, nodes: list[Node], seed: str | None, extra_input: str | None) -> PipelineResult:
+        """:meth:`run`, its wiring checked."""
         self._proc_sem = None  # a fresh budget, built on this loop at this concurrency
         result = PipelineResult(started_at=datetime.now(timezone.utc))
         # Resolve each stage's single upstream dependency: its ``input_from``,
@@ -353,9 +361,10 @@ class PipelineEngine:
         pipeline stage; ``ctx.inputs`` plays the role of the previous stage.
         """
         self._proc_sem = None  # a fresh budget, built on this loop at this concurrency
-        return await self._run_node(
-            node, ctx.target, ctx.inputs, parse=parse, extra_input=ctx.extra_input
-        )
+        with stopping_tools_on_signals():
+            return await self._run_node(
+                node, ctx.target, ctx.inputs, parse=parse, extra_input=ctx.extra_input
+            )
 
     def _proc_semaphore(self) -> asyncio.Semaphore:
         """The shared tool-process budget, created lazily on the running loop.

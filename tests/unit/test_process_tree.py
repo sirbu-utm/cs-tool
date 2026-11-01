@@ -10,8 +10,11 @@ from __future__ import annotations
 
 import asyncio
 import os
+import signal
+import subprocess
 import sys
 import time
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -146,3 +149,170 @@ async def test_a_tool_runs_even_where_no_job_object_can_hold_it(
     )
 
     assert [record.target for record in records] == ["x.example.com"]
+
+
+async def test_a_child_left_holding_the_tool_s_output_is_stopped_once_the_tool_has_exited(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The tool's output stays open while a process it left behind holds it: once the
+    tool has exited, that process gets a grace period, then goes with the group — the
+    stage does not wait for it, however long it would run."""
+    monkeypatch.setattr("cyberfw.pipeline.executor._LEFTOVER_GRACE", 0.5, raising=False)
+    started, late = tmp_path / "child_started", tmp_path / "child_late"
+    child = tmp_path / "child.py"
+    child.write_text(
+        "import pathlib, time\n"
+        "print('from the child', flush=True)\n"
+        f"pathlib.Path({str(started)!r}).write_text(str(time.time() + 3.0))\n"
+        "time.sleep(3.0)\n"
+        f"pathlib.Path({str(late)!r}).write_text('late')\n",
+        encoding="utf-8",
+    )
+    tool = tmp_path / "tool.py"
+    tool.write_text(
+        "import pathlib, subprocess, sys, time\n"
+        f"subprocess.Popen([sys.executable, {str(child)!r}], stdout=sys.stdout)  # the tool's own output\n"
+        f"while not pathlib.Path({str(started)!r}).exists():\n"
+        "    time.sleep(0.02)\n",
+        encoding="utf-8",
+    )
+
+    records = await asyncio.wait_for(
+        run_stage([_bare_python(), str(tool)], tool="x", stage="s", context=None, parse=False), 30
+    )
+
+    assert [record.raw for record in records] == ["from the child"]
+    await _assert_the_child_was_stopped(started, late)
+
+
+async def test_stopping_a_tool_in_a_group_signals_the_group_and_not_the_tool_again() -> None:
+    """A tool that flushes on SIGTERM and quits at once on a second one must get one."""
+    from cyberfw.pipeline.executor import _stop
+
+    sent: list[str] = []
+
+    class Group:
+        def terminate(self) -> bool:
+            sent.append("group: SIGTERM")
+            return True
+
+        def kill(self) -> bool:
+            sent.append("group: SIGKILL")
+            return True
+
+    class Tool:
+        returncode: int | None = None
+
+        def terminate(self) -> None:
+            sent.append("tool: SIGTERM")
+
+        async def wait(self) -> int:
+            self.returncode = -15
+            return -15
+
+    await _stop(Tool(), Group())  # type: ignore[arg-type]
+
+    assert sent == ["group: SIGTERM", "group: SIGKILL"]
+
+
+# -- signals that would end cyberfw (POSIX) ----------------------------------------------
+
+REPO = Path(__file__).resolve().parents[2]
+
+#: A stand-in for cyberfw: one tool run by run_stage, the way the engine runs it.
+_CYBERFW = (
+    "import asyncio, sys\n"
+    "from cyberfw.pipeline.executor import run_stage\n"
+    "from cyberfw.pipeline.processes import stopping_tools_on_signals\n"
+    "async def main():\n"
+    "    with stopping_tools_on_signals():\n"
+    "        await run_stage(sys.argv[1:], tool='x', stage='s', context=None)\n"
+    "asyncio.run(main())\n"
+)
+
+
+def _cyberfw(cmd: list[str]) -> subprocess.Popen[bytes]:
+    """cyberfw running ``cmd`` as its one tool, in a process group of its own — as a
+    shell job is — so a signal reaches cyberfw's group the way a terminal sends it."""
+    return subprocess.Popen([sys.executable, "-c", _CYBERFW, *cmd], cwd=REPO, process_group=0)
+
+
+async def _until(condition: Callable[[], bool], cyberfw: subprocess.Popen[bytes]) -> None:
+    for _ in range(400):
+        if condition():
+            return
+        assert cyberfw.poll() is None, "cyberfw ended before its tool ran"
+        await asyncio.sleep(0.05)
+    raise AssertionError("the tool never ran")
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX signals")
+@pytest.mark.parametrize("name", ["SIGTERM", "SIGHUP"])  # SIGQUIT takes the same path, and dumps core
+async def test_a_signal_that_ends_cyberfw_stops_its_tools_first(tmp_path: Path, name: str) -> None:
+    """A tool runs in a session of its own, so a closed terminal, ``kill`` or
+    ``timeout`` reaches cyberfw alone: it must stop its tools before it goes."""
+    signum = getattr(signal, name)
+    cmd, started, late = _wrapper(tmp_path, "time.sleep(30)\n", delay=6.0)
+    cyberfw = _cyberfw(cmd)
+    try:
+        await _until(started.exists, cyberfw)
+        os.killpg(cyberfw.pid, signum)
+        returncode = await asyncio.to_thread(cyberfw.wait, 20)
+    finally:
+        if cyberfw.poll() is None:
+            cyberfw.kill()
+
+    assert returncode == -signum  # cyberfw still ends by the signal — after its tools
+    await _assert_the_child_was_stopped(started, late)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX job control")
+async def test_ctrl_z_pauses_the_tools_with_cyberfw_and_fg_resumes_them(tmp_path: Path) -> None:
+    ticks = tmp_path / "ticks"
+    tool = tmp_path / "tool.py"
+    tool.write_text(
+        "import time\n"
+        "while True:\n"
+        f"    with open({str(ticks)!r}, 'a') as out:\n"
+        "        out.write('.')\n"
+        "    time.sleep(0.05)\n",
+        encoding="utf-8",
+    )
+    cyberfw = _cyberfw([_bare_python(), str(tool)])
+
+    async def ticks_after(seconds: float) -> int:
+        await asyncio.sleep(seconds)
+        return ticks.stat().st_size
+
+    try:
+        await _until(ticks.exists, cyberfw)
+        os.killpg(cyberfw.pid, signal.SIGTSTP)
+        paused = await ticks_after(0.5)
+        assert await ticks_after(1.0) == paused, "the tool went on while cyberfw was stopped"
+        os.killpg(cyberfw.pid, signal.SIGCONT)
+        assert await ticks_after(1.0) > paused, "resuming cyberfw did not resume its tool"
+        os.killpg(cyberfw.pid, signal.SIGTERM)
+        assert await asyncio.to_thread(cyberfw.wait, 20) == -signal.SIGTERM
+        stopped = await ticks_after(0.3)
+        assert await ticks_after(0.5) == stopped, "the tool outlived cyberfw"
+    finally:
+        if cyberfw.poll() is None:
+            cyberfw.kill()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX signals")
+async def test_a_signal_cyberfw_is_told_to_ignore_stays_ignored() -> None:
+    # ``nohup cyberfw …`` ignores SIGHUP: a hangup must not stop the scan.
+    from cyberfw.pipeline.processes import stopping_tools_on_signals
+
+    previous = signal.signal(signal.SIGHUP, signal.SIG_IGN)
+    try:
+        with stopping_tools_on_signals():
+            inside_hup, inside_term = signal.getsignal(signal.SIGHUP), signal.getsignal(signal.SIGTERM)
+        after_term = signal.getsignal(signal.SIGTERM)
+    finally:
+        signal.signal(signal.SIGHUP, previous)
+
+    assert inside_hup is signal.SIG_IGN
+    assert inside_term not in (signal.SIG_DFL, signal.SIG_IGN)  # taken over for the run
+    assert after_term is signal.SIG_DFL  # and given back

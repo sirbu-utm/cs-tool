@@ -34,6 +34,13 @@ _STDERR_KEEP = 25
 #: Seconds a child gets to exit after SIGTERM before it is SIGKILLed.
 _TERM_GRACE = 3.0
 
+#: Seconds a process the tool left behind may keep the tool's output open once the
+#: tool itself has exited, before the tool's group is ended — and its output with it.
+_LEFTOVER_GRACE = 3.0
+
+#: How often a run whose output is still open looks whether its tool has exited.
+_EXIT_POLL = 0.1
+
 #: Max bytes one stdout/stderr line may hold before the reader gives up on it.
 #: asyncio's StreamReader defaults to 64 KiB, and a single ``nuclei -jsonl``
 #: finding (large extracted/matched content) can exceed that, which used to fail
@@ -362,11 +369,27 @@ async def run_stage(
                 if context is not None:
                     context.append(stage, rec)
 
+    async def _end_leftovers() -> None:
+        # Nor does an exit mean EOF: a process the tool left behind can hold its
+        # output open, and the stage would wait for it however long it ran. Once the
+        # tool has exited, that process gets a grace period, then the group goes.
+        while proc.returncode is None:
+            await asyncio.sleep(_EXIT_POLL)
+        await asyncio.sleep(_LEFTOVER_GRACE)
+        group.kill()
+
     async def _drain_and_wait() -> int:
         # EOF does not mean the tool exited: it can close both pipes and keep
         # running. Both operations belong to the same timeout and cancellation.
-        await asyncio.gather(_drain_stdout(), _drain_stderr())
-        return await proc.wait()
+        leftovers = asyncio.ensure_future(_end_leftovers())
+        try:
+            await asyncio.gather(_drain_stdout(), _drain_stderr())
+        finally:
+            leftovers.cancel()
+            await asyncio.wait({leftovers})
+        exit_code = await proc.wait()
+        group.close()  # what the tool left running ends now, while the group is surely its own
+        return exit_code
 
     async def _parse_stdout_buffer(*, failed: bool) -> None:
         if not buffered or parse_buffer is None:
@@ -466,19 +489,20 @@ async def _stop(proc: asyncio.subprocess.Process, group: ProcessGroup, grace: fl
     """Ask the tool to exit, wait up to ``grace`` seconds, then hard-kill it — the
     tool and every process in its ``group``.
 
-    ``terminate()`` is SIGTERM to the tool's whole process group on POSIX (which
-    well-behaved scanners handle by flushing and exiting) and the end of its Job
-    Object on Windows (immediate, so the wait returns at once). Whatever is still
-    in the group once the tool's own process has exited is killed. Awaiting here —
-    instead of scheduling the kill on a detached task — means nothing outlives
-    ``run_stage``.
+    ``terminate()`` is one SIGTERM to the tool's whole process group on POSIX (which
+    well-behaved scanners handle by flushing and exiting; a second could make one
+    quit at once) and the end of its Job Object on Windows (immediate, so the wait
+    returns at once); only a tool with no group to reach is terminated on its own.
+    Whatever is still in the group once the tool's own process has exited is
+    killed. Awaiting here — instead of scheduling the kill on a detached task —
+    means nothing outlives ``run_stage``.
     """
     if proc.returncode is None:
-        group.terminate()
-        try:
-            proc.terminate()
-        except ProcessLookupError:  # pragma: no cover - already gone
-            pass
+        if not group.terminate():
+            try:
+                proc.terminate()
+            except ProcessLookupError:  # pragma: no cover - already gone
+                pass
         try:
             await asyncio.wait_for(proc.wait(), grace)
         except asyncio.TimeoutError:

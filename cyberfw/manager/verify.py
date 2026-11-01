@@ -53,12 +53,20 @@ def is_executable(path: Path) -> bool:
     return bool(mode & stat.S_IEXEC)
 
 
+def install_leftover(path: Path, tools_dir: Path) -> bool:
+    """True for a file inside a dot-directory of ``tools_dir``: a copy an install keeps
+    beside the tool while it runs (``.<tool>.staging-*``, ``.<tool>.previous-*``), or
+    left there when it was cut short — never the installed tool itself."""
+    return any(part.startswith(".") for part in path.relative_to(tools_dir).parts[:-1])
+
+
 def ensure_binary(tools_dir: Path, name: str, binary_hint: str | None = None) -> Path:
     """Locate the installed binary for ``name`` inside ``tools_dir``.
 
     Searches ``tools_dir/<name>`` first, then any extension Windows may add,
     then a recursive scan — ProjectDiscovery archives nest the binary one
-    directory deep. Raises :class:`ToolNotFoundError` with install guidance.
+    directory deep — that skips an install's leftovers (:func:`install_leftover`).
+    Raises :class:`ToolNotFoundError` with install guidance.
     """
     root = Path(tools_dir)
     search = binary_hint or name
@@ -81,7 +89,7 @@ def ensure_binary(tools_dir: Path, name: str, binary_hint: str | None = None) ->
         _remember(candidate)
 
     for candidate in root.rglob("*"):
-        if not candidate.is_file():
+        if not candidate.is_file() or install_leftover(candidate, root):
             continue
         if candidate.name == search or candidate.stem == search:
             if is_executable(candidate):

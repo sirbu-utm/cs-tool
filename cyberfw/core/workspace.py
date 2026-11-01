@@ -9,6 +9,7 @@ from cyberfw.exceptions import CyberfwError, RegistryError
 from cyberfw.manager import ToolManager, load_registry
 from cyberfw.manager.lock import LOCK_NAME
 from cyberfw.manager.plugins import load_plugins
+from cyberfw.manager.verify import install_leftover
 from cyberfw.resources import packaged_data
 
 
@@ -90,7 +91,7 @@ def binary_on_disk(tools_dir: Path, name: str, binary_hint: str | None) -> bool:
     """True if a binary file for ``name`` exists at all (runnable or not).
 
     Lets status tell a Defender-blocked/unreadable download (present but broken)
-    apart from one that was never fetched.
+    apart from one that was never fetched. An install's leftovers do not count.
     """
     search = binary_hint or name
     for candidate in (tools_dir / search, tools_dir / f"{search}.exe"):
@@ -98,6 +99,8 @@ def binary_on_disk(tools_dir: Path, name: str, binary_hint: str | None) -> bool:
             return True
     if tools_dir.is_dir():
         for candidate in tools_dir.rglob("*"):
+            if install_leftover(candidate, tools_dir):
+                continue
             if candidate.is_file() and (candidate.name == search or candidate.stem == search):
                 return True
     return False

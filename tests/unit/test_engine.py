@@ -7,8 +7,10 @@ security binary is required (and no network is touched).
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import sys
 import tempfile
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
@@ -1358,3 +1360,31 @@ class TestStageFilesStayInTheSession:
             assert ".." not in path.name and path.read_text(encoding="utf-8") == "a.example.com\n"
         finally:
             path.unlink(missing_ok=True)
+
+
+async def test_every_run_stops_its_tools_on_a_signal_that_would_end_cyberfw(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A pipeline and a single run both run their tools under ``stopping_tools_on_signals``
+    (tests/unit/test_process_tree.py shows what that does)."""
+    entered: list[str] = []
+
+    @contextlib.contextmanager
+    def spy() -> Iterator[None]:
+        entered.append("in")
+        yield
+        entered.append("out")
+
+    monkeypatch.setattr("cyberfw.pipeline.engine.stopping_tools_on_signals", spy)
+    registry_path = tmp_path / "registry.yaml"
+    registry_path.write_text(
+        "subfinder:\n  repo: org/subfinder\n  asset_patterns: []\n  binary: stub_probe.py\n", encoding="utf-8"
+    )
+    engine = _make_engine(tmp_path, registry_path)
+    stub = _StubTool(engine.tool_manager.spec("subfinder"), _stub_binary(tmp_path))
+    engine.build_tool = lambda name: stub  # type: ignore[method-assign]
+
+    await engine.run([Node(tool="subfinder", stage="subdomains")], seed="seed.example.com")
+    await engine.run_single(Node(tool="subfinder", stage="subfinder"), ToolContext(target="seed.example.com"))
+
+    assert entered == ["in", "out", "in", "out"]
