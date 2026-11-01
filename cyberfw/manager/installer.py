@@ -4,9 +4,12 @@ archive checked against its ``tools.lock`` hash.
 Guards against `Zip Slip` (any member path escaping ``tools_bin/``), enforces an
 upper bound on archive size, and makes extracted binaries executable on Unix.
 
-Layout: each tool is unpacked into its own ``tools_bin/<tool>/`` directory, which
-is wiped on re-install; the downloaded archive is deleted once extracted. The
-top level of ``tools_bin/`` therefore only holds those directories plus the
+Layout: each tool lives in its own ``tools_bin/<tool>/`` directory. A re-install
+unpacks the new version into ``.<tool>.staging-*`` beside it and, once that holds
+the tool's executable, swaps the two (the old one passing through
+``.<tool>.previous-*`` on its way out), so a failed update leaves the installed
+version as it was; the downloaded archive is deleted once extracted. The top level
+of ``tools_bin/`` therefore only holds those directories plus the
 ``.<tool>.install.json`` state files written by :class:`ToolManager`.
 """
 
@@ -147,12 +150,15 @@ class ToolInstaller:
     def install_locked(self, spec: ToolSpec, version: str, asset: LockedAsset) -> InstallResult:
         """Install one platform's entry of a locked release, verified against the lock.
 
-        The archive's SHA-256 must equal the lock's *before* anything of the
-        previous install is touched, so a replaced or corrupted download leaves
-        the working tool in place. The downloaded archive is always removed.
+        The archive's SHA-256 must equal the lock's, and the archive must unpack —
+        beside the installed version — to the tool's executable, before anything of
+        the installed version is touched: a failed download, a wrong hash, a damaged
+        or oversized archive, one without the executable, or a swap that fails all
+        leave the working tool in place. The downloaded archive is always removed.
         """
         tool_dir = self.tools_dir / spec.name
         archive_path = self.tools_dir / asset.name
+        staging = self.tools_dir / f".{spec.name}.staging-{uuid.uuid4().hex[:8]}"
         try:
             self.client.download(asset.url, archive_path)
             actual = sha256_hex(archive_path)
@@ -160,13 +166,17 @@ class ToolInstaller:
                 raise ChecksumError(
                     f"SHA-256 mismatch for {asset.name}: tools.lock has {asset.sha256}, got {actual}"
                 )
-            self._remove_existing_binary(spec)
-            self._remove_stale_downloads(spec, keep=archive_path)
-            self._reset_tool_dir(tool_dir)
-            binary = self._extract(spec, archive_path, tool_dir)
+            self._clear_leftovers(spec)
+            staging.mkdir()
+            unpacked = self._extract(spec, archive_path, staging)
+            self._make_executable(unpacked)
+            self._swap_in(staging, tool_dir)
         finally:
             archive_path.unlink(missing_ok=True)
-        self._make_executable(binary)
+            self._remove_tree(staging)  # a failed install's unpacked copy; a swapped-in one is gone
+        binary = tool_dir / unpacked.relative_to(staging)
+        self._remove_existing_binary(spec, keep=tool_dir)
+        self._remove_stale_downloads(spec, keep=archive_path)
         LOG.debug("%s: installed %s from %s -> %s", spec.name, version, asset.name, binary)
         return InstallResult(spec=spec, binary=binary.resolve(), version=version)
 
@@ -240,19 +250,48 @@ class ToolInstaller:
 
         return ensure_binary(tool_dir, spec.name, spec.binary)
 
-    def _reset_tool_dir(self, tool_dir: Path) -> None:
-        """Empty ``tool_dir`` so nothing from the previous version survives the re-install.
+    def _swap_in(self, staging: Path, tool_dir: Path) -> None:
+        """Put the unpacked new version in ``tool_dir``'s place: the installed one moves
+        aside first and is removed after, and a swap that fails puts it back. (Windows
+        renames a directory even while a tool inside it runs.)"""
+        previous: Path | None = None
+        if tool_dir.exists():
+            previous = tool_dir.with_name(f".{tool_dir.name}.previous-{uuid.uuid4().hex[:8]}")
+            try:
+                tool_dir.rename(previous)
+            except OSError as exc:
+                raise DownloadError(
+                    f"could not move the installed {tool_dir.name} aside: {exc}"
+                ) from exc
+        try:
+            staging.rename(tool_dir)
+        except OSError as exc:
+            if previous is not None:
+                previous.rename(tool_dir)
+            raise DownloadError(f"could not put the new {tool_dir.name} in place: {exc}") from exc
+        if previous is not None:
+            self._remove_tree(previous)
+
+    def _clear_leftovers(self, spec: ToolSpec) -> None:
+        """Remove what an interrupted earlier install of this tool left beside it."""
+        for pattern in (f".{spec.name}.staging-*", f".{spec.name}.previous-*"):
+            for path in list(self.tools_dir.glob(pattern)):
+                self._remove_tree(path)
+
+    def _remove_tree(self, path: Path) -> None:
+        """Remove ``path``: a file, or a directory and everything in it.
 
         A file Windows still holds open is parked under a ``.stale-*`` name (see
-        :meth:`_unlink_or_park`); ``rmtree`` then leaves it in place and the fresh
-        extraction happens around it.
+        :meth:`_unlink_or_park`), so it no longer shadows a binary of the same name;
+        ``rmtree`` then leaves it, and its directory, in place.
         """
-        if tool_dir.is_dir():
-            for path in list(tool_dir.rglob("*")):
-                if path.is_file():
-                    self._unlink_or_park(path)
-            shutil.rmtree(tool_dir, ignore_errors=True)
-        tool_dir.mkdir(parents=True, exist_ok=True)
+        if path.is_dir():
+            for item in list(path.rglob("*")):
+                if item.is_file():
+                    self._unlink_or_park(item)
+            shutil.rmtree(path, ignore_errors=True)
+        elif path.exists():
+            self._unlink_or_park(path)
 
     def _remove_stale_downloads(self, spec: ToolSpec, *, keep: Path) -> None:
         """Delete archives of *this* tool that earlier installs left at the top level.
@@ -267,8 +306,8 @@ class ToolInstaller:
             if any(fnmatch.fnmatch(path.name.lower(), pattern) for pattern in patterns):
                 self._unlink_or_park(path)
 
-    def _remove_existing_binary(self, spec: ToolSpec) -> None:
-        """Remove stale copies of the binary anywhere under ``tools_dir``.
+    def _remove_existing_binary(self, spec: ToolSpec, *, keep: Path) -> None:
+        """Remove stale copies of the binary anywhere under ``tools_dir`` but ``keep``.
 
         Covers the pre-per-tool-directory layout, where binaries sat at the top
         level. The ``.exe`` variant is stale on every OS (a checkout shared between
@@ -281,7 +320,7 @@ class ToolInstaller:
             names.add(spec.binary + ".exe")
         wanted = {name.lower() for name in names}
         for path in list(self.tools_dir.rglob("*")):
-            if path.is_file() and path.name.lower() in wanted:
+            if path.is_file() and path.name.lower() in wanted and keep not in path.parents:
                 self._unlink_or_park(path)
 
     @staticmethod

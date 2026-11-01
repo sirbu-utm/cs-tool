@@ -507,3 +507,50 @@ class TestUpdateLock:
 
         with pytest.raises(RegistryError):
             manager.update_lock(["nope"])
+
+
+class TestAFailedReinstallKeepsTheRecord:
+    """A re-install that fails leaves the installed version and the record of it as
+    they were: the tool is still installed, at the version it had."""
+
+    @pytest.mark.parametrize("failure", ["network", "tampered"])
+    def test_the_record_survives_a_failed_reinstall(self, tmp_path: Path, failure: str) -> None:
+        manager, client = _manager_with(tmp_path)
+        manager.install("subfinder")
+        before = manager.install_state("subfinder")
+        if failure == "network":
+
+            def offline(url: str, destination: Path, *, expected_size: int | None = None) -> None:
+                raise DownloadError("connection reset")
+
+            client.download = offline  # type: ignore[method-assign]
+        else:
+            client.archive_bytes = _zip_bytes({"subfinder": b"#!/bin/sh\necho tampered\n"})
+
+        with pytest.raises((DownloadError, ChecksumError)):
+            manager.install("subfinder", force=True)
+
+        assert manager.install_state("subfinder") == before
+        assert manager.is_installed("subfinder")
+
+    def test_a_record_that_cannot_be_written_leaves_the_one_before(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        manager, _ = _manager_with(tmp_path)
+        manager.install("subfinder")
+        before = manager.install_state("subfinder")
+        real_write = Path.write_text
+
+        def disk_full(self: Path, *args: object, **kwargs: object) -> int:
+            if self.name.startswith(".subfinder.install.json"):
+                raise OSError(28, "No space left on device")
+            return real_write(self, *args, **kwargs)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(Path, "write_text", disk_full)
+        with pytest.raises(OSError, match="No space left"):
+            manager.install("subfinder", force=True)
+        monkeypatch.undo()
+
+        assert manager.install_state("subfinder") == before
+        records = sorted(path.name for path in manager.settings.tools_dir.glob(".subfinder.*"))
+        assert records == [".subfinder.install.json"]

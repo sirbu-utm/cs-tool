@@ -17,7 +17,7 @@ from cyberfw.manager.installer import InstallResult, ToolInstaller, select_asset
 from cyberfw.manager.lock import LockedAsset
 from cyberfw.manager.platform_map import Mapping
 from cyberfw.manager.registry import ToolSpec
-from cyberfw.manager.verify import checksum_for
+from cyberfw.manager.verify import checksum_for, ensure_binary
 
 
 def _zip_bytes(members: dict[str, bytes]) -> bytes:
@@ -488,3 +488,95 @@ class TestToolsDirLayout:
 
         assert not ours.exists()
         assert theirs.exists()
+
+
+class _Offline(_FakeClient):
+    """The connection drops halfway through the download."""
+
+    def download(self, url: str, destination: Path, *, expected_size: int | None = None) -> None:
+        destination.write_bytes(b"partial")
+        raise DownloadError("connection reset")
+
+
+class TestAFailedUpdateKeepsTheInstalledVersion:
+    """The new version is unpacked and checked beside the installed one, and takes its
+    place only once it holds the tool's executable: a failed download, a wrong hash, a
+    damaged or oversized archive, one without the executable, or a failed swap leave
+    the installed version — every file of it — as it was, and nothing behind."""
+
+    _OLD = b"#!/bin/sh\necho old\n"
+
+    def _installed(self, installer: ToolInstaller) -> Path:
+        tool_dir = installer.tools_dir / "subfinder"
+        tool_dir.mkdir(parents=True)
+        (tool_dir / "subfinder").write_bytes(self._OLD)
+        (tool_dir / "README.md").write_text("old docs", encoding="utf-8")
+        return tool_dir
+
+    def _assert_untouched(self, installer: ToolInstaller, tool_dir: Path) -> None:
+        assert (tool_dir / "subfinder").read_bytes() == self._OLD
+        assert (tool_dir / "README.md").read_text(encoding="utf-8") == "old docs"
+        assert sorted(path.name for path in installer.tools_dir.iterdir()) == ["subfinder"]
+
+    @pytest.mark.parametrize("failure", ["download", "hash", "corrupt", "no executable", "too big"])
+    def test_a_failed_update_leaves_the_installed_version(self, tmp_path: Path, failure: str) -> None:
+        archive = {
+            "corrupt": b"PK\x03\x04 definitely not a zip",
+            "no executable": _zip_bytes({"README.md": b"new docs"}),
+            "too big": _zip_bytes({"subfinder": b"#!/bin/sh\n" + b"x" * 4096}),
+        }.get(failure, _zip_bytes({"subfinder": b"#!/bin/sh\necho new\n"}))
+        client = _Offline(archive) if failure == "download" else _FakeClient(archive)
+        installer = _installer(tmp_path, client, max_archive_size=1024)
+        tool_dir = self._installed(installer)
+        locked = _locked(_SUBFINDER_ZIP, archive, sha256="0" * 64 if failure == "hash" else None)
+
+        with pytest.raises((DownloadError, ChecksumError, ToolNotFoundError)):
+            installer.install_locked(_spec(), "2.0.0", locked)
+
+        self._assert_untouched(installer, tool_dir)
+
+    def test_a_failed_swap_puts_the_installed_version_back(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        archive = _zip_bytes({"subfinder": b"#!/bin/sh\necho new\n"})
+        installer = _installer(tmp_path, _FakeClient(archive))
+        tool_dir = self._installed(installer)
+        real_rename = Path.rename
+
+        def refuse_the_new_version(self: Path, target: str | Path) -> Path:
+            if self.name.startswith(".subfinder.staging-"):
+                raise PermissionError(13, "Permission denied")
+            return real_rename(self, target)
+
+        monkeypatch.setattr(Path, "rename", refuse_the_new_version)
+
+        with pytest.raises(DownloadError, match="could not put the new subfinder in place"):
+            _install(installer, _spec(), archive, _SUBFINDER_ZIP)
+
+        self._assert_untouched(installer, tool_dir)
+
+    def test_an_update_while_the_old_version_runs_still_lands(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Windows will not delete a running exe, but renames it — and the directory
+        around it: the old copy is parked, and it never shadows the new one."""
+        archive = _zip_bytes({"naabu.exe": b"#!/bin/sh\necho new\n"})
+        installer = _installer(tmp_path, _FakeClient(archive), Mapping("windows", "amd64"))
+        running = installer.tools_dir / "naabu" / "naabu.exe"
+        running.parent.mkdir(parents=True)
+        running.write_bytes(b"running")
+        real_unlink = Path.unlink
+
+        def in_use(self: Path, missing_ok: bool = False) -> None:
+            if self.is_file() and self.read_bytes() == b"running":
+                raise PermissionError(32, "The process cannot access the file because it is being used")
+            real_unlink(self, missing_ok=missing_ok)
+
+        monkeypatch.setattr(Path, "unlink", in_use)
+        spec = _spec(name="naabu", binary="naabu", asset_patterns=["*windows*amd64*"])
+
+        result = _install(installer, spec, archive, "naabu_2.0.0_windows_amd64.zip")
+
+        assert result.binary == running.resolve()
+        assert result.binary.read_bytes() == b"#!/bin/sh\necho new\n"
+        assert ensure_binary(installer.tools_dir, "naabu", "naabu") == running

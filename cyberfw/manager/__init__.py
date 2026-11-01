@@ -9,7 +9,9 @@ verified against its locked SHA-256.
 from __future__ import annotations
 
 import json
+import os
 import tempfile
+import uuid
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -321,7 +323,6 @@ class ToolManager:
             return InstallResult(spec, self.binary_path(name), entry.version, up_to_date=True)
 
         state_path = self.settings.tools_dir / f".{name}.install.json"
-        state_path.unlink(missing_ok=True)
         installer = ToolInstaller(
             self.client,
             self.settings.tools_dir,
@@ -329,17 +330,15 @@ class ToolManager:
             max_archive_size=self.settings.max_archive_size,
         )
         result = installer.install_locked(spec, entry.version, asset)
-        state_path.write_text(
-            json.dumps(
-                {
-                    "binary": str(result.binary.resolve()),
-                    "version": result.version,
-                    "sha256": asset.sha256,
-                    "os": self.mapping.os_name,
-                    "arch": self.mapping.arch,
-                }
-            ),
-            encoding="utf-8",
+        _write_state(
+            state_path,
+            {
+                "binary": str(result.binary.resolve()),
+                "version": result.version,
+                "sha256": asset.sha256,
+                "os": self.mapping.os_name,
+                "arch": self.mapping.arch,
+            },
         )
         return result
 
@@ -360,3 +359,15 @@ class ToolManager:
 
         installer = ChromiumInstaller(self.client, self.settings.tools_dir, self.mapping)
         return installer.install(force=force)
+
+
+def _write_state(path: Path, state: dict[str, str]) -> None:
+    """Write an install record whole or not at all — a temp file, then ``os.replace`` —
+    so a failed write leaves the record before it."""
+    tmp = path.with_name(f"{path.name}.{uuid.uuid4().hex[:8]}.tmp")
+    try:
+        tmp.write_text(json.dumps(state), encoding="utf-8")
+        os.replace(tmp, path)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
