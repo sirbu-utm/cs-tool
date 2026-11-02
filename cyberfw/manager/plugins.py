@@ -20,6 +20,7 @@ one warning per problem per process on the ``cyberfw`` logger.
 
 from __future__ import annotations
 
+import contextlib
 import importlib.util
 import os
 import re
@@ -124,7 +125,9 @@ def write_plugins_file(path: Path, chosen: PluginsFile) -> None:
         tmp.write_text(text, encoding="utf-8", newline="\n")
         os.replace(tmp, path)
     except OSError as exc:
-        tmp.unlink(missing_ok=True)
+        # On POSIX a parent that is a file makes even this unlink fail (ENOTDIR).
+        with contextlib.suppress(OSError):
+            tmp.unlink(missing_ok=True)
         raise PluginError(f"{path}: cannot be written: {exc}") from exc
 
 
