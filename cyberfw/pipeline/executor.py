@@ -23,7 +23,7 @@ from pathlib import Path
 from cyberfw.exceptions import ExecutionError, ParseError
 from cyberfw.logging import get_logger
 from cyberfw.pipeline.context import SessionContext
-from cyberfw.pipeline.processes import ProcessGroup
+from cyberfw.pipeline.processes import ProcessGroup, watch_children_with_waitpid
 from cyberfw.pipeline.schemas import ToolRecord, validate_record
 
 LOG = get_logger("executor")
@@ -265,6 +265,7 @@ async def run_stage(
     logger = LOG
     cmd = _prepare_cmd(cmd)
     group = ProcessGroup()
+    watch_children_with_waitpid(asyncio.get_running_loop())
     try:
         proc = await asyncio.create_subprocess_exec(
             *cmd,

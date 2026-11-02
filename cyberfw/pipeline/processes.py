@@ -18,7 +18,8 @@ import contextlib
 import os
 import signal
 import sys
-from collections.abc import Iterator
+import threading
+from collections.abc import Callable, Iterator
 from typing import Any
 
 from cyberfw.logging import get_logger
@@ -116,6 +117,46 @@ def stopping_tools_on_signals() -> Iterator[None]:
     else:
         with _taking_over_signals():
             yield
+
+
+class _WaitpidChildWatcher:
+    """What asyncio's event loop asks of a child watcher — ``add_child_handler`` — done
+    as asyncio did before 3.14: a thread per child, waiting for its exit with
+    ``waitpid()``, which a stop does not end."""
+
+    def add_child_handler(self, pid: int, callback: Callable[..., object], *args: object) -> None:
+        loop = asyncio.get_running_loop()
+        threading.Thread(
+            target=self._wait, args=(loop, pid, callback, args), name=f"cyberfw-waitpid-{pid}", daemon=True
+        ).start()
+
+    @staticmethod
+    def _wait(loop: asyncio.AbstractEventLoop, pid: int, callback: Callable[..., object], args: tuple[object, ...]) -> None:
+        try:
+            _, status = os.waitpid(pid, 0)
+            returncode = os.waitstatus_to_exitcode(status)
+        except ChildProcessError:  # reaped elsewhere: asyncio reports 255 too
+            returncode = 255
+        with contextlib.suppress(RuntimeError):  # the loop closed meanwhile
+            loop.call_soon_threadsafe(callback, pid, returncode, *args)
+
+
+#: macOS's ``waitid()`` returns for a child that is merely stopped, even asked for exits
+#: only, and asyncio's watcher on Python 3.14 before 3.14.10 took that for the exit
+#: (python/cpython#158287): its loop then sat in a blocking ``waitpid()`` until the tool
+#: ended — a tool paused by Ctrl+Z froze cyberfw, and no signal reached it.
+_WAITID_TAKES_A_STOP_FOR_AN_EXIT = sys.platform == "darwin" and (3, 14) <= sys.version_info < (3, 14, 10)
+
+
+def watch_children_with_waitpid(loop: asyncio.AbstractEventLoop) -> None:
+    """Where :data:`_WAITID_TAKES_A_STOP_FOR_AN_EXIT`, have ``loop`` learn of a tool's exit
+    from :class:`_WaitpidChildWatcher` instead of asyncio's own watcher; anywhere else
+    the loop is left as it is."""
+    if not _WAITID_TAKES_A_STOP_FOR_AN_EXIT:
+        return
+    threaded = getattr(sys.modules.get("asyncio.unix_events"), "_ThreadedChildWatcher", None)
+    if threaded is not None and type(getattr(loop, "_watcher", None)) is threaded:
+        setattr(loop, "_watcher", _WaitpidChildWatcher())  # noqa: B010 - asyncio's private slot
 
 
 if sys.platform == "win32":

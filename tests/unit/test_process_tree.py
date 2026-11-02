@@ -300,6 +300,91 @@ async def test_ctrl_z_pauses_the_tools_with_cyberfw_and_fg_resumes_them(tmp_path
             cyberfw.kill()
 
 
+@pytest.mark.skipif(os.name == "nt", reason="POSIX job control")
+async def test_a_tool_stopped_and_continued_does_not_freeze_cyberfw(tmp_path: Path) -> None:
+    # macOS's waitid() returns for a child that is only stopped; asyncio 3.14's watcher
+    # took that for an exit, and its loop then sat in waitpid() until the tool ended.
+    pid_file, ticks = tmp_path / "pid", tmp_path / "ticks"
+    tool = tmp_path / "tool.py"
+    tool.write_text(
+        "import os, time\n"
+        f"open({str(pid_file)!r}, 'w').write(str(os.getpid()))\n"
+        "while True:\n"
+        f"    with open({str(ticks)!r}, 'a') as out:\n"
+        "        out.write('.')\n"
+        "    time.sleep(0.05)\n",
+        encoding="utf-8",
+    )
+    cyberfw = _cyberfw([_bare_python(), str(tool)])
+    try:
+        await _until(ticks.exists, cyberfw)
+        tool_pid = int(pid_file.read_text(encoding="utf-8"))
+        os.kill(tool_pid, signal.SIGSTOP)  # someone else pauses the tool, cyberfw runs on
+        await asyncio.sleep(1.0)
+        os.kill(tool_pid, signal.SIGCONT)
+        await asyncio.sleep(0.5)
+        os.killpg(cyberfw.pid, signal.SIGTERM)
+        assert await asyncio.to_thread(cyberfw.wait, 20) == -signal.SIGTERM
+    finally:
+        if cyberfw.poll() is None:
+            cyberfw.kill()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX job control")
+async def test_cyberfws_child_watcher_waits_for_an_exit_not_a_stop() -> None:
+    from cyberfw.pipeline import processes
+
+    child = subprocess.Popen([_bare_python(), "-c", "import time; time.sleep(1.5)"])
+    loop = asyncio.get_running_loop()
+    ended: asyncio.Future[tuple[int, int]] = loop.create_future()
+    processes._WaitpidChildWatcher().add_child_handler(child.pid, lambda pid, code: ended.set_result((pid, code)))
+    try:
+        os.kill(child.pid, signal.SIGSTOP)
+        await asyncio.sleep(0.5)
+        assert not ended.done(), "a stopped child was taken for an exited one"
+        os.kill(child.pid, signal.SIGCONT)
+        assert await asyncio.wait_for(ended, 10) == (child.pid, 0)
+    finally:
+        if ended.done():
+            child.returncode = 0  # the watcher reaped it: Popen would warn it still runs
+        else:
+            child.kill()
+            child.wait()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX event loops")
+@pytest.mark.parametrize("affected", [True, False])
+def test_where_waitid_takes_a_stop_for_an_exit_asyncios_watcher_gives_way(
+    monkeypatch: pytest.MonkeyPatch, affected: bool
+) -> None:
+    from asyncio import unix_events
+
+    from cyberfw.pipeline import processes
+
+    threaded = getattr(unix_events, "_ThreadedChildWatcher", None)
+    if threaded is None:
+        pytest.skip("this asyncio has no _ThreadedChildWatcher of its own")
+
+    class Loop:
+        _watcher = threaded()
+
+    loop = Loop()
+    monkeypatch.setattr(processes, "_WAITID_TAKES_A_STOP_FOR_AN_EXIT", affected)
+
+    processes.watch_children_with_waitpid(loop)  # type: ignore[arg-type]
+    processes.watch_children_with_waitpid(loop)  # type: ignore[arg-type]  # twice: one swap
+
+    assert isinstance(loop._watcher, processes._WaitpidChildWatcher) is affected
+
+
+def test_only_macos_on_python_3_14_before_3_14_10_needs_the_watcher() -> None:
+    from cyberfw.pipeline import processes
+
+    expected = sys.platform == "darwin" and (3, 14) <= sys.version_info < (3, 14, 10)
+
+    assert processes._WAITID_TAKES_A_STOP_FOR_AN_EXIT is expected
+
+
 @pytest.mark.skipif(os.name == "nt", reason="POSIX signals")
 async def test_a_signal_cyberfw_is_told_to_ignore_stays_ignored() -> None:
     # ``nohup cyberfw …`` ignores SIGHUP: a hangup must not stop the scan.
