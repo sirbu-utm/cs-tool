@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import io
 import os
+import stat
 import struct
 import tarfile
 import zipfile
@@ -385,6 +386,62 @@ def test_missing_binary_message_mentions_blocked_file(tmp_path: Path, monkeypatc
 
     with pytest.raises(ToolNotFoundError, match="downloaded but its executable could not be read"):
         ensure_binary(tools_dir, "naabu", "naabu")
+
+
+def test_ensure_binary_scans_the_tool_dir_not_a_siblings_tree(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Resolving one tool must not walk another's tree (tools_bin/chromium/'s many files)."""
+    tools = tmp_path / "tools_bin"
+    nested = tools / "subfinder" / "subfinder_1.0.0_linux"
+    nested.mkdir(parents=True)
+    exe = nested / "subfinder"
+    exe.write_text("#!/usr/bin/env bash\ntrue\n", encoding="utf-8")
+    exe.chmod(exe.stat().st_mode | stat.S_IEXEC)
+    sibling = tools / "chromium"
+    sibling.mkdir()
+    for i in range(30):
+        (sibling / f"f{i}").write_text("x", encoding="utf-8")
+
+    scanned: list[Path] = []
+    real_rglob = Path.rglob
+
+    def spy(self: Path, pattern: str, **kwargs: object):  # type: ignore[no-untyped-def]
+        scanned.append(Path(self))
+        return real_rglob(self, pattern, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(Path, "rglob", spy)
+    found = ensure_binary(tools, "subfinder", "subfinder")
+
+    assert found == exe
+    assert tools not in scanned, "the whole tools_bin tree was walked"
+    assert tools / "subfinder" in scanned
+
+
+def test_ensure_binary_still_finds_a_binary_of_the_flat_layout(tmp_path: Path) -> None:
+    """No tools_bin/<name>/ of its own: the whole tree is still searched."""
+    tools = tmp_path / "tools_bin"
+    (tools / "legacy").mkdir(parents=True)
+    exe = tools / "legacy" / "naabu"
+    exe.write_text("#!/usr/bin/env bash\ntrue\n", encoding="utf-8")
+    exe.chmod(exe.stat().st_mode | stat.S_IEXEC)
+
+    assert ensure_binary(tools, "naabu", "naabu") == exe
+
+
+def test_ensure_binary_skips_an_install_leftover_inside_the_tool_dir(tmp_path: Path) -> None:
+    """The scoped scan honours install leftovers like the whole-tree one does."""
+    tools = tmp_path / "tools_bin"
+    leftover = tools / "subfinder" / ".old" / "subfinder"
+    leftover.parent.mkdir(parents=True)
+    leftover.write_text("#!/usr/bin/env bash\ntrue\n", encoding="utf-8")
+    leftover.chmod(leftover.stat().st_mode | stat.S_IEXEC)
+    real = tools / "subfinder" / "bin" / "subfinder"
+    real.parent.mkdir()
+    real.write_text("#!/usr/bin/env bash\ntrue\n", encoding="utf-8")
+    real.chmod(real.stat().st_mode | stat.S_IEXEC)
+
+    assert ensure_binary(tools, "subfinder", "subfinder") == real
 
 
 class TestArchiveSizeLimit:
