@@ -1622,6 +1622,51 @@ class TestPipelinePreFlight:
         assert result.exit_code == 0
 
 
+class TestShowSecrets:
+    """gitleaks secrets are redacted in what a run keeps unless --show-secrets is passed."""
+
+    @staticmethod
+    def _install_gitleaks(root: Path) -> None:
+        # A gitleaks that ignores --redact: what the framework stores is scrubbed by the adapter.
+        with (root / "registry.yaml").open("a", encoding="utf-8") as handle:
+            handle.write("gitleaks:\n  repo: org/gitleaks\n  asset_patterns: []\n  binary: gitleaks\n")
+        binary = root / "tools_bin" / "gitleaks"
+        binary.write_text(
+            "#!/usr/bin/env bash\n"
+            "printf '%s' '[{\"RuleID\":\"aws\",\"Secret\":\"AKIALIVEKEY123\",\"File\":\"/x/leak.txt\"}]'\n",
+            encoding="utf-8",
+        )
+        binary.chmod(binary.stat().st_mode | stat.S_IEXEC)
+
+    @staticmethod
+    def _kept(root: Path, session: str) -> str:
+        return "".join(path.read_text(encoding="utf-8") for path in sorted((root / "reports" / session).iterdir())
+                       if path.suffix in (".jsonl", ".json", ".html"))
+
+    def test_a_secret_is_redacted_in_the_records_and_both_reports_by_default(self, tmp_path: Path) -> None:
+        self._install_gitleaks(tmp_path)
+
+        result = runner.invoke(app, ["run", "gitleaks", "-t", str(tmp_path), "--save", "--session", "gl"])
+
+        assert result.exit_code == 0, result.stdout
+        assert (tmp_path / "reports" / "gl" / "report.html").is_file()
+        kept = self._kept(tmp_path, "gl")
+        assert "AKIALIVEKEY123" not in kept
+        assert "REDACTED" in kept
+        assert "AKIALIVEKEY123" not in result.stdout
+
+    def test_show_secrets_keeps_the_value_and_says_so(self, tmp_path: Path) -> None:
+        self._install_gitleaks(tmp_path)
+
+        result = runner.invoke(
+            app, ["run", "gitleaks", "-t", str(tmp_path), "--save", "--session", "gl", "--show-secrets"]
+        )
+
+        assert result.exit_code == 0, result.stdout
+        assert "AKIALIVEKEY123" in (tmp_path / "reports" / "gl" / "gitleaks.jsonl").read_text(encoding="utf-8")
+        assert "--show-secrets" in result.stdout
+
+
 class TestSessionName:
     """--session names a directory under reports/; it must not reach anywhere else."""
 

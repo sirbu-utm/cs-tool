@@ -622,6 +622,28 @@ class TestUnsavedRunHostList:
         assert list(temp.iterdir()) == []
 
 
+class TestBuildToolRedaction:
+    """Every adapter the engine builds carries the run's redact_secrets setting."""
+
+    @pytest.mark.parametrize("redact", [True, False])
+    def test_gitleaks_adapter_inherits_the_setting(self, tmp_path: Path, redact: bool) -> None:
+        registry_path = tmp_path / "registry.yaml"
+        registry_path.write_text(
+            "gitleaks:\n  repo: org/gitleaks\n  asset_patterns: []\n  binary: gitleaks\n",
+            encoding="utf-8",
+        )
+        engine = _make_engine(tmp_path, registry_path)
+        binary = engine.settings.tools_dir / "gitleaks"
+        binary.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+        binary.chmod(0o755)
+        engine.settings.redact_secrets = redact
+
+        adapter = engine.build_tool("gitleaks")
+
+        assert adapter.redact_secrets is redact
+        assert ("--redact" in adapter.build_cmd(ToolContext(target=str(tmp_path)))) is redact
+
+
 class TestBuildToolDependencyCheck:
     """RustScan's Nmap dependency degrades gracefully: warn, never block."""
 

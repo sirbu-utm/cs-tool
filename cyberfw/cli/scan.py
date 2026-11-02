@@ -257,6 +257,13 @@ def run_cmd(
         int | None,
         typer.Option("--rate-limit", min=1, help="Max requests/sec for nuclei/httpx/naabu/ffuf (overrides the setting)."),
     ] = None,
+    show_secrets: Annotated[
+        bool,
+        typer.Option(
+            "--show-secrets",
+            help="Keep raw secret values in gitleaks output (default: redacted). Affects gitleaks only.",
+        ),
+    ] = False,
     verbose: VerboseOption = False,
 ) -> None:
     """Run a single registered tool and print its records to the screen."""
@@ -267,6 +274,9 @@ def run_cmd(
         _checked_session(session)
 
     settings = _setup(verbose=verbose)
+    if show_secrets:
+        settings = settings.model_copy(update={"redact_secrets": False})
+        console.print("[warn]--show-secrets: raw secret values will be printed and saved unredacted.[/warn]")
     hosts = _read_hosts(list_file) if list_file is not None else []
     target_label = target or f"{len(hosts)} host(s) from {list_file}"
     # Parsing is on by default; disable it via the config `parse:` setting

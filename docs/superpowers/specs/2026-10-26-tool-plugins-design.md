@@ -106,7 +106,7 @@ that run scans):
 | `CONTRACT` | the contract version this cyberfw writes for (`1`) |
 | `SUPPORTED_CONTRACTS` | the versions this cyberfw loads (`{1}`) |
 | `ToolPlugin` | frozen dataclass: `contract: int`, `adapter: type[BaseTool]`, `record: type[ToolRecord]`, `install: ToolSpec \| None` — required for a plugin; only the built-in tools leave it `None`, their recipe being their `registry.yaml` entry |
-| `BaseTool` | the adapter base, with today's hooks: `build_cmd`, `parse_line`, `parse_output`, `prepare_inputs`, `input_flag`, `per_target`, `buffered`, `target_prompt`, `extra_input_prompt`, `validate_target`, `missing_requirement` |
+| `BaseTool` | the adapter base, with today's hooks: `build_cmd`, `parse_line`, `parse_output`, `prepare_inputs`, `input_flag`, `per_target`, `buffered`, `target_prompt`, `extra_input_prompt`, `validate_target`, `missing_requirement`, and `redact_secrets` — set by cyberfw from `Settings.redact_secrets` (default on); a tool that prints raw secret values honours it |
 | `BaseTool` helpers | `rate_args`, `static_flags`, `unique` — today's `_rate_args`, `_static_flags`, `_u`, made public so plugins do not copy them |
 | `ToolContext`, `ScanControls` | what a stage runs with (unchanged) |
 | `ToolRecord` | the base of every record (unchanged) |

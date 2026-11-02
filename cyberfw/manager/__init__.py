@@ -134,9 +134,11 @@ class ToolManager:
 
     def adapter_for(self, name: str, binary: Path) -> BaseTool:
         """``name``'s adapter on its recipe and installed ``binary``, reading its lines
-        with the record model its description names."""
+        with the record model its description names and redacting secrets as the
+        settings say."""
         adapter = self.adapter_class(name)(self.spec(name), binary)
         adapter._record = self.tools[name].record
+        adapter.redact_secrets = self.settings.redact_secrets
         return adapter
 
     # -- tools.lock -----------------------------------------------------------

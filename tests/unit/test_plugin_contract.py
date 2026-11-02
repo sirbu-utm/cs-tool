@@ -62,6 +62,7 @@ CONTRACT_1: dict[str, object] = {
             "per_target": "False",
             "prepare_inputs": "def(self, inputs: 'list[str]') -> 'list[str]'",
             "rate_args": "def(self, ctx: 'ToolContext', flag: 'str' = '-rate-limit') -> 'list[str]'",
+            "redact_secrets": "True",
             "static_flags": "def(self) -> 'list[str]'",
             "target_prompt": "'Target (domain, URL or host)'",
             "unique": "staticmethod(inputs: 'list[str]') -> 'list[str]'",
