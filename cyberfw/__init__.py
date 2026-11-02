@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import logging
 
-__version__ = "1.0.0"
+__version__ = "2.0.0"
 
 # A library's records go where its caller's logging sends them: the CLI sets up
 # its handlers, a script that sets up none gets nothing — not Python's

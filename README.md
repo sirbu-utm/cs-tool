@@ -106,8 +106,10 @@ Launcher передаёт аргументы дальше без изменен�
 
 ### Установка как пакета
 
-Запускать из клона не обязательно: `uv tool install .` (или `pip install .`)
-даёт команду `cyberfw`, которая работает из любого каталога. В wheel входят
+Запускать из клона не обязательно: cyberfw есть на PyPI, и
+`uv tool install cyberfw` (или `pip install cyberfw`) даёт команду `cyberfw`,
+которая работает из любого каталога; из клона то же делает `uv tool install .`.
+В wheel входят
 `registry.yaml` и `pipelines/` (как `cyberfw/data/`), а `tools_bin/`,
 `reports/` и `logs/` создаются в пользовательском каталоге данных —
 `%LOCALAPPDATA%\cyberfw` на Windows, `~/Library/Application Support/cyberfw`
@@ -147,7 +149,7 @@ CI их нет вовсе — печатается сразу финальный
    (логотип CS-TOOL)
 ▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀
 ╔═══════════════════════════════════════════════════════════════════════════════╗
-║  ■■■■■■■■   5/8 ready   1 blocked · 2 not installed   windows/amd64   v1.0.0  ║
+║  ■■■■■■■■   5/8 ready   1 blocked · 2 not installed   windows/amd64   v2.0.0  ║
 ╚═══════════════════════════════════════════════════════════════════════════════╝
    (логотип вуза)
 ```
@@ -618,7 +620,7 @@ HTML): имя pipeline, seed-цель, сессия, платформа (`window
 ```json
 "run": {
   "generated_at": "2026-09-22T09:41:07+00:00",
-  "cyberfw_version": "1.0.0",
+  "cyberfw_version": "2.0.0",
   "pipeline": "recon-to-vuln",
   "seed": "example.com",
   "session_id": "pipeline-recon-to-vuln-20260922-124055",
