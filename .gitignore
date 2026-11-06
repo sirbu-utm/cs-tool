@@ -8,6 +8,8 @@ __pycache__/
 .coverage
 .coverage.*
 htmlcov/
+coverage.xml
+pytest-report.xml
 
 # IDE / local editor state
 .idea/
@@ -30,6 +32,10 @@ nuclei-templates/
 
 # Конфиденциальные данные
 .env
+.env.*
+!.env.example
+!.env.sample
+!.env.template
 config.local.yaml
 
 # Secrets and keys — never commit (this is a security tool)
@@ -50,6 +56,9 @@ bot-scans.sqlite3
 # Local handoff / scratch files
 PROGRESS.md
 test_script
+
+# Local presentation export
+/CS-TOOL_presentation.pdf
 
 # Personal SSH-tunnel launcher (holds the key path + server IP)
 /tunnel.bat
