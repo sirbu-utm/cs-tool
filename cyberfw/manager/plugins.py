@@ -248,7 +248,8 @@ def _state(
         return "conflict", f"another enabled package declares {point.tool} too: disable one of them", (), None
     env = _manifest_env(point) if point.group != CODE_GROUP else ()
     if point.package not in chosen.enabled:
-        return "disabled", f"enable it with `cyberfw plugins enable {point.package}`", env, None
+        flag = " --allow-code" if point.kind == "code" else ""
+        return "disabled", f"enable it with `cyberfw plugins enable {point.package}{flag}`", env, None
     if point.kind == "code" and point.package not in chosen.allow_code:
         return (
             "code-not-allowed",

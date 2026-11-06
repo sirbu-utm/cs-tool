@@ -190,6 +190,8 @@ def test_plugins_lists_each_tool_with_its_package_kind_env_state_and_reason(site
     # its YAML — reading runs nothing) and why it is not in use.
     assert "keyed: env KEYED_TOKEN — enable it with `cyberfw plugins enable cyberfw-keyed`" in _text(result)
     assert "sample: enable it with `cyberfw plugins enable cyberfw-sample`" in _text(result)
+    # The hint works as it is: without its flag a code package is refused.
+    assert "bar: enable it with `cyberfw plugins enable cyberfw-bar --allow-code`" in _text(result)
 
 
 def test_with_no_plugin_installed_plugins_says_how_to_add_one(monkeypatch: pytest.MonkeyPatch) -> None:
