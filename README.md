@@ -232,6 +232,8 @@ pipeline видна цепочка его этапов (`subfinder → httpx →
 | `rustscan` | Быстрое обнаружение открытых портов | Домен, IP или URL |
 | `subfinder` | Пассивный поиск поддоменов | Домен |
 
+Другие инструменты подключаются плагинами — см. «Плагины».
+
 `gitleaks` не сканирует веб-адреса. Для него нужно указать существующую
 локальную папку, например `C:\Projects\app` или `/home/user/app`.
 
@@ -360,6 +362,11 @@ cyberfw pipeline recon-to-vuln --target example.com --alert --alert-severity hig
 cyberfw schedule recon-to-vuln --target example.com --every daily --at 09:00
 cyberfw schedule recon-to-vuln --target example.com --every daily --install
 cyberfw schedule recon-to-vuln --target example.com --remove
+
+# Плагины: что установлено, включить, выключить (см. «Плагины»)
+cyberfw plugins
+cyberfw plugins enable cyberfw-sample
+cyberfw plugins disable cyberfw-sample
 ```
 
 Перед стартом `pipeline` проверяет, что прогон вообще способен дать результат:
@@ -1004,6 +1011,361 @@ x64-сборку, а Apple silicon — x86_64 под Rosetta; Linux ARM на x64
 - `.zip`, `.tar.gz` и raw-бинарники;
 - Windows PE-сигнатуру `MZ`, чтобы не запускать Linux ELF-файлы.
 
+## Плагины
+
+Плагин добавляет инструмент, которого в cyberfw нет: это отдельный Python-пакет,
+установленный рядом с cyberfw. Его инструмент работает везде, где работают
+встроенные: `cyberfw run`, YAML-pipeline, меню и дополнение по Tab,
+`cyberfw lock` и `init`, отчёты, SARIF, сравнение прогонов, `cyberfw mute`,
+Python API. Заменить встроенный инструмент плагин не может.
+
+Пакеты в примерах, `cyberfw-sample` и `cyberfw-bar`, вымышленные: на PyPI их нет.
+Но примеры рабочие: `tests/unit/test_readme_plugins.py` устанавливает пакеты
+именно из этого раздела и запускает их.
+
+### Подключить плагин
+
+Поставь пакет в то же окружение, где стоит cyberfw, и включи его:
+
+```bash
+uv tool install cyberfw --with cyberfw-sample   # или pip install cyberfw-sample рядом с cyberfw
+cyberfw plugins
+cyberfw plugins enable cyberfw-sample
+cyberfw init sample
+cyberfw run sample --target https://example.com
+```
+
+`uv tool install` задаёт набор пакетов заново: добавляя второй плагин, укажи
+`--with` для каждого.
+
+Установленный плагин выключен, и код его пакета не импортируется: `cyberfw plugins`
+читает только метаданные. Вот что он покажет для двух пакетов из примеров:
+
+```text
+package         version  kind      tool    state
+cyberfw-bar     0.3      code      bar     disabled
+cyberfw-sample  1.0      manifest  sample  disabled
+
+bar: enable it with `cyberfw plugins enable cyberfw-bar --allow-code`
+sample: env SAMPLE_API_KEY — enable it with `cyberfw plugins enable cyberfw-sample`
+```
+
+Под таблицей — по строке на инструмент, если есть что сказать: какие переменные
+окружения он получит (`env`) и почему не используется. `cyberfw plugins enable`
+завершается с кодом:
+
+- `0` — все инструменты пакета работают или пакет уже был включён;
+- `1` — пакет включён, но какой-то инструмент не работает, причина на экране;
+  исправленная версия пакета заработает без повторного включения;
+- `2` — такого пакета нет, пакету с кодом не дан `--allow-code` или `plugins.yaml`
+  не читается и не пишется.
+
+`cyberfw plugins disable <пакет>` выключает пакет; повторять можно, а ещё так
+убирается запись о пакете, которого больше нет.
+
+Выбор хранится в `plugins.yaml` рядом с `registry.yaml`, а при установке пакетом —
+в пользовательском каталоге данных (путь — настройка `plugins_file`). Файл можно
+закоммитить вместе с workspace, и CI включит те же плагины:
+
+```yaml
+# managed by `cyberfw plugins enable/disable`
+enabled:
+- cyberfw-bar
+- cyberfw-sample
+allow_code:
+- cyberfw-bar
+```
+
+Включён всегда пакет целиком, со всеми его инструментами. У каждого инструмента
+одно из состояний:
+
+| Состояние | Что значит |
+|---|---|
+| `disabled` | установлен, но не включён (по умолчанию) |
+| `enabled` | включён и работает |
+| `code-not-allowed` | включён, но пакет поставляет код, а `--allow-code` не дан: например, новая версия манифестного пакета начала поставлять Python |
+| `conflict` | имя занято: встроенным инструментом, записями самого cyberfw (`tlscheck`, `mailcheck`, `takeover`, `virustotal`) или другим включённым пакетом; остальные инструменты пакета работают |
+| `incompatible` | написан для версии контракта, которую этот cyberfw не загружает |
+| `broken` | ошибка при импорте, неверный манифест или недопустимое имя; причина — под таблицей |
+| `missing` | указан в `plugins.yaml`, но такой пакет не установлен |
+
+Сломанный плагин не мешает остальному: встроенные инструменты и другие плагины
+работают дальше, а запуск его инструмента завершается ошибкой с причиной и
+подсказкой.
+
+В `status` и в меню появляется колонка `origin` — откуда инструмент (`built-in`
+или `cyberfw-sample 1.0`), а в `status` ещё строка `plugins` со счётом инструментов
+по состояниям. Колонка есть, только когда включён хотя бы один плагин. В
+`report.json` блок `run` получает `tool_plugins` — из какого пакета пришёл каждый
+плагинный инструмент прогона. Сохранённый прогон читается, сравнивается и
+экспортируется и после того, как плагин выключен или удалён.
+
+В YAML-pipeline инструмент плагина указывается как любой другой:
+
+```yaml
+description: Hosts, then both plugins on them
+nodes:
+  - {tool: subfinder, stage: hosts}
+  - {tool: sample, stage: findings, input_from: hosts}
+  - {tool: bar, stage: report, input_from: hosts}
+```
+
+Рецепт бинарника приходит с плагином, поэтому `registry.yaml` править не нужно.
+`cyberfw lock` закрепляет его в `tools.lock` как встроенный, а выключение плагина
+запись не удаляет: повторное включение версию не поменяет. Запись в `registry.yaml`
+с именем инструмента дополняет рецепт плагина по ключам — так можно закрепить
+версию или указать свой бинарник:
+
+```yaml
+sample:
+  version: v1.4.2        # или source: local и path: C:\tools\sample.exe
+```
+
+### Чему доверяешь, включая плагин
+
+- **Плагин с кодом** (`kind` — `code`) выполняет свой Python внутри процесса
+  cyberfw, с теми же правами: ему доступны твои файлы и отчёты, токены и ключи из
+  окружения и `.env`, сеть. Песочницы нет, поэтому такой пакет включается только
+  явно:
+
+  ```bash
+  cyberfw plugins enable cyberfw-bar --allow-code
+  ```
+
+- **Плагин-манифест** (`kind` — `manifest`) — только YAML: своего Python внутри
+  cyberfw он не выполняет. Вид пакета проверяется по файлам, которые он установил,
+  а не берётся с его слов: если новая версия начнёт поставлять Python, инструмент
+  перейдёт в `code-not-allowed` и не загрузится, пока ты это не разрешишь.
+- **Бинарник инструмента** в обоих случаях — чужая программа, работающая с твоими
+  правами; cyberfw её не изолирует. Она получает очищенное окружение: только то,
+  что нужно любой программе (`PATH`, домашний и временные каталоги, прокси,
+  сертификаты, локаль), и переменные из `env:` своего рецепта. Токен GitHub и ключ
+  VirusTotal до неё не доходят, если рецепт сам их не просит. У манифестного пакета
+  `cyberfw plugins` показывает `env:` ещё до включения — посмотри, не просит ли
+  плагин чужой секрет. Рецепт пакета с кодом известен только после загрузки, то
+  есть после `--allow-code`.
+- **Установка пакета** — уже доверие: pip может выполнить код сборки, а файл `.pth`
+  из wheel выполняется при каждом запуске интерпретатора. `enable` не заменяет
+  проверку того, что ты ставишь.
+
+### Написать плагин-манифест
+
+Большинству инструментов хватает манифеста: инструмент печатает JSON Lines, а
+принимает цель и список хостов. Python писать не нужно. Пакет — это описание и один
+YAML-файл на инструмент, названный по его имени:
+
+```text
+cyberfw-sample/
+  pyproject.toml
+  cyberfw_sample/
+    sample.yaml
+```
+
+```toml
+[project]
+name = "cyberfw-sample"
+version = "1.0"
+
+[project.entry-points."cyberfw.manifests"]
+sample = "cyberfw_sample"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["cyberfw_sample"]
+```
+
+Имя entry point — это имя инструмента: строчные латинские буквы, цифры, `-` и `_`,
+начинается с буквы или цифры. Значение — пакет, в котором лежит YAML; в нём не должно
+быть файлов `.py`, `.pyc`, `.pth`, `.so` и `.pyd`, иначе это уже пакет с кодом.
+
+```yaml
+contract: 1
+install:                         # те же ключи, что у записи в registry.yaml
+  repo: acme/sample
+  asset_patterns: ["sample_*_linux_amd64.zip", "sample_*_darwin_arm64.zip", "sample_*_windows_amd64.zip"]
+  env: [SAMPLE_API_KEY]          # какие переменные окружения получит инструмент
+command: ["-json", "-silent"]
+target: ["-u", "{target}"]
+list: ["-l", "{input_file}"]
+rate: ["-rate-limit", "{rate}"]
+target_prompt: "Target URL"
+record:
+  kind: vuln
+  target: matched-at
+  finding:
+    template_id: template-id
+    name: info.name
+    severity: info.severity
+    description: info.description
+```
+
+Этот манифест читает строки такого вида, каждая становится находкой:
+
+```json
+{"template-id": "open-admin", "matched-at": "https://example.com/admin", "info": {"name": "Open admin panel", "severity": "high", "description": "The admin panel needs no login."}}
+```
+
+| Ключ | Что задаёт |
+|---|---|
+| `contract` | версия контракта, для которой написан манифест |
+| `install` | рецепт бинарника: те же ключи, что у записи в `registry.yaml` (см. «Реестр инструментов»), кроме `name` |
+| `command` | аргументы, которые нужны всегда, сразу после бинарника |
+| `target` | как передать одну цель, с `{target}`; обязателен |
+| `list` | как передать хосты предыдущего этапа, с `{input_file}` (файл пишет движок); обязателен, если не задан `per_target` |
+| `severity`, `tags`, `rate` | аргументы, которые добавляются, только когда задан фильтр или лимит, с `{severity}`, `{tags}`, `{rate}` |
+| `per_target` | `true` — по процессу на каждый хост вместо `list` |
+| `inputs` | `any` (по умолчанию) или `host` — привести URL к имени хоста |
+| `target_prompt` | что спрашивает меню |
+| `record` | как строка вывода становится записью: |
+| `record.kind` | `host`, `port`, `http`, `fuzz`, `vuln`, `secret`, `screenshot`, `scan`, `reputation` или свой |
+| `record.target` | цель записи: путь к полю (`matched-at`, `info.name`) или шаблон (`{host}:{port}`) |
+| `record.finding` | только для `vuln`: откуда взять `template_id`, `matched_at` (по умолчанию — цель записи), `name`, `severity`, `description`, `remediation` |
+
+Команда собирается так: бинарник, `command`, флаги рецепта, затем `severity`, `tags`
+и `rate`, если заданы, затем `target` или `list`. В любом из этих списков можно
+использовать `{output_dir}` — каталог сессии, для инструмента, который пишет файлы.
+
+Запись `vuln` становится находкой и попадает в раздел находок HTML-отчёта, SARIF,
+сравнение прогонов и `cyberfw mute`. Запись другого вида хранится в `report.json` и
+CSV, а её цель получает следующий этап. Каждая запись сохраняет все поля своей
+строки; строка, которая не является объектом JSON, пропускается. Ошибка в манифесте
+переводит инструмент в `broken`, а причина называет ключ.
+
+Устанавливай пакет обычной установкой (`uv pip install .`), без `-e`: при
+editable-установке hatchling YAML-файл в окружение не попадает, и инструмент окажется
+`broken`.
+
+### Написать плагин с кодом
+
+Код нужен, когда манифеста мало: инструмент печатает один документ вместо JSON Lines,
+вывод надо разбирать сложнее, чем по полям, или команда зависит от входа как-то иначе.
+Такой пакет объявляет инструмент в другой группе и указывает на объект `ToolPlugin`:
+
+```toml
+[project]
+name = "cyberfw-bar"
+version = "0.3"
+dependencies = ["cyberfw>=2.0"]
+
+[project.entry-points."cyberfw.tools"]
+bar = "cyberfw_bar:PLUGIN"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["cyberfw_bar"]
+```
+
+Содержимое `cyberfw_bar/__init__.py`:
+
+```python
+from __future__ import annotations
+
+import json
+
+from cyberfw.plugin import BaseTool, Finding, ParseError, ToolContext, ToolPlugin, ToolRecord, ToolSpec
+
+
+class BarTool(BaseTool):
+    buffered = True  # bar prints one JSON document, not JSON Lines
+
+    @property
+    def input_flag(self) -> str | None:
+        return "--list"
+
+    def build_cmd(self, ctx: ToolContext) -> list[str]:
+        cmd = [str(self.binary), "--report", "json", *self.rate_args(ctx, "--rate")]
+        return [*cmd, ctx.target] if ctx.target else [*cmd, "--list", str(ctx.input_file)]
+
+    def parse_output(self, text: str) -> list[ToolRecord]:
+        try:
+            return [
+                Finding(
+                    tool=self.name,
+                    line_number=index,
+                    raw=json.dumps(issue),
+                    target=issue["url"],
+                    template_id=issue["check"],
+                    matched_at=issue["url"],
+                    info={"name": issue["title"], "severity": issue["risk"]},
+                )
+                for index, issue in enumerate(json.loads(text)["issues"], start=1)
+            ]
+        except (ValueError, KeyError, TypeError) as exc:
+            raise ParseError(f"[bar] unexpected report: {exc}") from exc
+
+
+PLUGIN = ToolPlugin(
+    contract=1,
+    adapter=BarTool,
+    record=Finding,
+    install=ToolSpec(repo="acme/bar", asset_patterns=["bar_*_linux_amd64.zip", "bar_*_windows_amd64.zip"]),
+)
+```
+
+Этот код читает такой документ:
+
+```json
+{
+  "issues": [
+    {"url": "https://example.com/", "check": "weak-tls", "title": "Weak TLS", "risk": "medium"}
+  ]
+}
+```
+
+Для инструмента, который печатает JSON Lines, `buffered` и `parse_output` не нужны:
+опиши модель записи — наследника `ToolRecord` или `Finding` с методом `from_json` — и
+укажи её в `record`.
+
+### Контракт и его версия
+
+Плагин опирается только на `cyberfw.plugin`. Всё остальное (`cyberfw.tools.*`,
+`cyberfw.pipeline.*`, `cyberfw.manager.*` и прочее) — внутреннее и может измениться в
+любой версии. Встроенные инструменты написаны по этому же контракту.
+
+| Имя | Что это |
+|---|---|
+| `CONTRACT` | версия контракта, под которую написан этот cyberfw (`1`) |
+| `SUPPORTED_CONTRACTS` | какие версии контракта он загружает |
+| `ToolPlugin` | описание инструмента: `contract`, `adapter`, `record`, `install` |
+| `BaseTool` | базовый класс адаптера, см. ниже |
+| `ToolContext` | с чем запущен этап: `target`, `inputs`, `input_file`, `extra_input`, `output_dir`, `controls` |
+| `ScanControls` | настройки скана в `controls`: `rate_limit`, `severity`, `tags` |
+| `ToolRecord` | базовый класс записи |
+| `Finding` | находка в форме находки nuclei: её читают отчёты, SARIF, сравнение и триаж |
+| `ToolSpec` | рецепт бинарника, та же модель, что запись в `registry.yaml` |
+| `ParseError` | вывод не удалось разобрать |
+
+`BaseTool`:
+
+- обязателен только `build_cmd` — команда этапа по `ToolContext`; бинарник — в
+  `self.binary`, имя инструмента — в `name`;
+- вывод: `parse_line` разбирает строку моделью из `record`, а если задан `buffered`,
+  весь вывод разом разбирает `parse_output`. Строка, на которой `parse_line` упал,
+  пропускается, а ошибка `parse_output` проваливает этап;
+- вход: `input_flag` — флаг списка хостов (без него файл не создаётся),
+  `prepare_inputs` — обработать цели до записи в файл, `per_target` — по процессу на
+  цель;
+- меню и проверки: `target_prompt`, `extra_input_prompt`, `validate_target` — отказ
+  неподходящей цели с понятным сообщением, `missing_requirement` — чего не хватает
+  инструменту для работы;
+- `redact_secrets` — скрывать ли секреты, которые печатает инструмент; выставляет
+  cyberfw из настройки `redact_secrets`;
+- помощники: `rate_args` — флаг лимита скорости, `static_flags` — флаги рецепта,
+  `unique` — убрать повторы.
+
+Версия контракта — целое число, отдельное от версии cyberfw. В `contract` плагин
+указывает её числом, а не через `CONTRACT`: иначе проверка пройдёт всегда. Добавление
+необязательного (нового метода с поведением по умолчанию, нового поля контекста)
+версию не меняет. Удаление, переименование и смена смысла — меняют, и прежняя версия
+какое-то время остаётся в `SUPPORTED_CONTRACTS`. Плагин для версии, которую cyberfw не
+загружает, получает состояние `incompatible` с подсказкой, что обновить.
+
 ## Python API
 
 Всё, что CLI делает с прогонами, доступно из Python — для своих скриптов и CI.
@@ -1037,6 +1399,9 @@ raise SystemExit(outcome.exit_code(alert_severity="high"))  # 0 / 1 / 3, как 
   `target` или список хостов `inputs` (пустой список — прогон без входа).
 - `load_run(ref)` → `SavedRun`; `compare_runs(old, new)`, `export_sarif(run)`,
   `export_csv(run)`.
+- `list_plugins()` → список `PluginInfo`: то же, что `cyberfw plugins` (`package`,
+  `version`, `kind`, `tool`, `state`, `reason`, `env`). Включаются плагины только
+  командой или в `plugins.yaml`: запуск чужого кода — решение пользователя.
 - Ошибки cyberfw импортируются из `cyberfw.api`: `RegistryError` (неизвестный
   pipeline или инструмент), `PreflightError` с `.blocking` (этапы не могут
   запуститься без `force_start`), `ToolNotFoundError`, `ReportError`; все они —
@@ -1087,18 +1452,22 @@ uv run pytest -m integration -q
 ```text
 cyberfw/
   cli/                   Typer CLI: команды по модулям (tools, scan, reports, triage,
-                         schedule), общие помощники (common), отрисовка (views), лаунчер
+                         schedule, plugins), общие помощники (common), отрисовка (views),
+                         лаунчер
   core/                  прогон без интерфейса: реестр и lock (workspace), события (events),
                          сессии (sessions), запуск пайплайна (scan), проверки после скана
-                         (steps), завершение и отчёты (finish), одиночный run (tool_run)
+                         (steps), завершение и отчёты (finish), одиночный run (tool_run),
+                         включение плагинов (plugins)
   api.py                 публичный Python API (стабилен в пределах мажорной версии)
   ui.py                  Rich UI, логотипы и гайды инструментов
-  manager/               GitHub API, реестр, установка и проверка бинарников
+  manager/               GitHub API, реестр, установка и проверка бинарников, поиск и
+                         загрузка плагинов (discovery, plugins)
   pipeline/              executor, context store и pipeline engine
   pipelines/             встроенные pipeline и загрузчик YAML-описаний
   plugin.py              контракт адаптера инструмента: по нему описаны встроенные инструменты
                          и пишутся плагины (стабилен в пределах своей версии)
-  tools/                 адаптеры девяти внешних инструментов (вкл. локальный nmap)
+  tools/                 адаптеры девяти внешних инструментов (вкл. локальный nmap) и общий
+                         адаптер манифестов плагинов
   posture/               проверки после скана: TLS, подделка почты (SPF/DMARC), захват поддомена
   threatintel.py         опасность CVE: CISA KEV, EPSS, Exploit-DB
   vt.py                  клиент VirusTotal и поиск ключа
@@ -1119,6 +1488,9 @@ cstool / start.sh        Linux/macOS launcher (bootstrap + CLI)
 - URL скачивания валидируются;
 - бинарники проверяются по формату текущей ОС;
 - токены читаются из окружения и не сохраняются в Git;
+- процессы инструментов получают очищенное окружение, без секретов cyberfw;
+- код плагина выполняется, только если пакет включён с `--allow-code` (см. «Чему
+  доверяешь, включая плагин»);
 - ключ VirusTotal хранится только в локальном `.env` (права 600) и уходит в
   заголовке запроса, а не в аргументах команды и логах; что ещё и куда
   отправляется после скана, перечислено в «Проверки после скана».

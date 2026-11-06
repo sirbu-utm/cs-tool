@@ -1,7 +1,7 @@
 # Tool adapters as plugins
 
 Date: 2026-10-26 (revised the same day: manifest plugins, isolation)
-Status: design, pending review — Step 1 done (`8e537a6`, `c319289`)
+Status: implemented — Steps 1–4 shipped in cyberfw 2.0.0, Step 5 is the README section «Плагины»
 Roadmap: 2.0, item 1b (follows 1a, the core / API / CLI split)
 
 ## Goal
