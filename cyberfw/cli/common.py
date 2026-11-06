@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+import sys
 from pathlib import Path
 from typing import Annotated, Any, TextIO
 
@@ -18,6 +20,15 @@ from cyberfw.core.sessions import checked_session
 from cyberfw.core.workspace import open_manager, tool_state
 from cyberfw.logging import console, get_logger, setup_logging
 from cyberfw.manager import ToolManager
+
+if sys.platform == "win32":
+    import ctypes
+    import msvcrt
+    from ctypes import wintypes
+
+    _kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    _kernel32.GetConsoleMode.argtypes = (wintypes.HANDLE, wintypes.LPDWORD)
+    _kernel32.GetConsoleMode.restype = wintypes.BOOL
 
 LOG = get_logger("cli")
 
@@ -96,12 +107,30 @@ def _bootstrap(*, verbose: bool = False) -> tuple[Settings, ToolManager]:
     return settings, open_manager(settings)
 
 
+def _is_null_device(stream: TextIO | None) -> bool:
+    """Whether ``stream`` is the null device, or there is no stream at all: nobody sees
+    what is written to it, and nobody can answer through it."""
+    if stream is None:
+        return True
+    try:
+        fd = stream.fileno()
+        if sys.platform == "win32":
+            # NUL is a character device, so isatty() takes it for a terminal; only a
+            # real console has a console mode.
+            mode = wintypes.DWORD()
+            return os.isatty(fd) and not _kernel32.GetConsoleMode(msvcrt.get_osfhandle(fd), ctypes.byref(mode))
+        return os.path.samestat(os.fstat(fd), os.stat(os.devnull))
+    except (OSError, ValueError):  # no file behind it, or a closed one
+        return False
+
+
 def _is_interactive() -> bool:
     """True when there is a user at the keyboard to answer a prompt.
 
-    A pipe, a CI job or a `< /dev/null` run must never block on a question.
+    A pipe for the output, a CI job or the null device at either end must never block
+    on a question. A pipe for the input may: ``echo y | cyberfw …`` is answering it.
     """
-    return bool(console.is_interactive)
+    return bool(console.is_interactive) and not (_is_null_device(sys.stdin) or _is_null_device(sys.stdout))
 
 
 def _wants_to_save(decided: bool | None, *, default: bool, what: str) -> bool:
