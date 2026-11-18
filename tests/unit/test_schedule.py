@@ -111,6 +111,15 @@ class TestCronLine:
         assert "/a b/w.txt" in tokens  # not split into "/a" and "b/w.txt"
         assert "CYBERFW_ROOT_DIR=/my ws" in tokens
 
+    def test_a_percent_sign_is_escaped_for_cron(self) -> None:
+        """cron cuts the command at an unescaped % (the rest becomes stdin), even inside quotes."""
+        line = schedule.cron_line(
+            Schedule("recon-to-vuln", "example.com"), program=["cyberfw"], root="/ws/100%", log="/ws/%d.log"
+        )
+        command = line.split(" # ")[0]
+        assert "%" not in command.replace("\\%", "")
+        assert "CYBERFW_ROOT_DIR=/ws/100\\%" in command and "/ws/\\%d.log" in command
+
 
 class TestSchtasksCommand:
     def test_daily(self) -> None:
@@ -119,8 +128,38 @@ class TestSchtasksCommand:
         assert argv[:7] == ["schtasks", "/Create", "/SC", "DAILY", "/ST", "09:00", "/TN"]
         assert argv[7] == "cyberfw-recon-to-vuln-example.com"
         assert argv[8] == "/TR"
-        assert "set CYBERFW_ROOT_DIR=C:\\ws" in argv[9] and "--alert" in argv[9]
+        assert 'set "CYBERFW_ROOT_DIR=C:\\ws"&& ' in argv[9] and "--alert" in argv[9]
         assert argv[-1] == "/F"
+
+    @pytest.mark.parametrize("every", ["daily", "weekly"])
+    @pytest.mark.parametrize("bad", ["9:00", "25:99", "nine"])
+    def test_a_malformed_time_is_rejected_like_cron(self, every: str, bad: str) -> None:
+        with pytest.raises(ValueError):
+            schedule.schtasks_command(
+                Schedule("recon-to-vuln", "example.com", every=every, at=bad), program=["cyberfw"], root="r", log="l"
+            )
+
+    def test_a_workspace_path_with_cmd_metacharacters_stays_one_argument(self) -> None:
+        """`C:\\R&D\\ws` must not be split by cmd at `&` into `set ...=C:\\R` and a command `D\\ws`."""
+        argv = schedule.schtasks_command(
+            Schedule("recon-to-vuln", "example.com"),
+            program=[r"C:\R&D\ws\.venv\Scripts\cyberfw.exe"],
+            root=r"C:\R&D\ws",
+            log=r"C:\R&D\ws\logs\schedule.log",
+        )
+        run = argv[argv.index("/TR") + 1]
+        assert run == (
+            'cmd /c "set "CYBERFW_ROOT_DIR=C:\\R&D\\ws"&& "C:\\R&D\\ws\\.venv\\Scripts\\cyberfw.exe" '
+            "pipeline recon-to-vuln -t example.com --alert --alert-severity low "
+            '>> "C:\\R&D\\ws\\logs\\schedule.log" 2>&1"'
+        )
+
+    def test_a_trailing_backslash_does_not_escape_the_closing_quote(self) -> None:
+        argv = schedule.schtasks_command(
+            Schedule("recon-to-vuln", "example.com", scan_args=("--wordlist", "C:\\(lists)\\")),
+            program=["cyberfw"], root="r", log="l",
+        )
+        assert '"C:\\(lists)\\\\"' in argv[argv.index("/TR") + 1]
 
     def test_weekly_and_hourly_map_to_schtasks_schedules(self) -> None:
         weekly = schedule.schtasks_command(
@@ -173,7 +212,7 @@ class TestCrontabBoundary:
             return CompletedProcess(argv, 0, "", "")
 
         monkeypatch.setattr(schedule, "_run", fake_run)
-        schedule.install_cron(Schedule("recon-to-vuln", "example.com"), program="cyberfw", root="/ws", log="/ws/l")
+        schedule.install_cron(Schedule("recon-to-vuln", "example.com"), program=["cyberfw"], root="/ws", log="/ws/l")
 
         assert len(writes) == 1
         written = writes[0]
