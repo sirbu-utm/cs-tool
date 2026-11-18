@@ -49,6 +49,11 @@ _TIME = re.compile(r"^([01]\d|2[0-3]):([0-5]\d)$")
 #: would otherwise allow command injection when the job fires.
 _SAFE_TARGET = re.compile(r"^[A-Za-z0-9._:/-]+$")
 
+#: Characters ``cmd.exe`` acts on outside double quotes. ``list2cmdline`` quotes
+#: only for whitespace (its rules are the C runtime's, not cmd's), so a path such
+#: as ``C:\R&D\ws`` would otherwise reach ``cmd /c`` bare and be split at ``&``.
+_CMD_SPECIAL = re.compile(r"[&|<>^()]")
+
 
 def validate_target(target: str) -> None:
     """Refuse a target that could inject a command into the scheduled entry.
@@ -126,26 +131,41 @@ def cron_line(schedule: Schedule, *, program: list[str], root: str, log: str, ex
     schedule_expr = expr if expr is not None else cron_expr(schedule.every, schedule.at)
     cmd = " ".join(shlex.quote(token) for token in scan_argv(schedule, program=program))
     env = f"CYBERFW_ROOT_DIR={shlex.quote(root)}"
-    return f"{schedule_expr} {env} {cmd} >> {shlex.quote(log)} 2>&1 # {tag(schedule)}"
+    # cron turns an unescaped % in the command into a newline (the rest becomes
+    # stdin), even inside shell quotes; ``\%`` reaches the shell as a plain %.
+    command = f"{env} {cmd} >> {shlex.quote(log)} 2>&1".replace("%", r"\%")
+    return f"{schedule_expr} {command} # {tag(schedule)}"
+
+
+def _cmd_arg(token: str) -> str:
+    """One argument for a ``cmd /c`` line: C-runtime quoting, plus quotes around
+    a token carrying a cmd metacharacter that ``list2cmdline`` left bare."""
+    quoted = subprocess.list2cmdline([token])
+    if quoted.startswith('"') or not _CMD_SPECIAL.search(token):
+        return quoted
+    # Double trailing backslashes so they do not escape the closing quote.
+    trailing = "\\" * (len(token) - len(token.rstrip("\\")))
+    return f'"{token}{trailing}"'
 
 
 def schtasks_command(schedule: Schedule, *, program: list[str], root: str, log: str) -> list[str]:
     """The ``schtasks /Create`` argv for Windows Task Scheduler.
 
-    The inner command is quoted with Windows rules (``list2cmdline``), and the
-    target is validated (see :func:`validate_target`) so it cannot break out of
-    the ``cmd /c`` string."""
+    The inner command is quoted with Windows rules (``list2cmdline``) and cmd's
+    own (a path with ``&`` or parentheses stays one argument), and the target is
+    validated (see :func:`validate_target`) so it cannot break out of the
+    ``cmd /c`` string. ``at`` is checked the same way as for cron."""
     if schedule.every == "hourly":
         sc = ["/SC", "HOURLY"]
-    elif schedule.every == "weekly":
-        sc = ["/SC", "WEEKLY", "/D", "MON", "/ST", schedule.at]
-    elif schedule.every == "daily":
-        sc = ["/SC", "DAILY", "/ST", schedule.at]
+    elif schedule.every in ("weekly", "daily"):
+        _hh_mm(schedule.at)  # reject a malformed time here, not in schtasks later
+        days = ["/D", "MON"] if schedule.every == "weekly" else []
+        sc = ["/SC", schedule.every.upper(), *days, "/ST", schedule.at]
     else:
         raise ValueError(f"cadence must be one of {', '.join(CADENCES)}, got {schedule.every!r}")
-    inner = subprocess.list2cmdline(scan_argv(schedule, program=program))
-    log_part = f'"{log}"' if " " in log else log
-    run = f'cmd /c "set CYBERFW_ROOT_DIR={root}&& {inner} >> {log_part} 2>&1"'
+    inner = " ".join(_cmd_arg(token) for token in scan_argv(schedule, program=program))
+    # `set "NAME=value"` keeps & and trailing spaces in the value out of cmd's hands.
+    run = f'cmd /c "set "CYBERFW_ROOT_DIR={root}"&& {inner} >> {_cmd_arg(log)} 2>&1"'
     return ["schtasks", "/Create", *sc, "/TN", tag(schedule), "/TR", run, "/F"]
 
 
