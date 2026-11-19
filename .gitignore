@@ -59,6 +59,8 @@ test_script
 
 # Local presentation export
 /CS-TOOL_presentation.pdf
+# The 2.0 presentation, its speech text and the scripts that build them
+/presentation/
 
 # Personal SSH-tunnel launcher (holds the key path + server IP)
 /tunnel.bat
