@@ -6,6 +6,8 @@
 
 ## [Unreleased]
 
+## [2.0.3] — 2026-11-19
+
 ### Fixed
 - `cyberfw schedule` на Windows ломал задание, если путь к workspace, к `cyberfw`
   или к логу содержит `&` или скобки (например `C:\R&D\cs-tool`): `cmd /c`
