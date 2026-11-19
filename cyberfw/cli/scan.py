@@ -278,7 +278,8 @@ def run_cmd(
         settings = settings.model_copy(update={"redact_secrets": False})
         console.print("[warn]--show-secrets: raw secret values will be printed and saved unredacted.[/warn]")
     hosts = _read_hosts(list_file) if list_file is not None else []
-    target_label = target or f"{len(hosts)} host(s) from {list_file}"
+    from_list = f"{len(hosts)} host(s) from {list_file}"
+    target_label = f"{target} + {from_list}" if target and list_file is not None else target or from_list
     # Parsing is on by default; disable it via the config `parse:` setting
     # (CYBERFW_PARSE=false) or override per-run with --no-parse.
     do_parse = settings.parse and not no_parse
@@ -570,7 +571,7 @@ def pipeline_cmd(
         raise typer.Exit(2) from exc
     except ReportError as exc:
         console.print(f"[err]report failed:[/err] {escape(str(exc))}")
-        return
+        raise typer.Exit(1) from exc
     except CyberfwError as exc:
         console.print(f"[err]{escape(str(exc))}[/err]")
         raise typer.Exit(1) from exc

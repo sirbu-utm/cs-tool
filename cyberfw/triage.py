@@ -182,6 +182,10 @@ def load_rules(path: Path) -> list[Rule]:
     if not isinstance(mutes, list):
         raise TriageError(f"{path}: expected a `mutes:` list")
     rules = [_rule_from(raw, index) for index, raw in enumerate(mutes, start=1)]
+    for rule in rules:
+        # An expiry that is no date would never come: the mute would hold for ever.
+        if rule.expires and _parse_date(rule.expires) is None:
+            raise TriageError(f"{path}: mute {rule.id}: expires {rule.expires!r} is not a date (YYYY-MM-DD)")
     seen: set[str] = set()
     for rule in rules:
         if rule.id in seen:

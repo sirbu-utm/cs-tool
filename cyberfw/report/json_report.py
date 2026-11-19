@@ -42,6 +42,7 @@ def report_payload(result: PipelineResult, run: RunInfo | None = None) -> dict[s
             }
             for nr in result.nodes
         ],
+        "checks": list(result.checks),
         "total_records": len(result.records),
         "records": [r.as_dict() for r in result.records],
     }

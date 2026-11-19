@@ -8,6 +8,7 @@ import pytest
 from pydantic import ValidationError
 
 from cyberfw.config import Settings, load_settings
+from cyberfw.exceptions import ConfigError
 
 
 class TestSettings:
@@ -58,12 +59,6 @@ class TestSettings:
         yaml_file.write_text("concurrency: 13\n", encoding="utf-8")
         settings = load_settings(root_dir=tmp_path, local_file=yaml_file)
         assert settings.concurrency == 13
-
-    def test_unknown_yaml_keys_ignored(self, tmp_path: Path, monkeypatch) -> None:
-        yaml_file = tmp_path / "config.local.yaml"
-        yaml_file.write_text("not_a_setting: 1\n", encoding="utf-8")
-        settings = load_settings(root_dir=tmp_path, local_file=yaml_file)
-        assert not hasattr(settings, "not_a_setting")
 
 
     def test_parse_toggle_via_yaml(self, tmp_path: Path) -> None:
@@ -197,3 +192,31 @@ class TestRootDirDiscovery:
         monkeypatch.setattr("cyberfw.config.user_data_dir", lambda: data)
 
         assert load_settings().concurrency == 9
+
+
+
+class TestConfigFileProblems:
+    """A config file cyberfw cannot use is said to be so, never quietly dropped."""
+
+    def test_a_file_that_is_not_yaml_is_an_error(self, tmp_path: Path) -> None:
+        (tmp_path / "config.local.yaml").write_text("exclude: ['*.gov'\nrate_limit: 5\n", encoding="utf-8")
+
+        with pytest.raises(ConfigError, match="config.local.yaml"):
+            load_settings(root_dir=tmp_path)
+
+    def test_a_file_that_is_not_a_mapping_is_an_error(self, tmp_path: Path) -> None:
+        (tmp_path / "config.local.yaml").write_text("- rate_limit\n", encoding="utf-8")
+
+        with pytest.raises(ConfigError, match="mapping"):
+            load_settings(root_dir=tmp_path)
+
+    def test_an_unknown_key_is_an_error_that_suggests_the_right_one(self, tmp_path: Path) -> None:
+        (tmp_path / "config.local.yaml").write_text("excludes: ['*.gov']\n", encoding="utf-8")
+
+        with pytest.raises(ConfigError, match=r"excludes.*exclude"):
+            load_settings(root_dir=tmp_path)
+
+    def test_an_empty_file_is_no_settings(self, tmp_path: Path) -> None:
+        (tmp_path / "config.local.yaml").write_text("# nothing yet\n", encoding="utf-8")
+
+        assert load_settings(root_dir=tmp_path).exclude == []

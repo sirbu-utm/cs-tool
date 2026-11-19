@@ -284,3 +284,45 @@ def test_post_scan_hands_the_exclusions_to_virustotal(monkeypatch: pytest.Monkey
     )
 
     assert passed == [["*.internal.example.com"]]
+
+
+def test_a_takeover_check_that_ran_is_recorded(seen: Recorder, monkeypatch: pytest.MonkeyPatch) -> None:
+    async def clean(hosts: list[str], **kw: object) -> object:
+        return [], []
+
+    monkeypatch.setattr(takeover, "scan", clean)
+    result = PipelineResult(records=[_host()])
+
+    steps.check_takeover(result, seen)
+
+    assert result.checks == ["takeover"]
+
+
+def test_a_takeover_check_dns_never_answered_is_not_recorded(seen: Recorder, monkeypatch: pytest.MonkeyPatch) -> None:
+    async def unreachable(hosts: list[str], **kw: object) -> object:
+        return [], [takeover.SKIPPED]
+
+    monkeypatch.setattr(takeover, "scan", unreachable)
+    result = PipelineResult(records=[_host()])
+
+    steps.check_takeover(result, seen)
+
+    assert result.checks == []
+
+
+def test_a_rejected_virustotal_key_keeps_what_was_found_and_says_why(
+    seen: Recorder, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def rejected(targets: list[str], api_key: str, limit: int = 20, **kw: object) -> list[vt.Reputation]:
+        raise vt.VtAborted("VirusTotal rejected the API key (401/403)",
+                           partial=[vt.Reputation(target="a.example.com", kind="domain", found=True)])
+
+    monkeypatch.setattr(vt, "enrichment_targets", lambda records: ["a.example.com", "b.example.com"])
+    monkeypatch.setattr(vt, "enrich", rejected)
+    result = PipelineResult(records=[_host()])
+
+    steps.enrich_vt(result, "key", 20, seen)
+
+    assert [record.tool for record in result.records[1:]] == ["virustotal"]
+    assert seen.notes == [Note("warn", "VirusTotal stopped: VirusTotal rejected the API key (401/403)")]
+    assert seen.steps[-1].summary == VtSummary(looked_up=1, flagged=0)

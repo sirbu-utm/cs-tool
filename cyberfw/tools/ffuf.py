@@ -36,7 +36,8 @@ class FfufTool(BaseTool):
                 "Ffuf needs a wordlist and the bundled default was not found. "
                 "Pass one with --wordlist <path> (or set `wordlist:` in config.local.yaml)."
             )
-        if not Path(wordlist).expanduser().is_file():
+        wordlist = str(Path(wordlist).expanduser())  # ffuf gets no shell to expand ~
+        if not Path(wordlist).is_file():
             raise ToolNotFoundError(f"Ffuf wordlist not found: {wordlist}")
         base = targets[0]
         if not base.startswith(("http://", "https://")):

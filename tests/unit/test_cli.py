@@ -3338,5 +3338,27 @@ class TestPipelineErrors:
 
         res = runner.invoke(app, ["pipeline", "recon-to-vuln", "-t", "example.com", "--session", "w", "--no-mail"])
 
-        assert res.exit_code == 0
-        assert res.stdout.rstrip().endswith("report failed: cannot write report.json: [denied]")
+        # A scheduled `--alert` run must not read as "nothing new" when its report is lost.
+        assert res.exit_code == 1
+        assert "report failed: cannot write report.json: [denied]" in res.stdout
+
+
+class TestReviewFindings:
+    """What a broken config file and a target given with a list do."""
+
+    def test_a_broken_config_file_stops_every_command(self, tmp_path: Path) -> None:
+        (tmp_path / "config.local.yaml").write_text("exclude: ['*.gov'\nrate_limit: 5\n", encoding="utf-8")
+
+        result = runner.invoke(app, ["status"])
+
+        assert result.exit_code == 2
+        assert "config.local.yaml" in result.stdout
+
+    def test_run_with_a_target_and_a_list_says_it_scans_both(self, tmp_path: Path) -> None:
+        hosts = tmp_path / "hosts.txt"
+        hosts.write_text("a.example.com\n", encoding="utf-8")
+
+        result = runner.invoke(app, ["run", "subfinder", "-t", "extra.example.com", "-l", str(hosts), "--no-save"])
+
+        assert result.exit_code == 0, result.stdout
+        assert "extra.example.com + 1 host(s)" in " ".join(result.stdout.split())

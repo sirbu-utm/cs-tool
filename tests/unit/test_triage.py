@@ -138,3 +138,13 @@ def test_new_rule_id_increments() -> None:
     assert triage.new_rule_id([]) == "m1"
     assert triage.new_rule_id([triage.Rule(id="m1", template="a"), triage.Rule(id="m3", template="b")]) == "m4"
     assert triage.new_rule_id([triage.Rule(id="custom", template="a")]) == "m1"  # non-m ids ignored
+
+
+
+@pytest.mark.parametrize("expires", ["01.12.2026", "2026-13-01", "soon"])
+def test_an_expiry_that_is_no_date_is_an_error_not_a_mute_for_ever(tmp_path: Path, expires: str) -> None:
+    path = tmp_path / "triage.yaml"
+    path.write_text(f"mutes:\n  - id: m1\n    template: xss\n    expires: '{expires}'\n", encoding="utf-8")
+
+    with pytest.raises(triage.TriageError, match="m1.*expires"):
+        triage.load_rules(path)

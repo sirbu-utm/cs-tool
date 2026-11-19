@@ -285,3 +285,22 @@ def test_a_planned_stage_shows_its_own_options_and_the_stage_it_reads(
         (), (("rate", "50"),), (("severity", "high"), ("tags", "cve"), ("max", "10")),
     ]
     assert plan.ready and plan.warnings == ("subfinder works best with x",)
+
+
+
+@pytest.mark.parametrize(("flag", "warned"), [(None, False), (True, True)])
+def test_a_yaml_pipeline_warns_only_about_options_the_user_gave(
+    settings: Settings, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
+    flag: bool | None, warned: bool,
+) -> None:
+    (settings.pipelines_dir).mkdir(exist_ok=True)
+    (settings.pipelines_dir / "hosts.yaml").write_text("nodes:\n  - {tool: subfinder, stage: hosts}\n", encoding="utf-8")
+    monkeypatch.setattr(scan, "resolve_gowitness", lambda flag, manager, tools_dir: True if flag is None else flag)
+    manager = open_manager(settings)
+    try:
+        with caplog.at_level("WARNING"):
+            scan.prepare_pipeline("hosts", "example.com", settings=settings, manager=manager, gowitness=flag)
+    finally:
+        manager.close()
+
+    assert ("ignoring" in caplog.text) is warned

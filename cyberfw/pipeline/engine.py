@@ -136,6 +136,9 @@ class PipelineResult:
     #: Wall-clock bounds of :meth:`PipelineEngine.run` (UTC); ``None`` until it ran.
     started_at: datetime | None = None
     finished_at: datetime | None = None
+    #: The checks after the scan that ran to the end (``takeover``): they leave no record
+    #: when they find nothing, so the comparison needs to be told they ran.
+    checks: list[str] = field(default_factory=list)
 
     def succeeded(self) -> bool:
         return bool(self.nodes) and all(n.ok for n in self.nodes)
@@ -164,6 +167,7 @@ class PipelineEngine:
         context: SessionContext | None = None,
         *,
         report_missing_deps: bool = True,
+        output_dir: Path | None = None,
     ) -> None:
         self.settings = settings
         self.tool_manager = tool_manager
@@ -172,6 +176,8 @@ class PipelineEngine:
         #: dependencies (the CLI's pipeline pre-flight), so the same sentence is
         #: not repeated as each stage starts — where the live region buries it.
         self.report_missing_deps = report_missing_deps
+        #: Where a tool writes files of its own when there is no session store.
+        self.output_dir = output_dir
         self._on_record: Any = None
         self._on_stderr: Any = None
         self._on_stdout_raw: Any = None
@@ -576,8 +582,9 @@ class PipelineEngine:
         return records
 
     def _output_dir(self) -> Path | None:
-        """Where a tool writes files of its own: the session directory, if there is one."""
-        return self.context.session_dir if self.context is not None else None
+        """Where a tool writes files of its own: the session directory, if there is one,
+        else the directory the engine was given."""
+        return self.context.session_dir if self.context is not None else self.output_dir
 
     def _materialize(self, stage_id: str, inputs: list[str]) -> Path:
         """Write ``inputs`` one per line and return the file the tool's list flag should point at.

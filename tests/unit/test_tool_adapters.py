@@ -524,3 +524,16 @@ class TestExternalRequirements:
         assert HttpxTool.missing_requirement() is None
         # nmap is optional for rustscan: it loses version detection, not the scan.
         assert RustscanTool.missing_requirement() is None
+
+
+
+def test_ffuf_is_given_the_wordlist_with_its_home_expanded(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    (tmp_path / "words.txt").write_text("admin\n", encoding="utf-8")
+
+    command = _adapter("ffuf").build_cmd(  # type: ignore[attr-defined]
+        ToolContext(target="https://a.example.com", extra_input="~/words.txt")
+    )
+
+    assert command[command.index("-w") + 1] == str(tmp_path / "words.txt")

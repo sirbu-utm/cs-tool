@@ -128,3 +128,48 @@ def test_a_tool_run_ends_its_scan_with_a_one_stage_result(settings: Settings, ma
     (end,) = ends
     assert isinstance(end.summary, PipelineResult)
     assert end.summary.nodes == [ran.node] and end.summary.records == ran.records
+
+
+
+def _writes_into_its_output_dir(settings: Settings, monkeypatch: pytest.MonkeyPatch) -> None:
+    """subfinder as a tool that writes files of its own (gowitness's screenshots) where it is told."""
+    from cyberfw.tools.subfinder import SubfinderTool
+
+    script = settings.tools_dir / "writer"
+    script.write_text(
+        '#!/usr/bin/env bash\nmkdir -p "$1/screenshots"\necho png > "$1/screenshots/a.png"\n'
+        "printf '%s\\n' '{\"host\": \"a.example.com\"}'\n",
+        encoding="utf-8", newline="\n",
+    )
+    script.chmod(0o755)
+    monkeypatch.setattr(SubfinderTool, "build_cmd", lambda self, ctx: [str(script), str(ctx.output_dir)])
+
+
+@pytest.mark.parametrize("keep", [True, False])
+def test_files_a_tool_writes_go_with_the_run_kept_or_not(
+    settings: Settings, monkeypatch: pytest.MonkeyPatch, keep: bool
+) -> None:
+    from cyberfw import api
+
+    _writes_into_its_output_dir(settings, monkeypatch)
+
+    outcome = api.run_tool("subfinder", target="example.com", settings=settings, save=lambda: keep)
+
+    assert not (settings.root_dir / "screenshots").exists()
+    assert (outcome.session_dir / "screenshots" / "a.png").is_file() is keep
+    assert not keep or outcome.reports
+
+
+def test_a_target_and_a_list_are_both_scanned(settings: Settings) -> None:
+    from cyberfw import api
+
+    script = settings.tools_dir / "subfinder"
+    script.write_text(
+        '#!/usr/bin/env bash\nfor host in $(tr -d "\\r" < "$4"); do printf \'{"host": "%s"}\\n\' "$host"; done\n',
+        encoding="utf-8", newline="\n",
+    )
+    script.chmod(0o755)
+
+    outcome = api.run_tool("subfinder", target="extra.example.com", inputs=["a.example.com"], settings=settings)
+
+    assert sorted(record.target for record in outcome.result.records) == ["a.example.com", "extra.example.com"]

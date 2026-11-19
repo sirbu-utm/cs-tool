@@ -29,7 +29,7 @@ from cyberfw.pipeline.engine import (
     dependency_hint,
 )
 from cyberfw.pipeline.schemas import ToolRecord
-from cyberfw.pipelines import build
+from cyberfw.pipelines import PIPELINES, build
 from cyberfw.resources import default_wordlist
 
 
@@ -163,7 +163,11 @@ def prepare_pipeline(
         name,
         pipelines_dir=settings.pipelines_dir,
         include_ffuf=ffuf,
-        include_gowitness=resolve_gowitness(gowitness, manager, settings.tools_dir),
+        # Only the built-in pipeline has a gowitness stage to add; a YAML one is told only
+        # what the user asked for, so it warns about that alone.
+        include_gowitness=(
+            resolve_gowitness(gowitness, manager, settings.tools_dir) if name in PIPELINES else bool(gowitness)
+        ),
         max_httpx=max_httpx,
     )
     for node in nodes:

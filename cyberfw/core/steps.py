@@ -105,6 +105,8 @@ def check_takeover(result: PipelineResult, observer: RunObserver, exclude: Seque
         result.records.extend(findings)
         for note in notes:
             observer.on_note(Note("warn", f"Takeover: {note}"))
+        if takeovercheck.SKIPPED not in notes:
+            result.checks.append("takeover")
         hit = tuple(sorted({f.target.split("//", 1)[-1] for f in findings})[:3])
         summary = TakeoverSummary(checked=len(hosts), possible=len(findings), hosts=hit)
     except Exception as exc:  # noqa: BLE001 - a posture check must never fail the scan
@@ -142,9 +144,13 @@ def enrich_vt(
     summary: StepSummary | None = None
     observer.on_step(StepEvent("start", "vt", total=count))
     try:
-        reps = anyio.run(
-            functools.partial(vt.enrich, targets, api_key, limit, progress=_advance(observer, "vt", count))
-        )
+        try:
+            reps = anyio.run(
+                functools.partial(vt.enrich, targets, api_key, limit, progress=_advance(observer, "vt", count))
+            )
+        except vt.VtAborted as exc:  # a rejected key or a spent quota: keep what was found
+            reps = exc.partial
+            observer.on_note(Note("warn", f"VirusTotal stopped: {exc}"))
         for index, rep in enumerate(reps, 1):
             result.records.append(validate_record("virustotal", json.dumps(rep.as_record()), index))
         summary = VtSummary(looked_up=len(reps), flagged=sum(1 for rep in reps if rep.flagged))

@@ -31,6 +31,7 @@ import httpx
 
 __all__ = [
     "VtError",
+    "VtAborted",
     "Reputation",
     "resolve_api_key",
     "resolve_or_prompt",
@@ -69,6 +70,15 @@ _HOSTNAME = re.compile(
 
 class VtError(RuntimeError):
     """A VirusTotal request failed (bad key, rate limit, network, bad target)."""
+
+
+class VtAborted(VtError):
+    """VirusTotal refuses every further lookup — the key was rejected or the quota is
+    spent — so asking for the rest would only wait. ``partial`` holds what was found."""
+
+    def __init__(self, message: str, *, partial: list[Reputation] | None = None) -> None:
+        super().__init__(message)
+        self.partial: list[Reputation] = list(partial or [])
 
 
 @dataclass
@@ -257,9 +267,9 @@ async def lookup(client: httpx.AsyncClient, api_key: str, target: str) -> Reputa
         return Reputation(target=target, kind=kind, found=False,
                           permalink=f"{_GUI}/{gui_kind}/{ident}")
     if resp.status_code in (401, 403):
-        raise VtError("VirusTotal rejected the API key (401/403)")
+        raise VtAborted("VirusTotal rejected the API key (401/403)")
     if resp.status_code == 429:
-        raise VtError("VirusTotal rate limit hit (429) — free tier is 4/min, 500/day")
+        raise VtAborted("VirusTotal rate limit hit (429) — free tier is 4/min, 500/day")
     if resp.status_code >= 400:
         raise VtError(f"VirusTotal returned HTTP {resp.status_code}")
     attributes = (resp.json().get("data") or {}).get("attributes") or {}
@@ -298,7 +308,8 @@ async def enrich(
 ) -> list[Reputation]:
     """Look up up to ``limit`` targets, throttled to ``per_minute`` (VT free = 4).
 
-    One target's failure (rate limit, bad response) is skipped, not fatal.
+    One target's failure (a bad response) is skipped; a rejected key or a spent quota
+    ends the lookups with :class:`VtAborted`, which carries what was found.
     ``progress(done)`` is called after each target, looked up or skipped — at
     the free tier's pace a run can take minutes, and the UI shows how far it is.
     """
@@ -312,6 +323,8 @@ async def enrich(
                 await asyncio.sleep(gap)
             try:
                 out.append(await lookup(client, api_key, target))
+            except VtAborted as exc:
+                raise VtAborted(str(exc), partial=out) from exc
             except VtError:
                 continue
             finally:

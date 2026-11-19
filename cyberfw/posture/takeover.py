@@ -35,10 +35,12 @@ from cyberfw.pipeline.schemas import PostureFinding, ToolRecord
 from cyberfw.posture.mail import DOH_PROVIDERS, DnsError
 from cyberfw.tools.targets import hostname_of
 
-__all__ = ["TOOL", "Service", "SERVICES", "candidates", "scan", "doh", "http_body"]
+__all__ = ["TOOL", "SKIPPED", "Service", "SERVICES", "candidates", "scan", "doh", "http_body"]
 
 #: ``tool`` of the findings this check emits.
 TOOL = "takeover"
+#: The note :func:`scan` returns when no DNS-over-HTTPS resolver answered at all.
+SKIPPED = "subdomain-takeover check skipped — DNS-over-HTTPS unreachable"
 _RTYPES = {"A": 1, "CNAME": 5}
 _MAX_HOSTS = 300
 _MAX_CONCURRENCY = 10
@@ -267,5 +269,5 @@ async def scan(
             await client.aclose()
     hits = [r for r in results if isinstance(r, _Hit)]
     if not hits and any(isinstance(r, DnsError) for r in results):
-        notes.append("subdomain-takeover check skipped — DNS-over-HTTPS unreachable")
+        notes.append(SKIPPED)
     return [_finding(hit) for hit in hits], notes

@@ -275,6 +275,10 @@ def coverage(doc: dict[str, Any]) -> set[str]:
         tools.add("mailcheck")
     if any(r.get("tool") == "virustotal" for r in records):
         tools.add("virustotal")
+    # A check that finds nothing leaves no record: the report lists the ones that ran.
+    checks = doc.get("checks")
+    if isinstance(checks, list):
+        tools.update(str(check) for check in checks)
     return tools
 
 

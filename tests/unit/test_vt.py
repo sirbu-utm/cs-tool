@@ -153,7 +153,7 @@ async def test_enrich_respects_limit_and_skips_failures() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         calls.append(str(request.url))
         if "bad.com" in str(request.url):
-            return httpx.Response(401)
+            return httpx.Response(500)
         return httpx.Response(200, json={"data": {"attributes": {"last_analysis_stats": {"malicious": 1}}}})
 
     client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
@@ -161,13 +161,13 @@ async def test_enrich_respects_limit_and_skips_failures() -> None:
     await client.aclose()
 
     assert len(calls) == 3  # limit honoured (d.com not reached)
-    assert [r.target for r in reps] == ["a.com", "c.com"]  # bad.com (401) skipped
+    assert [r.target for r in reps] == ["a.com", "c.com"]  # bad.com (500) skipped
 
 
 async def test_enrich_reports_progress_for_every_target_even_a_failed_one() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         if "bad.com" in str(request.url):
-            return httpx.Response(401)
+            return httpx.Response(500)
         return httpx.Response(200, json={"data": {"attributes": {"last_analysis_stats": {}}}})
 
     seen: list[int] = []
@@ -175,3 +175,29 @@ async def test_enrich_reports_progress_for_every_target_even_a_failed_one() -> N
     await vt.enrich(["a.com", "bad.com", "c.com"], "k", per_minute=6000, client=client, progress=seen.append)
     await client.aclose()
     assert seen == [1, 2, 3]
+
+
+
+async def test_a_rejected_key_stops_the_lookups_at_once() -> None:
+    calls: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(str(request.url))
+        return httpx.Response(401)
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    with pytest.raises(vt.VtAborted, match="rejected the API key") as stopped:
+        await vt.enrich(["a.example.com", "b.example.com", "c.example.com"], "k", per_minute=60_000, client=client)
+
+    assert len(calls) == 1
+    assert stopped.value.partial == []
+
+
+async def test_a_spent_quota_stops_and_keeps_what_was_looked_up() -> None:
+    answers = iter([httpx.Response(200, json={"data": {"attributes": {}}}), httpx.Response(429)])
+    client = httpx.AsyncClient(transport=httpx.MockTransport(lambda request: next(answers)))
+
+    with pytest.raises(vt.VtAborted, match="429") as stopped:
+        await vt.enrich(["a.example.com", "b.example.com", "c.example.com"], "k", per_minute=60_000, client=client)
+
+    assert [rep.target for rep in stopped.value.partial] == ["a.example.com"]

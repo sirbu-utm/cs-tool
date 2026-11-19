@@ -8,6 +8,7 @@ from pathlib import Path
 
 import typer
 from rich.console import Console, ConsoleOptions, Group, RenderableType, RenderResult
+from rich.markup import escape
 from rich.table import Table
 from rich.text import Text
 
@@ -28,6 +29,7 @@ from cyberfw.cli.views import _origin_width, _tool_rows, _ToolRow, _tools_table
 from cyberfw.config import Settings, load_settings
 from cyberfw.core.workspace import tool_state
 from cyberfw.exceptions import (
+    ConfigError,
     RegistryError,
 )
 from cyberfw.hud import (
@@ -53,6 +55,11 @@ from cyberfw.ui import (
 def app_callback(ctx: typer.Context) -> None:
     """Open the interactive launcher when no subcommand was supplied."""
     ensure_utf8_stdio()
+    try:
+        load_settings()  # a config file cyberfw cannot use stops every command, said once
+    except ConfigError as exc:
+        console.print(f"[err]{escape(str(exc))}[/err]")
+        raise typer.Exit(2) from exc
     if ctx.invoked_subcommand is None:
         interactive_menu()
 

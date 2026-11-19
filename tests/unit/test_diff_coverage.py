@@ -100,3 +100,46 @@ def test_incomplete_tool_does_not_remove_independent_post_scan_coverage() -> Non
     ]
 
     assert coverage(report) == {"mailcheck", "virustotal"}
+
+
+# -- the takeover check: no stage, no record when it finds nothing ---------------------
+def _host(name: str = "blog.example.com") -> dict[str, Any]:
+    return {"tool": "subfinder", "kind": "host", "target": name, "host": name}
+
+
+def _takeover() -> dict[str, Any]:
+    return {
+        "tool": "takeover", "kind": "vuln", "target": "https://blog.example.com",
+        "template_id": "subdomain-takeover", "matched_at": "https://blog.example.com",
+        "info": {"name": "Subdomain takeover possible", "severity": "high"},
+    }
+
+
+def test_a_new_takeover_finding_is_news_when_the_check_ran_both_times() -> None:
+    stages = [_stage("subdomains", tool="subfinder")]
+    old = {"stages": stages, "checks": ["takeover"], "records": [_host()]}
+    new = {"stages": stages, "checks": ["takeover"], "records": [_host(), _takeover()]}
+
+    changes = compare(old, new)
+
+    assert [(c.area, c.status, c.severity) for c in changes.changes] == [("finding", "added", "high")]
+    assert changes.new_findings_at_least("high") == 1
+
+
+def test_a_run_without_a_record_of_the_check_leaves_takeover_uncompared() -> None:
+    stages = [_stage("subdomains", tool="subfinder")]
+    old = {"stages": stages, "records": [_host()]}  # a report from before checks were recorded
+    new = {"stages": stages, "checks": ["takeover"], "records": [_host(), _takeover()]}
+
+    changes = compare(old, new)
+
+    assert changes.changes == []
+    assert any("takeover" in note for note in changes.not_compared)
+
+
+def test_report_json_lists_the_checks_that_ran() -> None:
+    from cyberfw.pipeline.engine import PipelineResult
+    from cyberfw.report.json_report import report_payload
+
+    assert report_payload(PipelineResult(checks=["takeover"]))["checks"] == ["takeover"]
+    assert "takeover" in coverage(report_payload(PipelineResult(checks=["takeover"])))

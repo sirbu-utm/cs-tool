@@ -384,8 +384,11 @@ def run_tool(
         tool, settings=settings, manager=manager, target=target, inputs=inputs or (), wordlist=wordlist,
         parse=parse, session=run_session, observer=relay,
     )
-    keep = save if isinstance(save, bool) else bool(ran.records) and save()
-    reports = keep_tool_run(ran, settings=settings, manager=manager) if keep else {}
+    try:
+        keep = save if isinstance(save, bool) else bool(ran.records) and save()
+        reports = keep_tool_run(ran, settings=settings, manager=manager) if keep else {}
+    finally:
+        ran.drop_scratch()
     return RunOutcome(
         result=ran.result,
         run=run_info(manager, name=tool, seed=target, session_id=run_session.id, tools={tool}),

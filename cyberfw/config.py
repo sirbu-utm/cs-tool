@@ -7,6 +7,7 @@ source of truth for the whole framework.
 
 from __future__ import annotations
 
+import difflib
 import logging
 import os
 from pathlib import Path
@@ -16,6 +17,7 @@ import yaml
 from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from cyberfw.exceptions import ConfigError
 from cyberfw.resources import user_data_dir, workspace_root
 
 __all__ = ["Settings", "load_settings"]
@@ -160,6 +162,26 @@ class Settings(BaseSettings):
             getattr(self, name).mkdir(parents=True, exist_ok=True)
 
 
+def _read_config_file(path: Path) -> dict[str, Any]:
+    """``config.local.yaml``'s settings. Raises :class:`ConfigError` for a file that is
+    no YAML mapping, or that names a setting there is none of: a scan must never run
+    without the scope or the limits the user wrote down."""
+    try:
+        loaded = yaml.safe_load(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, yaml.YAMLError) as exc:
+        raise ConfigError(f"{path}: cannot be read as YAML: {exc}") from exc
+    if loaded is None:
+        return {}
+    if not isinstance(loaded, dict):
+        raise ConfigError(f"{path}: expected a mapping of settings (key: value)")
+    for key in loaded:
+        if key not in Settings.model_fields:
+            close = difflib.get_close_matches(str(key), list(Settings.model_fields), n=1)
+            hint = f" — did you mean {close[0]!r}?" if close else ""
+            raise ConfigError(f"{path}: unknown setting {key!r}{hint}")
+    return {str(key): value for key, value in loaded.items()}
+
+
 def load_settings(root_dir: Path | None = None, local_file: Path | None = None) -> Settings:
     """Build settings, merging an optional ``config.local.yaml`` override.
 
@@ -175,22 +197,10 @@ def load_settings(root_dir: Path | None = None, local_file: Path | None = None) 
     env_root = os.environ.get("CYBERFW_ROOT_DIR")
     cwd = root_dir or (Path(env_root) if env_root else None) or workspace_root() or user_data_dir()
     candidate = local_file or cwd / "config.local.yaml"
-    if candidate.exists():
-        try:
-            loaded = yaml.safe_load(candidate.read_text(encoding="utf-8"))
-            if isinstance(loaded, dict):
-                raw = loaded
-            else:
-                raw = {}
-        except yaml.YAMLError:  # pragma: no cover - defensive
-            raw = {}
-    else:
-        raw = {}
+    raw = _read_config_file(candidate) if candidate.exists() else {}
     # Environment beats YAML; YAML beats file defaults.
     patches: dict[str, Any] = {}
     for key, value in raw.items():
-        if key not in Settings.model_fields:
-            continue
         if f"CYBERFW_{key.upper()}" in os.environ:
             continue
         patches[key] = value

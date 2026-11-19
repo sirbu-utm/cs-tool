@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import shutil
+import tempfile
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -42,6 +44,14 @@ class ToolRun:
     started_at: datetime
     finished_at: datetime
     session: Session
+    #: Where the tool wrote files of its own when the run had no session store yet;
+    #: they move into the session when it is kept (:func:`keep_tool_run`).
+    scratch: Path | None = None
+
+    def drop_scratch(self) -> None:
+        """Remove what is left of the scratch directory."""
+        if self.scratch is not None:
+            shutil.rmtree(self.scratch, ignore_errors=True)
 
     @property
     def result(self) -> PipelineResult:
@@ -77,21 +87,29 @@ def run_tool_once(
     is a raw record. The run is a ``scan`` step, timed around the process; the
     manager is closed afterwards, and the session's store if records streamed.
     """
-    engine = PipelineEngine(settings, manager, context=session.context)
+    # A tool writes files of its own (gowitness's screenshots) into the session; a run
+    # not yet kept has none on disk, so they wait in a scratch directory.
+    scratch = None if session.context is not None else Path(tempfile.mkdtemp(prefix="cyberfw-run-"))
+    engine = PipelineEngine(settings, manager, context=session.context, output_dir=scratch)
     wire_observer(engine, observer)
+    # A target and a list are both scanned: the engine reads a list in place of a target.
+    hosts = [target, *inputs] if target and inputs else list(inputs)
     ctx = ToolContext(
-        target=target, inputs=list(inputs), extra_input=wordlist or settings.wordlist, controls=engine._controls()
+        target=None if target and inputs else target, inputs=hosts,
+        extra_input=wordlist or settings.wordlist, controls=engine._controls(),
     )
     started_at = datetime.now(timezone.utc)
     observer.on_step(StepEvent("start", "scan"))
     try:
         node, records = anyio.run(_run_single, engine, ctx, tool, parse)
     except BaseException:
+        if scratch is not None:
+            shutil.rmtree(scratch, ignore_errors=True)
         end_scan(manager, observer, None)
         raise
     ran = ToolRun(
         tool=tool, target=target, node=node, records=records, started_at=started_at,
-        finished_at=datetime.now(timezone.utc), session=session,
+        finished_at=datetime.now(timezone.utc), session=session, scratch=scratch,
     )
     end_scan(manager, observer, ran.result)
     if session.context is not None:
@@ -106,5 +124,8 @@ def keep_tool_run(run: ToolRun, *, settings: Settings, manager: ToolManager) -> 
         with SessionContext(settings.reports_dir, run.session.id) as store:
             for record in run.records:
                 store.append(run.tool, record)
+    if run.scratch is not None and run.scratch.is_dir():
+        for item in run.scratch.iterdir():
+            shutil.move(str(item), str(run.session.dir / item.name))
     info = run_info(manager, name=run.tool, seed=run.target, session_id=run.session.id, tools={run.tool})
     return write_reports(run.result, session_id=run.session.id, settings=settings, run=info)
